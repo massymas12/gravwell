@@ -39,19 +39,19 @@ On **Windows x64** and **macOS** the `sqlcipher3` wheel bundles the native libra
 ### With `uv` (recommended)
 
 ```bash
-uv tool install git+https://github.com/you/gravwell.git
+uv tool install git+https://github.com/massymas12/gravwell.git
 ```
 
 ### With `pip`
 
 ```bash
-pip install git+https://github.com/you/gravwell.git
+pip install git+https://github.com/massymas12/gravwell.git
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/you/gravwell.git
+git clone https://github.com/massymas12/gravwell.git
 cd gravwell
 pip install .
 ```

@@ -13,7 +13,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
 - **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
 - **CVE enrichment** — CISA KEV + FIRST.org EPSS exploit probability signals fetched on demand
-- **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover, Export) and per-project access control; all managed from the web UI
+- **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover) and per-project access control; all managed from the web UI
 - **Multi-project** — separate encrypted databases per engagement; create, rename, and delete from the sidebar
 - **Active discovery** — ping sweep, ARP, TCP port scan, SNMP enumeration
 - **CLI + Web UI** — full-featured CLI for scripted workflows, browser-based UI for analysis
@@ -179,7 +179,6 @@ Every user has a **Role** and a set of **Permissions**, configured at creation t
 | **Edit** | Modify host properties, tags, notes, and node layout |
 | **Import** | Upload and ingest scan files |
 | **Discover** | Run active network discovery (ping, ARP, TCP, SNMP) |
-| **Export** | Export reports and data |
 
 **Project access** can be set to *All projects* (including future ones) or restricted to a named list of specific projects. Non-admin users only see projects they are allowed to access in the sidebar dropdown.
 

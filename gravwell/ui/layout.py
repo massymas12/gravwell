@@ -260,7 +260,6 @@ def _create_add_user_modal() -> html.Div:
                                 {"label": " Edit node data",       "value": "edit"},
                                 {"label": " Import scan files",    "value": "import"},
                                 {"label": " Run active discovery", "value": "discover"},
-                                {"label": " Export / reports",     "value": "export"},
                             ],
                             value=["edit", "import"],
                             style={"fontSize": "12px", "display": "flex",

@@ -25,7 +25,7 @@ from gravwell.database import init_db
 login_manager = LoginManager()
 
 
-_ALL_PERMISSIONS = ["edit", "import", "discover", "export"]
+_ALL_PERMISSIONS = ["edit", "import", "discover"]
 
 
 class _User(UserMixin):

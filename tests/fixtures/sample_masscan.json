@@ -1,0 +1,11 @@
+[
+{"ip": "192.168.1.20", "timestamp": "1700000100", "ports": [
+    {"port": 80, "proto": "tcp", "status": "open", "service": {"name": "http"}},
+    {"port": 443, "proto": "tcp", "status": "open", "service": {"name": "https"}},
+    {"port": 8080, "proto": "tcp", "status": "open", "service": {"name": "http-proxy"}}
+]},
+{"ip": "10.0.0.50", "timestamp": "1700000110", "ports": [
+    {"port": 22, "proto": "tcp", "status": "open", "service": {"name": "ssh"}},
+    {"port": 3306, "proto": "tcp", "status": "open", "service": {"name": "mysql"}}
+]}
+]

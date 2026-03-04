@@ -1,0 +1,53 @@
+{
+  "target": {
+    "host": "10.0.0.10",
+    "workgroup": "CONTOSO"
+  },
+  "credentials": {
+    "user": "",
+    "password": ""
+  },
+  "smb": {
+    "os": "Windows Server 2016 Standard",
+    "smb1_only": false,
+    "smb_signing": false,
+    "domain_name": "CONTOSO",
+    "server_name": "WIN-DC01",
+    "port_used": 445
+  },
+  "ldap": {
+    "domain": "contoso.local",
+    "forest": "contoso.local",
+    "dc": "dc01.contoso.local"
+  },
+  "users": {
+    "via_rpc_querydispinfo": [
+      {"username": "Administrator", "name": "Administrator", "rid": 500},
+      {"username": "Guest", "name": "", "rid": 501},
+      {"username": "alice", "name": "Alice Johnson", "rid": 1103},
+      {"username": "bob.smith", "name": "Bob Smith", "rid": 1104}
+    ],
+    "via_rpc_enumdomusers": [
+      {"username": "Administrator", "rid": 500},
+      {"username": "Guest", "rid": 501},
+      {"username": "alice", "rid": 1103},
+      {"username": "bob.smith", "rid": 1104}
+    ]
+  },
+  "shares": {
+    "via_rpc_netshareenumall": [
+      {"name": "ADMIN$",   "type": "Disk", "comment": "Remote Admin"},
+      {"name": "C$",       "type": "Disk", "comment": "Default share"},
+      {"name": "IPC$",     "type": "IPC",  "comment": "Remote IPC"},
+      {"name": "SYSVOL",   "type": "Disk", "comment": "Logon server share"},
+      {"name": "NETLOGON", "type": "Disk", "comment": "Logon server share"},
+      {"name": "IT_Tools", "type": "Disk", "comment": "IT department tools"},
+      {"name": "Finance",  "type": "Disk", "comment": "Finance documents"}
+    ]
+  },
+  "password_policy": {
+    "min_pw_length": 8,
+    "pw_history_length": 24,
+    "lockout_threshold": 5
+  }
+}

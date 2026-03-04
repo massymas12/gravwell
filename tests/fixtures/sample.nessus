@@ -1,0 +1,53 @@
+<?xml version="1.0" ?>
+<NessusClientData_v2>
+  <Report name="Sample Scan">
+    <ReportHost name="192.168.1.10">
+      <HostProperties>
+        <tag name="host-ip">192.168.1.10</tag>
+        <tag name="host-fqdn">winserver.local</tag>
+        <tag name="operating-system">Windows Server 2019</tag>
+        <tag name="mac-address">AA:BB:CC:DD:EE:FF</tag>
+      </HostProperties>
+      <ReportItem port="445" svc_name="smb" protocol="tcp" severity="4"
+                  pluginID="70658" pluginName="MS17-010: EternalBlue SMB RCE"
+                  pluginFamily="Windows">
+        <cvss3_base_score>9.8</cvss3_base_score>
+        <cve>CVE-2017-0143</cve>
+        <cve>CVE-2017-0144</cve>
+        <description>The remote Windows host is affected by the following vulnerabilities:
+- CVE-2017-0143: RCE via SMBv1 transaction handling (EternalBlue)
+- CVE-2017-0144: RCE via SMBv1 transaction handling</description>
+        <solution>Apply Microsoft Security Bulletin MS17-010.</solution>
+      </ReportItem>
+      <ReportItem port="3389" svc_name="rdp" protocol="tcp" severity="3"
+                  pluginID="58453" pluginName="BlueKeep RDP Vulnerability"
+                  pluginFamily="Windows">
+        <cvss3_base_score>9.8</cvss3_base_score>
+        <cve>CVE-2019-0708</cve>
+        <description>The remote host is running a version of Remote Desktop Services
+that is affected by a remote code execution vulnerability.</description>
+        <solution>Apply the appropriate patch from Microsoft.</solution>
+      </ReportItem>
+      <ReportItem port="445" svc_name="smb" protocol="tcp" severity="2"
+                  pluginID="57608" pluginName="SMB Signing Disabled"
+                  pluginFamily="Windows">
+        <cvss3_base_score>5.9</cvss3_base_score>
+        <description>Signing is disabled on the remote SMB server.</description>
+        <solution>Enable SMB signing on the remote host.</solution>
+      </ReportItem>
+    </ReportHost>
+    <ReportHost name="192.168.1.1">
+      <HostProperties>
+        <tag name="host-ip">192.168.1.1</tag>
+        <tag name="operating-system">Linux 5.4</tag>
+      </HostProperties>
+      <ReportItem port="22" svc_name="ssh" protocol="tcp" severity="1"
+                  pluginID="10881" pluginName="SSH Protocol Version 1 Enabled"
+                  pluginFamily="General">
+        <cvss3_base_score>2.6</cvss3_base_score>
+        <description>The remote SSH daemon supports connections using SSHv1.</description>
+        <solution>Disable SSH protocol version 1.</solution>
+      </ReportItem>
+    </ReportHost>
+  </Report>
+</NessusClientData_v2>

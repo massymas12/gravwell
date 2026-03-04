@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gravwell"
+version = "0.1.0"
+description = "GravWell — Network mapping and attack path analysis tool for penetration testing"
+requires-python = ">=3.11"
+dependencies = [
+    "networkx>=3.2",
+    "sqlalchemy>=2.0",
+    "dash>=2.14",
+    "dash-cytoscape>=0.3",
+    "plotly>=5.18",
+    "click>=8.1",
+    "rich>=13.7",
+    "python-dateutil>=2.8",
+    "ijson>=3.2",
+    "flask-login>=0.6.2",
+    "sqlcipher3>=0.5.0",
+    "cryptography>=41.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+gravwell = "gravwell.cli.commands:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gravwell*"]

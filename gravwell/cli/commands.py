@@ -400,7 +400,11 @@ def serve(ctx, port, host_addr, debug):
     console.print(f"Database: [dim]{db_path}[/dim]")
     from gravwell.ui.app import create_app
     app = create_app(db_path)
-    app.run(host=host_addr, port=port, debug=debug)
+    if debug:
+        app.run(host=host_addr, port=port, debug=True)
+    else:
+        from waitress import serve as _serve
+        _serve(app.server, host=host_addr, port=port, threads=8)
 
 
 @cli.command("merge-macs")

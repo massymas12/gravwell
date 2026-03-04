@@ -298,9 +298,9 @@ _CY_GLOBAL_JS = """
     return null;
   }
 
-  /* ── Right-click context menu ── */
+  /* ── Add-node context menu (canvas right-click) ── */
   var _ctxMenu = null;
-  var _lastCy   = null;
+  var _lastCy  = null;
 
   function showContextMenu(clientX, clientY) {
     if (!_ctxMenu) {
@@ -322,8 +322,6 @@ _CY_GLOBAL_JS = """
           var setter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value');
           if (setter && setter.set) {
-            /* Include a timestamp so the value always changes,
-               even when the same canvas position is right-clicked twice. */
             var payload = Object.assign({}, window._gravwell_add_pos,
                                         { _t: Date.now() });
             setter.set.call(inp, JSON.stringify(payload));
@@ -335,28 +333,69 @@ _CY_GLOBAL_JS = """
       document.body.appendChild(_ctxMenu);
     }
     _ctxMenu.style.display = 'block';
-    /* Clamp so the menu never extends off-screen */
     var mw = 160, mh = 36;
     _ctxMenu.style.left = Math.min(clientX, window.innerWidth  - mw) + 'px';
     _ctxMenu.style.top  = Math.min(clientY, window.innerHeight - mh) + 'px';
   }
 
-  document.addEventListener('click',   function() {
-    if (_ctxMenu) _ctxMenu.style.display = 'none';
+  /* ── Delete-node context menu (host node right-click) ── */
+  var _delMenu = null;
+
+  function showDeleteMenu(clientX, clientY, ip) {
+    if (!_delMenu) {
+      _delMenu = document.createElement('div');
+      _delMenu.style.cssText =
+        'position:fixed;background:#1e1e1e;border:1px solid #555;border-radius:4px;' +
+        'padding:4px 0;z-index:9999;display:none;min-width:155px;' +
+        'box-shadow:0 4px 14px rgba(0,0,0,0.6);font-family:Segoe UI,monospace;';
+      document.body.appendChild(_delMenu);
+    }
+    /* Rebuild the single item with the current IP */
+    _delMenu.innerHTML = '';
+    var item = document.createElement('div');
+    item.style.cssText =
+      'padding:7px 14px;font-size:12px;cursor:pointer;color:#E74C3C;';
+    item.textContent = 'Delete ' + ip;
+    item.onmouseover = function() { item.style.background = '#2d2d2d'; };
+    item.onmouseout  = function() { item.style.background = ''; };
+    item.onclick = function() {
+      _delMenu.style.display = 'none';
+      if (!confirm('Delete host ' + ip + ' and all its data?\\n\\nThis cannot be undone.')) return;
+      var inp = document.getElementById('_delete-node-js-trigger');
+      if (inp) {
+        var setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value');
+        if (setter && setter.set) {
+          setter.set.call(inp, JSON.stringify({ ip: ip, _t: Date.now() }));
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+    };
+    _delMenu.appendChild(item);
+    _delMenu.style.display = 'block';
+    var mw = 160, mh = 36;
+    _delMenu.style.left = Math.min(clientX, window.innerWidth  - mw) + 'px';
+    _delMenu.style.top  = Math.min(clientY, window.innerHeight - mh) + 'px';
+  }
+
+  document.addEventListener('click', function() {
+    if (_ctxMenu)  _ctxMenu.style.display  = 'none';
+    if (_delMenu)  _delMenu.style.display   = 'none';
   }, false);
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && _ctxMenu) _ctxMenu.style.display = 'none';
+    if (e.key !== 'Escape') return;
+    if (_ctxMenu) _ctxMenu.style.display = 'none';
+    if (_delMenu) _delMenu.style.display  = 'none';
   }, false);
 
   setInterval(function () {
     var cy = findCy();
     if (cy) {
-      /* Attach the cxttap handler once per cy instance */
       if (cy !== _lastCy) {
         _lastCy = cy;
         cy.on('cxttap', function(evt) {
-          /* Only show menu on empty canvas — not on nodes or edges */
           if (evt.target === cy) {
+            /* Empty canvas right-click → Add Node */
             window._gravwell_add_pos = {
               x: Math.round(evt.position.x),
               y: Math.round(evt.position.y),
@@ -364,6 +403,16 @@ _CY_GLOBAL_JS = """
             showContextMenu(
               evt.originalEvent.clientX,
               evt.originalEvent.clientY
+            );
+          } else if (evt.target !== cy && evt.target.isNode &&
+                     evt.target.isNode() &&
+                     evt.target.data('node_type') === 'host') {
+            /* Host node right-click → Delete Node */
+            if (_ctxMenu) _ctxMenu.style.display = 'none';
+            showDeleteMenu(
+              evt.originalEvent.clientX,
+              evt.originalEvent.clientY,
+              evt.target.data('ip')
             );
           }
         });

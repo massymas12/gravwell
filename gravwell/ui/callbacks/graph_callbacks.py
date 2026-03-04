@@ -100,12 +100,23 @@ def register(app: dash.Dash) -> None:
             if attrs.get("node_type") != "host":
                 continue
 
-            # ── Hostname / IP filter (substring or wildcard) ───────────────
+            # ── Hostname / IP filter ──────────────────────────────────────
+            # "quoted" → exact match; unquoted → substring; */?  → wildcard
             if hostname:
-                pat = hostname.lower()
+                raw = hostname.strip()
+                exact_match = (
+                    (raw.startswith('"') and raw.endswith('"') and len(raw) > 1) or
+                    (raw.startswith("'") and raw.endswith("'") and len(raw) > 1)
+                )
+                if exact_match:
+                    pat = raw[1:-1].lower()
+                else:
+                    pat = raw.lower()
                 host_names = [h.lower() for h in (attrs.get("hostnames") or [])]
                 ip_str = attrs.get("ip", "")
-                if "*" in pat or "?" in pat:
+                if exact_match:
+                    match = pat in host_names or pat == ip_str
+                elif "*" in pat or "?" in pat:
                     match = (any(fnmatch.fnmatch(h, pat) for h in host_names)
                              or fnmatch.fnmatch(ip_str, pat))
                 else:
@@ -323,7 +334,7 @@ def register(app: dash.Dash) -> None:
         with get_session(db_path) as session:
             host = session.query(HostORM).filter_by(ip=ip).first()
             if not host:
-                return f"Host {ip} not found."
+                return f"Host {ip} not found.", {"display": "none"}, ""
 
             svcs = session.query(ServiceORM).filter_by(
                 host_id=host.id, state="open"
@@ -471,35 +482,41 @@ def register(app: dash.Dash) -> None:
         return {"ip": ip}, {"ip": ip}
 
     # Clientside callback: when node-focus-store changes, pan the Cytoscape graph
-    # to centre on the target node using its pre-computed position in graph-data-store.
+    # to centre on the target node.  Tries the live cy instance first (accurate for
+    # any layout), then falls back to pre-stored positions in graph-data-store.
     dash.clientside_callback(
         """
         function(focusData, graphData) {
-            if (!focusData || !focusData.ip || !graphData || !graphData.elements) {
-                return [window.dash_clientside.no_update,
-                        window.dash_clientside.no_update];
-            }
+            var nu = window.dash_clientside.no_update;
+            if (!focusData || !focusData.ip) return [nu, nu];
             var ip = focusData.ip;
-            var elements = graphData.elements;
             var pos = null;
-            for (var i = 0; i < elements.length; i++) {
-                var el = elements[i];
-                if (el.data && el.data.id === ip && el.position) {
-                    pos = el.position;
-                    break;
+
+            /* Primary: live cy instance — works with any layout */
+            var cy = window._gravwell_cy;
+            if (cy) {
+                try {
+                    var node = cy.getElementById(ip);
+                    if (node && node.length > 0) pos = node.position();
+                } catch(e) {}
+            }
+
+            /* Fallback: stored element positions (preset layout only) */
+            if (!pos && graphData && graphData.elements) {
+                var els = graphData.elements;
+                for (var i = 0; i < els.length; i++) {
+                    var el = els[i];
+                    if (el.data && el.data.id === ip && el.position) {
+                        pos = el.position;
+                        break;
+                    }
                 }
             }
-            if (!pos) {
-                return [window.dash_clientside.no_update,
-                        window.dash_clientside.no_update];
-            }
+
+            if (!pos) return [nu, nu];
             var container = document.getElementById('network-graph');
-            if (!container) {
-                return [window.dash_clientside.no_update,
-                        window.dash_clientside.no_update];
-            }
-            var vw = container.offsetWidth  || 800;
-            var vh = container.offsetHeight || 600;
+            var vw = (container && container.offsetWidth)  || 800;
+            var vh = (container && container.offsetHeight) || 600;
             var zoom = 1.8;
             return [zoom, {x: vw/2 - pos.x * zoom, y: vh/2 - pos.y * zoom}];
         }

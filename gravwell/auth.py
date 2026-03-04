@@ -25,11 +25,27 @@ from gravwell.database import init_db
 login_manager = LoginManager()
 
 
+_ALL_PERMISSIONS = ["edit", "import", "discover", "export"]
+
+
 class _User(UserMixin):
-    def __init__(self, username: str, is_admin: bool):
-        self.id       = username  # Flask-Login ID = username
-        self.username = username
-        self.is_admin = is_admin
+    def __init__(self, username: str, is_admin: bool,
+                 permissions: list[str] | None = None,
+                 allowed_projects: list[str] | None = None):
+        self.id               = username  # Flask-Login ID = username
+        self.username         = username
+        self.is_admin         = is_admin
+        # Admins implicitly have every permission; fall back for legacy accounts
+        self.permissions      = permissions if permissions is not None else (
+            _ALL_PERMISSIONS if is_admin else ["edit", "import"]
+        )
+        self.allowed_projects = allowed_projects if allowed_projects is not None else ["*"]
+
+    def can(self, perm: str) -> bool:
+        return self.is_admin or perm in self.permissions
+
+    def can_see_project(self, project_name: str) -> bool:
+        return "*" in self.allowed_projects or project_name in self.allowed_projects
 
 
 def _load_or_create_secret(db_path: str) -> str:
@@ -57,7 +73,12 @@ def init_auth(flask_app, db_path: str) -> None:
         ks = ks_mod.load(db_path)
         user = ks_mod.find_user(ks, uid)
         if user:
-            return _User(user["username"], user.get("is_admin", False))
+            return _User(
+                user["username"],
+                user.get("is_admin", False),
+                user.get("permissions"),
+                user.get("allowed_projects"),
+            )
         return None
 
     @flask_app.route("/login", methods=["GET", "POST"])
@@ -74,7 +95,12 @@ def init_auth(flask_app, db_path: str) -> None:
                 ks_mod.touch_last_login(db_path, username)
                 ks = ks_mod.load(db_path)
                 user = ks_mod.find_user(ks, username)
-                login_user(_User(username, user.get("is_admin", False)))
+                login_user(_User(
+                    username,
+                    user.get("is_admin", False),
+                    user.get("permissions"),
+                    user.get("allowed_projects"),
+                ))
                 nxt = request.args.get("next") or "/"
                 return redirect(nxt)
             return _login_page("Invalid username or password.")

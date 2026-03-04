@@ -205,6 +205,162 @@ def _create_browse_modal() -> html.Div:
     )
 
 
+def _create_add_user_modal() -> html.Div:
+    """Modal for creating a new user (admin only)."""
+    _cl = {"color": "#ccc", "cursor": "pointer"}
+    _ci = {"marginRight": "6px", "accentColor": "#5DADE2"}
+    return html.Div(
+        id="add-user-modal-overlay",
+        style={"display": "none"},
+        className="modal-overlay",
+        children=[
+            html.Div(
+                className="edit-modal",
+                style={"width": "400px"},
+                children=[
+                    html.Div([
+                        html.H3("Add User", style={"margin": 0, "fontSize": "15px",
+                                                   "color": "#5DADE2"}),
+                        html.Button("×", id="add-user-modal-close",
+                                    className="modal-close-btn"),
+                    ], className="modal-header"),
+                    html.Div([
+                        # ── Credentials ───────────────────────────────────
+                        html.Label("Username", className="edit-label"),
+                        dcc.Input(id="add-user-username-input", type="text",
+                                  placeholder="username",
+                                  className="edit-input", debounce=False),
+                        html.Label("Password", className="edit-label"),
+                        dcc.Input(id="add-user-password-input", type="password",
+                                  placeholder="password",
+                                  className="edit-input", debounce=False),
+
+                        # ── Role ──────────────────────────────────────────
+                        html.Label("Role", className="edit-label"),
+                        dcc.Checklist(
+                            id="add-user-is-admin",
+                            options=[{"label": " Admin — can manage users and has all permissions",
+                                      "value": "admin"}],
+                            value=[],
+                            style={"fontSize": "12px", "marginBottom": "4px"},
+                            labelStyle=_cl, inputStyle=_ci,
+                        ),
+
+                        # ── Permissions ───────────────────────────────────
+                        html.Label("Permissions", className="edit-label"),
+                        html.Div(
+                            "(Inherited automatically when Admin is checked)",
+                            id="add-user-perms-note",
+                            style={"fontSize": "10px", "color": "#555",
+                                   "marginBottom": "4px", "display": "none"},
+                        ),
+                        dcc.Checklist(
+                            id="add-user-permissions",
+                            options=[
+                                {"label": " Edit node data",       "value": "edit"},
+                                {"label": " Import scan files",    "value": "import"},
+                                {"label": " Run active discovery", "value": "discover"},
+                                {"label": " Export / reports",     "value": "export"},
+                            ],
+                            value=["edit", "import"],
+                            style={"fontSize": "12px", "display": "flex",
+                                   "flexWrap": "wrap", "gap": "2px 16px",
+                                   "marginBottom": "6px"},
+                            labelStyle=_cl, inputStyle=_ci,
+                        ),
+
+                        # ── Project access ────────────────────────────────
+                        html.Label("Project Access", className="edit-label"),
+                        dcc.RadioItems(
+                            id="add-user-project-access",
+                            options=[
+                                {"label": " All projects (current and future)",
+                                 "value": "all"},
+                                {"label": " Specific projects only:",
+                                 "value": "specific"},
+                            ],
+                            value="all",
+                            style={"fontSize": "12px", "marginBottom": "4px"},
+                            labelStyle={**_cl, "display": "block",
+                                        "marginBottom": "3px"},
+                            inputStyle=_ci,
+                        ),
+                        html.Div(
+                            id="add-user-project-list-wrap",
+                            style={"display": "none", "marginLeft": "18px",
+                                   "marginBottom": "6px",
+                                   "padding": "6px 8px",
+                                   "background": "#161616",
+                                   "borderRadius": "3px",
+                                   "border": "1px solid #333"},
+                            children=[
+                                dcc.Checklist(
+                                    id="add-user-project-list",
+                                    options=[],
+                                    value=[],
+                                    style={"fontSize": "12px",
+                                           "display": "flex",
+                                           "flexDirection": "column",
+                                           "gap": "4px"},
+                                    labelStyle=_cl, inputStyle=_ci,
+                                ),
+                            ],
+                        ),
+
+                        html.Div(id="add-user-status",
+                                 style={"fontSize": "11px", "color": "#E74C3C",
+                                        "marginTop": "6px", "minHeight": "14px"}),
+                    ], className="modal-body",
+                       style={"overflowY": "auto", "maxHeight": "65vh"}),
+                    html.Div([
+                        html.Button("Create User", id="confirm-add-user-btn",
+                                    className="btn btn-primary btn-sm"),
+                        html.Button("Cancel", id="cancel-add-user-btn",
+                                    className="btn btn-secondary btn-sm"),
+                    ], className="modal-footer"),
+                ],
+            ),
+        ],
+    )
+
+
+def _create_manage_users_modal() -> html.Div:
+    """Full-screen-ish modal showing all users with RBAC details (admin only)."""
+    return html.Div(
+        id="manage-users-modal-overlay",
+        style={"display": "none"},
+        className="modal-overlay",
+        children=[
+            html.Div(
+                className="edit-modal",
+                style={"width": "760px", "maxWidth": "95vw"},
+                children=[
+                    html.Div([
+                        html.H3("Manage Users",
+                                style={"margin": 0, "fontSize": "15px",
+                                       "color": "#5DADE2"}),
+                        html.Button("×", id="manage-users-modal-close",
+                                    className="modal-close-btn"),
+                    ], className="modal-header"),
+                    html.Div(
+                        id="manage-users-content",
+                        className="modal-body",
+                        style={"overflowY": "auto", "maxHeight": "70vh",
+                               "padding": "12px 16px"},
+                    ),
+                    html.Div([
+                        html.Div(id="manage-users-status",
+                                 style={"flex": "1", "fontSize": "11px",
+                                        "color": "#5DADE2"}),
+                        html.Button("Close", id="manage-users-close-btn",
+                                    className="btn btn-secondary btn-sm"),
+                    ], className="modal-footer"),
+                ],
+            ),
+        ],
+    )
+
+
 def create_layout() -> html.Div:
     return html.Div(
         id="app-root",
@@ -221,6 +377,7 @@ def create_layout() -> html.Div:
             dcc.Store(id="browse-dir-store", data=""),
             dcc.Store(id="node-positions-store"),
             dcc.Store(id="add-node-position-store"),
+            dcc.Store(id="current-user-store"),
             # Hidden text input: JS writes graph coords here to trigger the Add Node modal.
             # Must be type="text" (not "hidden") so React attaches its onChange handler
             # and the programmatic value-setter + dispatchEvent trick works.
@@ -236,6 +393,10 @@ def create_layout() -> html.Div:
             _create_add_node_modal(),
             # File browser modal
             _create_browse_modal(),
+            # Add User modal (settings)
+            _create_add_user_modal(),
+            # Manage Users modal (settings)
+            _create_manage_users_modal(),
             # Polling interval: refresh every 60s
             dcc.Interval(id="refresh-interval", interval=60_000, n_intervals=0),
             # Fast interval used only while a file import is running
@@ -248,6 +409,37 @@ def create_layout() -> html.Div:
                 children=[
                     html.Span("GravWell", id="topbar-logo"),
                     html.Span(id="topbar-stats", className="topbar-stats"),
+                    # Hamburger menu (settings)
+                    html.Div([
+                        html.Button("☰", id="hamburger-btn",
+                                    className="hamburger-btn", n_clicks=0),
+                        html.Div(
+                            id="hamburger-menu",
+                            className="hamburger-menu",
+                            style={"display": "none"},
+                            children=[
+                                html.Div(id="hamburger-username",
+                                         className="hamburger-username"),
+                                html.Div("Add User", id="add-user-menu-item",
+                                         className="hamburger-item",
+                                         n_clicks=0,
+                                         style={"display": "none"}),
+                                html.Div("Manage Users", id="manage-users-menu-item",
+                                         className="hamburger-item",
+                                         n_clicks=0,
+                                         style={"display": "none"}),
+                                html.Hr(className="hamburger-sep"),
+                                html.A("Logout", href="/logout",
+                                       className="hamburger-item hamburger-item-danger"),
+                            ],
+                        ),
+                    ], className="hamburger-wrap"),
+                    # Invisible backdrop — clicking outside closes the menu
+                    html.Div(id="hamburger-backdrop",
+                             style={"display": "none", "position": "fixed",
+                                    "top": 0, "left": 0, "width": "100%",
+                                    "height": "100%", "zIndex": 999},
+                             n_clicks=0),
                 ],
                 className="topbar",
             ),

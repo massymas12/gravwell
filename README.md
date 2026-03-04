@@ -11,9 +11,9 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 - **Wide format support** — nmap, Nessus, Masscan, OpenVAS, Nuclei, enum4linux, CrowdStrike Falcon, Cisco IOS, Juniper JunOS, Fortinet FortiOS, Palo Alto PAN-OS (all auto-detected)
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
-- **Attack path analysis** — shortest path between any two hosts weighted by vulnerability severity
+- **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
 - **CVE enrichment** — CISA KEV + FIRST.org EPSS exploit probability signals fetched on demand
-- **Multi-user** — admin and analyst roles, each user independently unlocks the database with their own password
+- **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover, Export) and per-project access control; all managed from the web UI
 - **Multi-project** — separate encrypted databases per engagement; create, rename, and delete from the sidebar
 - **Active discovery** — ping sweep, ARP, TCP port scan, SNMP enumeration
 - **CLI + Web UI** — full-featured CLI for scripted workflows, browser-based UI for analysis
@@ -29,7 +29,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 | **Masscan** | JSON / XML | Fast port scan results |
 | **OpenVAS / Greenbone** | XML report | Vulnerabilities, NVT details, CVSS |
 | **Nuclei** | JSON / JSONL | Template-based vulnerability findings |
-| **enum4linux** | Text output | SMB shares, users, groups, domain info |
+| **enum4linux** | Text / JSON-NG | SMB shares, users, groups, password policy, domain info |
 | **CrowdStrike Falcon** | JSON export | Asset inventory, Spotlight vulnerability data |
 | **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
 | **Juniper JunOS** | `show` command output | Interfaces, routes, version |
@@ -152,23 +152,71 @@ Project databases: `~/.gravwell/projects/<name>.db`
 
 ---
 
-## Adding Users
+## User Management
 
-Additional users require an existing authenticated account to add:
+### Adding users
+
+Admin users can add new accounts from the web UI via the **☰ menu → Add User**, or from the CLI:
 
 ```bash
 gravwell user add analyst
 # Prompts for your credentials first, then the new user's password
 ```
 
-Each user holds their own encrypted copy of the database key. All users share the same data within a project.
+Each user holds their own encrypted copy of the database key. All users within a project share the same scan data.
+
+### Role-based access control (RBAC)
+
+Every user has a **Role** and a set of **Permissions**, configured at creation time and editable via **☰ → Manage Users**.
+
+| Role | Description |
+|------|-------------|
+| **Admin** | Full access — can manage users, create/delete projects, and perform all operations |
+| **User** | Access limited to assigned permissions and projects |
+
+| Permission | What it allows |
+|------------|----------------|
+| **Edit** | Modify host properties, tags, notes, and node layout |
+| **Import** | Upload and ingest scan files |
+| **Discover** | Run active network discovery (ping, ARP, TCP, SNMP) |
+| **Export** | Export reports and data |
+
+**Project access** can be set to *All projects* (including future ones) or restricted to a named list of specific projects. Non-admin users only see projects they are allowed to access in the sidebar dropdown.
+
+### Manage Users screen
+
+**☰ → Manage Users** (admin only) shows a live RBAC table with:
+
+- **Role** badge (Admin / User)
+- **Permissions** — all four permission types shown as green (granted) or greyed-out (denied) badges
+- **Projects** — "All" badge or individual project names
+- **Last Login** timestamp
+- Per-row **delete** button (disabled for the currently signed-in account)
+
+---
+
+## Attack Path Analysis
+
+The **Attack Paths** tab provides several automated analyses:
+
+| Analysis | Description |
+|----------|-------------|
+| **Shortest Path** | Weighted shortest path between any two hosts using vulnerability severity as edge cost |
+| **Path to HVT** | All attack paths to a designated high-value target |
+| **Kerberoastable** | Windows hosts with registered SPNs likely vulnerable to Kerberoasting; uses multi-signal confidence scoring (OS, domain tag, open ports) |
+| **SMB Lateral** | Hosts at risk of SMB credential relay or lateral movement |
+| **Admin Interfaces** | Hosts with management interfaces exposed (RDP, SSH, WinRM, IPMI, etc.) |
+| **AD Enum** | Domain enumeration findings from enum4linux: group names, password policy weaknesses, SMB signing status |
+
+Clicking any IP or hostname in analysis results pans the graph to that node. Clicking a row in the Services or Vulnerabilities sub-tabs does the same.
 
 ---
 
 ## Security Notes
 
-- The database is encrypted with AES-256-GCM (SQLCipher 4). The key is derived from your password using PBKDF2-HMAC-SHA256 (480,000 iterations).
-- The master encryption key lives in memory only while the server is running. Restarting the server clears the key and forces re-authentication — the database is locked at rest.
-- User accounts are stored in `~/.gravwell/gravwell.keystore.json` (plaintext JSON, separate from the encrypted database to avoid a bootstrapping problem — contains no scan data).
+- The database is encrypted with AES-256-GCM (SQLCipher 4). The master encryption key (MEK) is derived from your password using PBKDF2-HMAC-SHA256 (480,000 iterations).
+- The MEK lives in memory only while the server is running. Restarting the server clears the key and forces re-authentication — the database is locked at rest.
+- Each user stores an independent AES-256-GCM encrypted copy of the MEK. Changing a user's password re-encrypts only their MEK slot; all other users and the database content are unaffected.
+- User accounts (password hashes + encrypted MEK slots) are stored in `~/.gravwell/gravwell.keystore.json` — separate from the encrypted database to avoid a bootstrapping problem. This file contains no scan data.
 - The Flask session secret is stored in `~/.gravwell/gravwell.key` (mode 0600).
 - Never commit `.db`, `.keystore.json`, or `.key` files.

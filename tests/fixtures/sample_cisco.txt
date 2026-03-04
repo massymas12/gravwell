@@ -1,0 +1,43 @@
+Building configuration...
+
+Current configuration : 1842 bytes
+!
+version 15.6
+!
+hostname core-sw-01
+!
+ip ssh version 2
+ip http server
+ip http secure-server
+!
+snmp-server community public RO
+!
+interface GigabitEthernet0/0
+ description WAN Uplink
+ ip address 203.0.113.1 255.255.255.252
+!
+interface GigabitEthernet0/1
+ description LAN - Management VLAN
+ ip address 10.10.0.1 255.255.255.0
+!
+interface GigabitEthernet0/2
+ description DMZ
+ ip address 172.16.50.1 255.255.255.128
+!
+interface GigabitEthernet0/3
+ description Unused
+ no ip address
+ shutdown
+!
+interface Loopback0
+ ip address 192.0.2.1 255.255.255.255
+!
+interface Vlan10
+ description Server VLAN
+ ip address 10.10.10.1 255.255.255.0
+!
+line vty 0 4
+ transport input ssh
+ login local
+!
+end

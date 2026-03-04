@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" start="1700000000" version="7.94">
+  <host starttime="1700000001" endtime="1700000010">
+    <status state="up" reason="echo-reply"/>
+    <address addr="192.168.1.1" addrtype="ipv4"/>
+    <address addr="00:11:22:33:44:55" addrtype="mac" vendor="Cisco"/>
+    <hostnames>
+      <hostname name="gateway.local" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack"/>
+        <service name="ssh" product="OpenSSH" version="8.9p1"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack"/>
+        <service name="http" product="nginx" version="1.24.0"/>
+        <script id="banner" output="nginx/1.24.0"/>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack"/>
+        <service name="https" product="nginx" version="1.24.0"/>
+      </port>
+    </ports>
+    <os>
+      <osmatch name="Linux 5.4" accuracy="95">
+        <osclass type="general purpose" vendor="Linux" osfamily="Linux" osgen="5.X"/>
+      </osmatch>
+    </os>
+  </host>
+  <host starttime="1700000011" endtime="1700000020">
+    <status state="up" reason="echo-reply"/>
+    <address addr="192.168.1.10" addrtype="ipv4"/>
+    <hostnames>
+      <hostname name="winserver.local" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="135">
+        <state state="open" reason="syn-ack"/>
+        <service name="msrpc" product="Microsoft Windows RPC"/>
+      </port>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack"/>
+        <service name="microsoft-ds" product="Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack"/>
+        <service name="ms-wbt-server" product="Microsoft Terminal Services"/>
+      </port>
+    </ports>
+    <os>
+      <osmatch name="Windows Server 2019" accuracy="90">
+        <osclass type="general purpose" vendor="Microsoft" osfamily="Windows" osgen="2019"/>
+      </osmatch>
+    </os>
+  </host>
+  <host starttime="1700000021" endtime="1700000030">
+    <status state="up" reason="echo-reply"/>
+    <address addr="10.0.0.50" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack"/>
+        <service name="ssh" product="OpenSSH" version="7.4p1"/>
+      </port>
+      <port protocol="tcp" portid="3306">
+        <state state="open" reason="syn-ack"/>
+        <service name="mysql" product="MySQL" version="5.7.39"/>
+      </port>
+    </ports>
+    <os>
+      <osmatch name="CentOS Linux 7" accuracy="85">
+        <osclass type="general purpose" vendor="Linux" osfamily="Linux" osgen="7"/>
+      </osmatch>
+    </os>
+  </host>
+</nmaprun>

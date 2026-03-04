@@ -1,0 +1,71 @@
+Starting enum4linux v0.9.1 ( http://labs.portcullis.co.uk/application/enum4linux/ ) on Mon Jan 01 12:00:00 2024
+
+ ==========================
+|    Target Information    |
+ ==========================
+Target ........... 192.168.1.50
+RID Range ........ 500-550,1000-1050
+Username ......... ''
+Password ......... ''
+Known Usernames .. administrator, guest, krbtgt, domain admins, root, bin, none
+
+ ====================================================
+|    Enumerating Workgroup/Domain on 192.168.1.50    |
+ ====================================================
+[+] Got domain/workgroup name: CORP
+
+ =============================================
+|    Nbtstat Information for 192.168.1.50    |
+ =============================================
+Looking up status of 192.168.1.50
+	CORP-DC01       <00> -         B <ACTIVE>  Workstation Service
+	CORP            <00> - <GROUP> B <ACTIVE>  Domain/Workgroup Name
+	CORP-DC01       <20> -         B <ACTIVE>  File Server Service
+	CORP            <1c> - <GROUP> B <ACTIVE>  Domain Controllers
+	CORP            <1e> - <GROUP> B <ACTIVE>  Browser Service Elections
+	MAC Address = 00:50:56:AB:CD:EF
+
+ =====================================
+|    Session Check on 192.168.1.50    |
+ =====================================
+[+] Server 192.168.1.50 allows sessions using username '', password ''
+
+ ====================================================
+|    OS information on 192.168.1.50                  |
+ ====================================================
+[+] Got OS info for 192.168.1.50 from smbclient: Domain=[CORP] OS=[Windows Server 2019 Standard 17763] Server=[Windows Server 2019 Standard 6.3]
+
+ ====================
+|    Users on 192.168.1.50    |
+ ====================
+[+] Got userlist with querydispinfo:
+index: 0x1 RID: 0x1f4 acb: 0x00000210 Account: Administrator	Name: Administrator	Desc: Built-in account for administering the computer/domain
+index: 0x2 RID: 0x1f5 acb: 0x00000215 Account: Guest	Name: 	Desc: Built-in account for guest access
+index: 0x3 RID: 0x3eb acb: 0x00000210 Account: john.doe	Name: John Doe	Desc:
+index: 0x4 RID: 0x3ec acb: 0x00000210 Account: jane.smith	Name: Jane Smith	Desc:
+
+[+] Got userlist with enumdomusers:
+user:[Administrator] rid:[0x1f4]
+user:[Guest] rid:[0x1f5]
+user:[john.doe] rid:[0x3eb]
+user:[jane.smith] rid:[0x3ec]
+
+ ========================================
+|    Share Enumeration on 192.168.1.50    |
+ ========================================
+	Sharename       Type      Comment
+	---------       ----      -------
+	ADMIN$          Disk      Remote Admin
+	C$              Disk      Default share
+	IPC$            IPC       Remote IPC
+	SYSVOL          Disk      Logon server share
+	NETLOGON        Disk      Logon server share
+	Backups         Disk      Backup files
+
+ =========================================
+|    Password Policy Information for 192.168.1.50    |
+ =========================================
+[+] Minimum password length: 7
+[+] Password history length: 24
+
+enum4linux complete on Mon Jan 01 12:00:00 2024

@@ -4,7 +4,7 @@ import pathlib
 import dash
 from dash import Input, Output, State, no_update
 from flask import current_app
-from gravwell.database import init_db, drop_db
+from gravwell.database import init_db, drop_db, release_engine
 from gravwell.projects import list_projects, get_project_path, _DEFAULT_DB
 
 
@@ -162,11 +162,10 @@ def register(app: dash.Dash) -> None:
         if pathlib.Path(new_path).resolve() == pathlib.Path(current_path).resolve():
             return "", {"display": "none"}, no_update
 
-        # Dispose engine before renaming on Windows (file lock)
-        drop_db(current_path)
-        # Rename the .db file (WAL/SHM already cleaned up by drop_db)
+        # Release engine (drops file lock on Windows) without deleting the file
+        release_engine(current_path)
+        # Rename the .db file and any WAL/SHM siblings
         os.replace(current_path, new_path)
-        # Rename any SQLCipher keystore sibling if present
         for suffix in ("-wal", "-shm"):
             old_sib = current_path + suffix
             new_sib = new_path + suffix

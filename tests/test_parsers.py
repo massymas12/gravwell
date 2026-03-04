@@ -215,6 +215,22 @@ class TestEnum4linuxParser:
         # SYSVOL is not in _DEFAULT_SHARES so it should appear
         assert "IPC$" not in share_vuln.description
 
+    def test_classic_weak_password_policy(self):
+        from gravwell.parsers.enum4linux import Enum4linuxParser
+        result = Enum4linuxParser.parse(FIXTURES / "sample_enum4linux.txt")
+        vuln_names = {v.name for v in result.hosts[0].vulnerabilities}
+        assert "Weak Password Policy" in vuln_names
+        policy_vuln = next(v for v in result.hosts[0].vulnerabilities
+                           if v.name == "Weak Password Policy")
+        assert "7" in policy_vuln.description   # min length 7 is flagged
+
+    def test_ng_json_strong_password_policy_not_flagged(self):
+        from gravwell.parsers.enum4linux import Enum4linuxParser
+        result = Enum4linuxParser.parse(FIXTURES / "sample_enum4linux_ng.json")
+        vuln_names = {v.name for v in result.hosts[0].vulnerabilities}
+        # min_pw_length=8 and lockout_threshold=5 → no weak policy vuln
+        assert "Weak Password Policy" not in vuln_names
+
     def test_auto_detect_classic(self):
         from gravwell.parsers.registry import ParserRegistry
         result = ParserRegistry.parse(FIXTURES / "sample_enum4linux.txt")

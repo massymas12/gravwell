@@ -166,6 +166,19 @@ def init_db(db_path: str) -> None:
     _get_engine(db_path)
 
 
+def release_engine(db_path: str) -> None:
+    """Dispose the engine for db_path, releasing all connections without deleting the file.
+
+    Use this before renaming a DB file so the Windows file lock is released.
+    """
+    engine = _engines.pop(db_path, None)
+    if engine is not None:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+
+
 def drop_db(db_path: str) -> None:
     """Dispose the engine (releasing all connections) then delete the DB file.
 
@@ -175,12 +188,7 @@ def drop_db(db_path: str) -> None:
     """
     import pathlib
 
-    engine = _engines.pop(db_path, None)
-    if engine is not None:
-        try:
-            engine.dispose()
-        except Exception:
-            pass
+    release_engine(db_path)
 
     for suffix in ("", "-wal", "-shm"):
         p = pathlib.Path(db_path + suffix)

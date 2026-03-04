@@ -6,7 +6,7 @@ import dash
 from dash import Input, Output, State, no_update
 from flask import current_app
 from gravwell.database import get_session
-from gravwell.models.orm import HostORM, NodePositionORM
+from gravwell.models.orm import HostORM, NodePositionORM, ServiceORM, VulnerabilityORM
 
 _HIDDEN = {"display": "none"}
 _SHOWN  = {"display": "flex"}
@@ -116,3 +116,81 @@ def register(app: dash.Dash) -> None:
             return no_update, f"Error: {e}", no_update
 
         return _HIDDEN, "", (trigger or 0) + 1
+
+    # ── Show/hide delete section when a node is selected ─────────────────
+    @app.callback(
+        Output("delete-node-section", "style"),
+        Output("delete-node-confirm-row", "style"),
+        Input("selected-node-store", "data"),
+        prevent_initial_call=False,
+    )
+    def toggle_delete_section(node_store):
+        hidden_section = {"display": "none", "marginTop": "10px",
+                          "borderTop": "1px solid #333", "paddingTop": "8px"}
+        hidden_confirm = {"display": "none", "marginTop": "4px", "gap": "4px"}
+        if not node_store or node_store.get("node_type") != "host":
+            return hidden_section, hidden_confirm
+        return {**hidden_section, "display": "block"}, hidden_confirm
+
+    # ── Show confirmation row when Delete Node is clicked ────────────────
+    @app.callback(
+        Output("delete-node-confirm-row", "style", allow_duplicate=True),
+        Input("delete-node-btn", "n_clicks"),
+        Input("cancel-delete-node-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def show_delete_confirm(_del, _cancel):
+        from dash import ctx
+        if ctx.triggered_id == "delete-node-btn":
+            return {"display": "flex", "marginTop": "4px", "gap": "4px",
+                    "alignItems": "center"}
+        return {"display": "none", "marginTop": "4px", "gap": "4px"}
+
+    # ── Confirm deletion ──────────────────────────────────────────────────
+    @app.callback(
+        Output("selected-node-store", "data", allow_duplicate=True),
+        Output("project-switch-trigger", "data", allow_duplicate=True),
+        Input("confirm-delete-node-btn", "n_clicks"),
+        State("selected-node-store", "data"),
+        State("project-switch-trigger", "data"),
+        prevent_initial_call=True,
+    )
+    def confirm_delete_node(n_clicks, node_store, trigger):
+        if not n_clicks or not node_store:
+            return no_update, no_update
+        ip = node_store.get("ip")
+        if not ip:
+            return no_update, no_update
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        with get_session(db_path) as session:
+            host = session.query(HostORM).filter_by(ip=ip).first()
+            if host:
+                # NodePositionORM has no FK cascade — delete manually
+                session.query(NodePositionORM).filter_by(node_ip=ip).delete()
+                session.delete(host)
+        return None, (trigger or 0) + 1
+
+    # ── Delete node via JS right-click trigger ────────────────────────────
+    @app.callback(
+        Output("selected-node-store", "data", allow_duplicate=True),
+        Output("project-switch-trigger", "data", allow_duplicate=True),
+        Input("_delete-node-js-trigger", "value"),
+        State("project-switch-trigger", "data"),
+        prevent_initial_call=True,
+    )
+    def delete_node_from_js(trigger_value, graph_trigger):
+        if not trigger_value:
+            return no_update, no_update
+        try:
+            ip = json.loads(trigger_value).get("ip", "").strip()
+        except Exception:
+            return no_update, no_update
+        if not ip:
+            return no_update, no_update
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        with get_session(db_path) as session:
+            host = session.query(HostORM).filter_by(ip=ip).first()
+            if host:
+                session.query(NodePositionORM).filter_by(node_ip=ip).delete()
+                session.delete(host)
+        return None, (graph_trigger or 0) + 1

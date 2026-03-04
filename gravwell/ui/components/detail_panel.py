@@ -145,6 +145,47 @@ def create_detail_panel() -> html.Div:
                               "alignItems": "center"}),
                 ],
             ),
+            # Delete node — shown when a host node is selected
+            html.Div(
+                id="delete-node-section",
+                style={"display": "none", "marginTop": "10px",
+                       "borderTop": "1px solid #333", "paddingTop": "8px"},
+                children=[
+                    html.Button(
+                        "Delete Node",
+                        id="delete-node-btn",
+                        className="btn btn-sm btn-danger",
+                        n_clicks=0,
+                        style={"width": "100%", "fontSize": "11px"},
+                    ),
+                    html.Div(
+                        id="delete-node-confirm-row",
+                        style={"display": "none", "marginTop": "4px",
+                               "gap": "4px"},
+                        children=[
+                            html.Span(
+                                "Delete this host and all its data?",
+                                style={"fontSize": "11px", "color": "#E74C3C",
+                                       "flex": "1"},
+                            ),
+                            html.Button(
+                                "Yes",
+                                id="confirm-delete-node-btn",
+                                className="btn btn-sm btn-danger",
+                                n_clicks=0,
+                                style={"flexShrink": "0"},
+                            ),
+                            html.Button(
+                                "No",
+                                id="cancel-delete-node-btn",
+                                className="btn btn-sm btn-secondary",
+                                n_clicks=0,
+                                style={"flexShrink": "0"},
+                            ),
+                        ],
+                    ),
+                ],
+            ),
         ],
         className="right-panel",
     )

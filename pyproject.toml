@@ -20,6 +20,7 @@ dependencies = [
     "flask-login>=0.6.2",
     "sqlcipher3>=0.5.0",
     "cryptography>=41.0",
+    "waitress>=3.0",
 ]
 
 [project.optional-dependencies]

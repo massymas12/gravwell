@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import NullPool
 from gravwell.models.orm import Base
 
 _engines: dict[str, object] = {}
@@ -61,6 +62,7 @@ def _get_engine(db_path: str):
         engine = create_engine(
             "sqlite+pysqlite:///",
             creator=lambda: sqlcipher.connect(db_path, check_same_thread=False),
+            poolclass=NullPool,
         )
 
         @event.listens_for(engine, "connect")
@@ -69,22 +71,23 @@ def _get_engine(db_path: str):
             dbapi_conn.execute(f"PRAGMA key=\"x'{hex_key}'\"")
             dbapi_conn.execute("PRAGMA journal_mode=WAL")
             dbapi_conn.execute("PRAGMA foreign_keys=ON")
-            dbapi_conn.execute("PRAGMA cache_size=-65536")   # 64 MB page cache
-            dbapi_conn.execute("PRAGMA temp_store=MEMORY")   # temp tables in RAM
-            dbapi_conn.execute("PRAGMA mmap_size=268435456") # 256 MB memory-map
+            dbapi_conn.execute("PRAGMA cache_size=-8192")    # 8 MB page cache
+            dbapi_conn.execute("PRAGMA temp_store=MEMORY")
+            dbapi_conn.execute("PRAGMA mmap_size=0")          # disable mmap
     else:
         engine = create_engine(
             f"sqlite:///{db_path}",
             connect_args={"check_same_thread": False},
+            poolclass=NullPool,
         )
 
         @event.listens_for(engine, "connect")
         def _on_connect_plain(dbapi_conn, _):
             dbapi_conn.execute("PRAGMA journal_mode=WAL")
             dbapi_conn.execute("PRAGMA foreign_keys=ON")
-            dbapi_conn.execute("PRAGMA cache_size=-65536")
+            dbapi_conn.execute("PRAGMA cache_size=-8192")
             dbapi_conn.execute("PRAGMA temp_store=MEMORY")
-            dbapi_conn.execute("PRAGMA mmap_size=268435456")
+            dbapi_conn.execute("PRAGMA mmap_size=0")
 
     Base.metadata.create_all(engine)
 

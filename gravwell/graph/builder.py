@@ -42,8 +42,7 @@ def build_graph(session: Session) -> nx.Graph:
 
     hosts = session.query(HostORM).all()
 
-    # Batch-fetch KEV count per host (number of distinct vulns with KEV CVEs)
-    # and max EPSS score per host — two queries total regardless of host count.
+    # Batch-fetch KEV count per host and max EPSS — two queries total.
     try:
         _kev_q = (
             session.query(
@@ -73,8 +72,11 @@ def build_graph(session: Session) -> nx.Graph:
         kev_count_map = {}
         epss_map = {}
 
-    # Batch-fetch all open services in ONE query (avoids N per-host queries)
-    _all_svcs = session.query(ServiceORM).filter_by(state="open").all()
+    # Batch-fetch only the columns needed from open services
+    _all_svcs = session.query(
+        ServiceORM.host_id, ServiceORM.port, ServiceORM.protocol,
+        ServiceORM.service_name, ServiceORM.product,
+    ).filter(ServiceORM.state == "open").all()
     services_by_host: dict[int, list] = {}
     for _s in _all_svcs:
         services_by_host.setdefault(_s.host_id, []).append(_s)

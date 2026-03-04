@@ -18,8 +18,13 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=False,
     )
     def populate_projects(_n, _trigger):
+        from flask_login import current_user
         current_path = current_app.config.get("GRAVWELL_DB_PATH")
         projects = list_projects(current_path)
+        # Filter by user's allowed_projects (["*"] = unrestricted)
+        allowed = getattr(current_user, "allowed_projects", ["*"])
+        if "*" not in allowed:
+            projects = [p for p in projects if p["name"] in allowed]
         options = [{"label": p["name"], "value": p["path"]} for p in projects]
         current_value = current_path if current_path else (options[0]["value"] if options else None)
         return options, current_value

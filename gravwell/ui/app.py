@@ -16,6 +16,7 @@ from gravwell.ui.callbacks import (
     enrich_callbacks,
     browse_callbacks,
     add_node_callbacks,
+    settings_callbacks,
 )
 
 _FAVICON_SVG = (
@@ -223,6 +224,26 @@ td { padding: 3px 8px; font-size: 11px; border-bottom: 1px solid #2d2d2d; }
    the need to walk up the DOM tree and making focus reliable. */
 .g-host-link { cursor: pointer; }
 .g-host-link * { pointer-events: none; }
+
+/* Hamburger menu */
+.hamburger-wrap { position: relative; margin-left: auto; }
+.hamburger-btn { background: none; border: 1px solid #444; color: #aaa;
+                 font-size: 15px; cursor: pointer; padding: 1px 8px;
+                 border-radius: 3px; line-height: 1.4; }
+.hamburger-btn:hover { border-color: #5DADE2; color: #5DADE2; }
+.hamburger-menu { position: absolute; top: calc(100% + 4px); right: 0;
+                  background: #1e1e1e; border: 1px solid #555; border-radius: 4px;
+                  min-width: 190px; z-index: 1000;
+                  box-shadow: 0 4px 14px rgba(0,0,0,0.6); padding: 4px 0; }
+.hamburger-username { padding: 7px 14px; font-size: 11px; color: #666;
+                      border-bottom: 1px solid #333; }
+.hamburger-item { display: block; padding: 7px 14px; font-size: 12px;
+                  cursor: pointer; color: #ccc; text-decoration: none;
+                  background: none; border: none; width: 100%; text-align: left; }
+.hamburger-item:hover { background: #2d2d2d; color: #fff; }
+.hamburger-item-danger { color: #E74C3C; }
+.hamburger-item-danger:hover { color: #ff6b6b; }
+.hamburger-sep { border: none; border-top: 1px solid #333; margin: 4px 0; }
 """
 
 
@@ -577,5 +598,6 @@ def create_app(db_path: str) -> dash.Dash:
     enrich_callbacks.register(app)
     browse_callbacks.register(app)
     add_node_callbacks.register(app)
+    settings_callbacks.register(app)
 
     return app

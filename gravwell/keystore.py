@@ -100,17 +100,32 @@ def find_user(ks: dict, username: str) -> dict | None:
 
 
 def add_user(db_path: str, username: str, password: str,
-             mek: bytes, is_admin: bool = False) -> None:
-    """Create a new user entry in the keystore."""
+             mek: bytes, is_admin: bool = False,
+             permissions: list[str] | None = None,
+             allowed_projects: list[str] | None = None) -> None:
+    """Create a new user entry in the keystore.
+
+    permissions:      list of capability strings (e.g. ["edit", "import"]).
+                      Defaults to all capabilities for admins, ["edit","import"]
+                      for regular users.
+    allowed_projects: list of project name slugs the user may access, or ["*"]
+                      for unrestricted access.  Defaults to ["*"].
+    """
     ks = load(db_path)
     if find_user(ks, username):
         raise ValueError(f"User '{username}' already exists.")
+    if permissions is None:
+        permissions = ["edit", "import", "discover", "export"] if is_admin else ["edit", "import"]
+    if allowed_projects is None:
+        allowed_projects = ["*"]
     entry = {
-        "username":      username,
-        "password_hash": generate_password_hash(password),
-        "is_admin":      is_admin,
-        "created_at":    _dt.utcnow().isoformat(),
-        "last_login":    None,
+        "username":        username,
+        "password_hash":   generate_password_hash(password),
+        "is_admin":        is_admin,
+        "permissions":     permissions,
+        "allowed_projects": allowed_projects,
+        "created_at":      _dt.utcnow().isoformat(),
+        "last_login":      None,
         **encrypt_mek(password, mek),
     }
     ks["users"].append(entry)

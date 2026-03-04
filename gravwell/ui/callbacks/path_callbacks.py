@@ -1,4 +1,6 @@
 from __future__ import annotations
+import json as _json
+import re as _re
 import dash
 from dash import Input, Output, State, html, dcc, no_update
 from flask import current_app
@@ -51,13 +53,14 @@ def register(app: dash.Dash) -> None:
         Input("cleartext-btn",     "n_clicks"),
         Input("admin-if-btn",      "n_clicks"),
         Input("smb-spread-btn",    "n_clicks"),
+        Input("ad-enum-btn",       "n_clicks"),
         State("path-src-ip", "value"),
         State("path-dst-ip", "value"),
         prevent_initial_call=True,
     )
     def run_analysis(
         path_c, hvt_c, pivot_c, exposure_c, terrain_c, legacy_c,
-        kerb_c, clear_c, admin_c, smb_c,
+        kerb_c, clear_c, admin_c, smb_c, ad_enum_c,
         src_ip, dst_ip,
     ):
         from dash import ctx
@@ -87,7 +90,54 @@ def register(app: dash.Dash) -> None:
             return _render_admin_interfaces(G)
         elif triggered == "smb-spread-btn":
             return _render_smb_spread(G)
+        elif triggered == "ad-enum-btn":
+            return _render_domain_enum(G, db_path)
         return no_update
+
+    # ── Focus callbacks: path table host cells, services table, vulns table ──
+
+    @app.callback(
+        Output("node-focus-store",    "data", allow_duplicate=True),
+        Output("selected-node-store", "data", allow_duplicate=True),
+        Input("_path-host-focus-trigger", "value"),
+        prevent_initial_call=True,
+    )
+    def focus_from_path_table(trigger_value):
+        if not trigger_value:
+            return no_update, no_update
+        try:
+            ip = _json.loads(trigger_value).get("ip", "").strip()
+        except Exception:
+            return no_update, no_update
+        return ({"ip": ip}, {"ip": ip}) if ip else (no_update, no_update)
+
+    @app.callback(
+        Output("node-focus-store",    "data", allow_duplicate=True),
+        Output("selected-node-store", "data", allow_duplicate=True),
+        Input("services-table", "active_cell"),
+        State("services-table", "derived_virtual_data"),
+        prevent_initial_call=True,
+    )
+    def focus_from_services_table(active_cell, virtual_data):
+        if not active_cell or not virtual_data:
+            return no_update, no_update
+        row = active_cell.get("row", -1)
+        ip  = virtual_data[row].get("ip") if 0 <= row < len(virtual_data) else None
+        return ({"ip": ip}, {"ip": ip}) if ip else (no_update, no_update)
+
+    @app.callback(
+        Output("node-focus-store",    "data", allow_duplicate=True),
+        Output("selected-node-store", "data", allow_duplicate=True),
+        Input("vulns-table", "active_cell"),
+        State("vulns-table", "derived_virtual_data"),
+        prevent_initial_call=True,
+    )
+    def focus_from_vulns_table(active_cell, virtual_data):
+        if not active_cell or not virtual_data:
+            return no_update, no_update
+        row = active_cell.get("row", -1)
+        ip  = virtual_data[row].get("ip") if 0 <= row < len(virtual_data) else None
+        return ({"ip": ip}, {"ip": ip}) if ip else (no_update, no_update)
 
 
 # ── Bottom-tab renderers ──────────────────────────────────────────────────────
@@ -181,6 +231,7 @@ def _render_services_table(db_path: str):
             for s, ip in results
         ]
     return dash_table.DataTable(
+        id="services-table",
         data=rows,
         columns=[
             {"name": "IP",      "id": "ip"},
@@ -194,7 +245,8 @@ def _render_services_table(db_path: str):
         filter_action="native", sort_action="native", page_size=25,
         style_table={"overflowX": "auto"},
         style_cell={"fontSize": "12px", "padding": "3px 6px",
-                    "backgroundColor": "#1e1e1e", "color": "#ccc"},
+                    "backgroundColor": "#1e1e1e", "color": "#ccc",
+                    "cursor": "pointer"},
         style_header={"backgroundColor": "#2d2d2d", "color": "#fff"},
     )
 
@@ -313,6 +365,7 @@ def _render_vulns_table(db_path: str):
                  style={"fontSize": "11px", "color": "#888",
                         "marginBottom": "4px", "padding": "2px 0"}),
         dash_table.DataTable(
+            id="vulns-table",
             data=rows,
             columns=[
                 {"name": "IP",       "id": "ip"},
@@ -327,7 +380,8 @@ def _render_vulns_table(db_path: str):
             filter_action="native", sort_action="native", page_size=25,
             style_table={"overflowX": "auto"},
             style_cell={"fontSize": "12px", "padding": "3px 6px",
-                        "backgroundColor": "#1e1e1e", "color": "#ccc"},
+                        "backgroundColor": "#1e1e1e", "color": "#ccc",
+                        "cursor": "pointer"},
             style_header={"backgroundColor": "#2d2d2d", "color": "#fff"},
             style_data_conditional=[
                 *[
@@ -373,6 +427,8 @@ def _render_paths_ui():
                             className="btn btn-sm btn-danger"),
                 html.Button("SMB Spread",       id="smb-spread-btn",
                             className="btn btn-sm btn-secondary"),
+                html.Button("AD Enum",          id="ad-enum-btn",
+                            className="btn btn-sm btn-primary"),
             ),
             _grp(
                 "PATH ANALYSIS",
@@ -411,7 +467,11 @@ def _render_attack_paths(G, src_ip, dst_ip):
             arrow = f" -[{step.edge_to_next}]-> " if step.edge_to_next else ""
             label = step.hostnames[0] if step.hostnames else step.ip
             hops.append(html.Span([
-                html.Span(label, style={"color": color, "fontWeight": "bold"}),
+                html.Span(label,
+                          className="g-host-link",
+                          title=step.ip,
+                          style={"color": color, "fontWeight": "bold",
+                                 "cursor": "pointer"}),
                 html.Span(f"({step.ip})" if step.hostnames else "",
                           style={"fontSize": "10px", "color": "#666"}),
                 html.Span(f" cvss:{step.max_cvss:.1f}",
@@ -447,7 +507,11 @@ def _render_path_to_hvt(G, src_ip):
                  "#F1C40F" if cvss >= 4 else "#ccc")
         sep   = html.Span(" -> ", style={"color": "#555"}) if i < len(path)-1 else None
         steps.append(html.Span([
-            html.Span(label, style={"color": color, "fontWeight": "bold"}),
+            html.Span(label,
+                      className="g-host-link",
+                      title=ip,
+                      style={"color": color, "fontWeight": "bold",
+                             "cursor": "pointer"}),
             html.Span(f" ({ip})" if label != ip else "",
                       style={"fontSize": "10px", "color": "#666"}),
             sep,
@@ -468,7 +532,7 @@ def _render_pivot_candidates(G):
     for c in candidates:
         label = c.hostnames[0] if c.hostnames else c.ip
         rows.append(html.Tr([
-            html.Td(_host_cell(label, c.ip if c.hostnames else "")),
+            html.Td(_host_cell(label, c.ip if c.hostnames else "", ip=c.ip)),
             html.Td(c.os_name or c.os_family, style={"fontSize": "11px"}),
             html.Td(f"{c.betweenness:.4f}"),
             html.Td(str(c.subnet_count)),
@@ -496,7 +560,7 @@ def _render_critical_exposure(G):
         label = e.hostnames[0] if e.hostnames else e.ip
         kev_style = {"backgroundColor": "#3d0a0a"} if e.kev_count > 0 else {}
         rows.append(html.Tr([
-            html.Td(_host_cell(label, e.ip if e.hostnames else "")),
+            html.Td(_host_cell(label, e.ip if e.hostnames else "", ip=e.ip)),
             html.Td(e.os_name or e.os_family, style={"fontSize": "11px"}),
             html.Td(f"{e.max_cvss:.1f}", style={"color": "#E74C3C"}),
             html.Td(str(e.critical_vuln_count), style={"color": "#E74C3C"}),
@@ -545,7 +609,7 @@ def _render_high_value_targets(G):
                       "#F1C40F" if t.max_cvss >= 4 else "#aaa")
         kev_style = {"backgroundColor": "#3d0a0a"} if t.kev_count > 0 else {}
         rows.append(html.Tr([
-            html.Td(_host_cell(label, t.ip if t.hostnames else "")),
+            html.Td(_host_cell(label, t.ip if t.hostnames else "", ip=t.ip)),
             html.Td(t.os_name or t.os_family, style={"fontSize": "11px"}),
             html.Td(badges),
             html.Td(f"{t.max_cvss:.1f}", style={"color": cvss_color}),
@@ -570,7 +634,7 @@ def _render_legacy_systems(G):
         # Legacy OS + KEV-confirmed exploit = critical double risk
         kev_style = {"backgroundColor": "#3d0a0a"} if s.kev_count > 0 else {}
         rows.append(html.Tr([
-            html.Td(_host_cell(label, s.ip if s.hostnames else "")),
+            html.Td(_host_cell(label, s.ip if s.hostnames else "", ip=s.ip)),
             html.Td(s.os_name, style={"fontSize": "11px", "color": "#E67E22"}),
             html.Td(s.eol_label, style={"color": "#E74C3C", "fontSize": "11px"}),
             html.Td(f"{s.max_cvss:.1f}"),
@@ -597,6 +661,7 @@ def _render_kerberoastable(G):
             "borderRadius": "3px", "padding": "1px 4px",
             "fontSize": "10px", "marginLeft": "4px",
         }) if t.is_dc else None
+        conf_color = "#27AE60" if t.confidence == "confirmed" else "#F39C12"
         rows.append(html.Tr([
             html.Td(html.Span([
                 html.Span(label, style={"color": "#5DADE2"}),
@@ -604,15 +669,20 @@ def _render_kerberoastable(G):
                 html.Br(),
                 html.Span(t.ip if t.hostnames else "",
                           style={"fontSize": "10px", "color": "#666"}),
-            ])),
+            ], className="g-host-link", title=t.ip, style={"cursor": "pointer"})),
             html.Td(t.os_name, style={"fontSize": "11px"}),
             html.Td(", ".join(t.spn_services),
                     style={"fontSize": "10px", "color": "#A78BFA"}),
+            html.Td(html.Span(t.confidence,
+                              style={"color": conf_color, "fontSize": "10px"})),
             html.Td(f"{t.max_cvss:.1f}"),
         ]))
+    confirmed = sum(1 for t in targets if t.confidence == "confirmed")
+    likely    = len(targets) - confirmed
+    note = f" ({confirmed} confirmed, {likely} likely)" if likely else ""
     return _table(
-        f"Kerberoastable Indicators ({len(targets)}) -- Windows Kerberos environment detected",
-        ["Host", "OS", "Likely SPNs", "CVSS"],
+        f"Kerberoastable Indicators ({len(targets)}){note} -- Windows Kerberos environment",
+        ["Host", "OS", "Likely SPNs", "Confidence", "CVSS"],
         rows,
     )
 
@@ -628,7 +698,7 @@ def _render_cleartext_services(G):
                    ("Telnet", "rexec", "rlogin", "rsh"))
         risk_color = "#E74C3C" if high else "#E67E22"
         rows.append(html.Tr([
-            html.Td(_host_cell(label, h.ip if h.hostnames else "")),
+            html.Td(_host_cell(label, h.ip if h.hostnames else "", ip=h.ip)),
             html.Td(h.os_name, style={"fontSize": "11px"}),
             html.Td(html.Span(", ".join(h.cleartext_ports),
                               style={"color": risk_color, "fontSize": "11px"})),
@@ -658,7 +728,7 @@ def _render_admin_interfaces(G):
                 html.Br(),
                 html.Span(h.ip if h.hostnames else "",
                           style={"fontSize": "10px", "color": "#666"}),
-            ])),
+            ], className="g-host-link", title=h.ip, style={"cursor": "pointer"})),
             html.Td(h.os_name, style={"fontSize": "11px"}),
             html.Td(", ".join(h.admin_ports),
                     style={"fontSize": "11px", "color": "#E67E22"}),
@@ -679,7 +749,7 @@ def _render_smb_spread(G):
     for h in hosts:
         label = h.hostnames[0] if h.hostnames else h.ip
         rows.append(html.Tr([
-            html.Td(_host_cell(label, h.ip if h.hostnames else "")),
+            html.Td(_host_cell(label, h.ip if h.hostnames else "", ip=h.ip)),
             html.Td(h.os_name, style={"fontSize": "11px"}),
             html.Td(str(h.smb_neighbor_count),
                     style={"color": "#E67E22" if h.smb_neighbor_count > 2 else "#ccc"}),
@@ -689,6 +759,88 @@ def _render_smb_spread(G):
     return _table(
         f"SMB Lateral Movement Risk ({len(hosts)} hosts with port 445)",
         ["Host", "OS", "SMB Neighbours", "CVSS", "Risk Score"],
+        rows,
+    )
+
+
+def _render_domain_enum(G, db_path: str):
+    """Show hosts with domain/SMB enumeration data from enum4linux."""
+    from gravwell.models.orm import VulnerabilityORM, HostORM
+
+    hosts = analysis.find_domain_enum(G)
+    if not hosts:
+        return _msg(
+            "No domain/SMB enumeration data found. "
+            "Ingest enum4linux output (gravwell ingest <file>) to populate this view."
+        )
+
+    _ENUM_PLUGINS = {
+        "enum4linux-users-enumerable",
+        "enum4linux-groups-enumerable",
+        "enum4linux-password-policy",
+        "enum4linux-smb-signing-disabled",
+    }
+    with get_session(db_path) as session:
+        vuln_rows = (
+            session.query(
+                VulnerabilityORM.plugin_id,
+                HostORM.ip,
+                VulnerabilityORM.description,
+            )
+            .join(HostORM, VulnerabilityORM.host_id == HostORM.id)
+            .filter(VulnerabilityORM.plugin_id.in_(_ENUM_PLUGINS))
+            .all()
+        )
+
+    # index: ip → {plugin_id: description}
+    by_ip: dict[str, dict[str, str]] = {}
+    for plugin_id, ip, desc in vuln_rows:
+        by_ip.setdefault(ip, {})[plugin_id] = desc or ""
+
+    def _count_from_desc(desc: str) -> int:
+        m = _re.match(r"(\d+)\s+\w+\(s\)", desc)
+        return int(m.group(1)) if m else 0
+
+    rows = []
+    for h in hosts:
+        data         = by_ip.get(h.ip, {})
+        user_count   = _count_from_desc(data.get("enum4linux-users-enumerable", ""))
+        group_count  = _count_from_desc(data.get("enum4linux-groups-enumerable", ""))
+        signing_vuln = "enum4linux-smb-signing-disabled" in data
+        weak_policy  = "enum4linux-password-policy" in data
+        label        = h.hostnames[0] if h.hostnames else h.ip
+
+        signing_cell = (
+            html.Span("RELAY RISK",
+                      style={"color": "#E74C3C", "fontWeight": "bold",
+                             "fontSize": "10px"})
+            if signing_vuln
+            else html.Span("-", style={"color": "#444", "fontSize": "10px"})
+        )
+        policy_cell = (
+            html.Span("WEAK",
+                      style={"color": "#E67E22", "fontWeight": "bold",
+                             "fontSize": "10px"})
+            if weak_policy
+            else html.Span("-", style={"color": "#444", "fontSize": "10px"})
+        )
+
+        rows.append(html.Tr([
+            html.Td(_host_cell(label, h.ip if h.hostnames else "", ip=h.ip)),
+            html.Td(h.os_name or "-", style={"fontSize": "11px"}),
+            html.Td(h.domain or "-",
+                    style={"fontSize": "11px", "color": "#A78BFA"}),
+            html.Td(str(user_count)  if user_count  else "-"),
+            html.Td(str(group_count) if group_count else "-"),
+            html.Td(signing_cell),
+            html.Td(policy_cell),
+            html.Td(f"{h.max_cvss:.1f}"),
+        ]))
+
+    return _table(
+        f"AD Enumeration Summary ({len(rows)} hosts with SMB/domain data)",
+        ["Host", "OS", "Domain", "Users", "Groups",
+         "SMB Signing", "Pwd Policy", "CVSS"],
         rows,
     )
 
@@ -723,12 +875,14 @@ def _heading(text: str, color: str = "#5DADE2") -> html.B:
     return html.B(text, style={"color": color, "fontSize": "12px"})
 
 
-def _host_cell(label: str, sub: str = "") -> html.Span:
+def _host_cell(label: str, sub: str = "", ip: str = "") -> html.Span:
+    """Clickable host cell. Clicking pans the graph to the node."""
+    actual_ip = ip or sub or label
     return html.Span([
         html.Span(label, style={"color": "#5DADE2"}),
         html.Br() if sub else None,
         html.Span(sub, style={"fontSize": "10px", "color": "#666"}),
-    ])
+    ], className="g-host-link", title=actual_ip, style={"cursor": "pointer"})
 
 
 def _table(

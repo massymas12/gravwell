@@ -89,6 +89,7 @@ class KerberoastIndicator:
     spn_services: list[str]  # service names likely registered as SPNs
     is_dc: bool
     max_cvss: float
+    confidence: str = "confirmed"  # "confirmed" | "likely"
 
 
 @dataclass
@@ -118,6 +119,15 @@ class SmbSpreadHost:
     smb_neighbor_count: int      # reachable neighbours with SMB open
     max_cvss: float
     risk_score: float
+
+
+@dataclass
+class DomainEnumHost:
+    ip: str
+    os_name: str
+    hostnames: list[str]
+    domain: str
+    max_cvss: float
 
 
 # ── Role detection port sets ──────────────────────────────────────────────────
@@ -504,15 +514,14 @@ _ADMIN_PORTS: dict[int, str] = {
 
 def find_kerberoastable_indicators(G: nx.Graph) -> list[KerberoastIndicator]:
     """
-    Identify hosts likely to host Kerberoastable service accounts.
-
-    Heuristic: if any DC (port 88) exists on the network, flag:
-    - All DCs (always have krbtgt + many SPNs)
-    - Windows hosts with SPN-typical service ports (MSSQL, IIS, Exchange, etc.)
+    Multi-signal Kerberoastable detection. Requires a confirmed Kerberos
+    environment (DC with port 88). For non-DC hosts, requires explicit
+    Windows OS confirmation OR multiple corroborating Windows signals
+    (domain tag, SMB port, AD LDAP ports). Never assumes Kerberoastable
+    based on a single port observation alone.
     """
-    # Only meaningful in a Kerberos environment
     dc_present = any(
-        88 in attrs.get("open_ports", [])
+        (attrs.get("is_dc") or 88 in attrs.get("open_ports", []))
         for _, attrs in G.nodes(data=True)
         if attrs.get("node_type") == "host"
     )
@@ -525,32 +534,56 @@ def find_kerberoastable_indicators(G: nx.Graph) -> list[KerberoastIndicator]:
             continue
 
         open_ports = set(attrs.get("open_ports", []))
-        os_family  = attrs.get("os_family", "Unknown")
-        is_dc      = 88 in open_ports
+        os_family  = (attrs.get("os_family") or "").strip()
+        os_name    = (attrs.get("os_name") or "").strip()
+        is_dc      = attrs.get("is_dc", False)
+        tags       = attrs.get("tags", []) or []
+        has_domain = any(t.lower().startswith("domain:") for t in tags)
 
-        if is_dc:
-            spn_svcs = ["Kerberos (krbtgt + all registered SPNs)"]
-        elif os_family == "Windows":
-            spn_svcs = [
-                label for port, label in _SPN_PORTS.items()
-                if port in open_ports
-            ]
-        else:
-            continue  # non-Windows, non-DC — unlikely Kerberoastable
+        # Confirmed DC — always Kerberoastable (krbtgt + all SPNs)
+        if is_dc or 88 in open_ports:
+            results.append(KerberoastIndicator(
+                ip=ip,
+                os_name=os_name or os_family,
+                hostnames=attrs.get("hostnames", []),
+                spn_services=["krbtgt + all registered SPNs"],
+                is_dc=True,
+                max_cvss=attrs.get("max_cvss", 0.0),
+                confidence="confirmed",
+            ))
+            continue
 
+        # Non-DC: require Windows evidence before flagging
+        is_windows_os = os_family == "Windows" or "windows" in os_name.lower()
+
+        # Count corroborating Windows signals
+        signals = sum([
+            bool(is_windows_os),
+            has_domain,
+            445 in open_ports,                        # SMB — common on Windows
+            bool({389, 636, 3268, 3269} & open_ports),  # AD LDAP ports
+        ])
+
+        # Skip if OS unknown and we lack supporting evidence
+        if not is_windows_os and signals < 2:
+            continue
+
+        spn_svcs = [lbl for port, lbl in _SPN_PORTS.items()
+                    if port in open_ports]
         if not spn_svcs:
             continue
 
         results.append(KerberoastIndicator(
             ip=ip,
-            os_name=attrs.get("os_name") or os_family,
+            os_name=os_name or os_family or "Unknown (Windows signals present)",
             hostnames=attrs.get("hostnames", []),
             spn_services=spn_svcs,
-            is_dc=is_dc,
+            is_dc=False,
             max_cvss=attrs.get("max_cvss", 0.0),
+            confidence="confirmed" if is_windows_os else "likely",
         ))
 
-    results.sort(key=lambda x: (not x.is_dc, -x.max_cvss))
+    results.sort(key=lambda x: (not x.is_dc, x.confidence != "confirmed", -x.max_cvss))
     return results
 
 
@@ -662,6 +695,35 @@ def find_smb_spread_risk(G: nx.Graph) -> list[SmbSpreadHost]:
         ))
 
     results.sort(key=lambda x: x.risk_score, reverse=True)
+    return results
+
+
+def find_domain_enum(G: nx.Graph) -> list[DomainEnumHost]:
+    """
+    Return hosts where SMB/domain enumeration data is present.
+    A host qualifies if it has a domain: tag (from enum4linux) or
+    has port 445 open (SMB — potential enumeration target).
+    The UI layer queries the DB for actual user/group counts.
+    """
+    results: list[DomainEnumHost] = []
+    for ip, attrs in G.nodes(data=True):
+        if attrs.get("node_type") != "host":
+            continue
+        tags = attrs.get("tags", []) or []
+        domain_tags = [
+            t[len("domain:"):] for t in tags
+            if t.lower().startswith("domain:")
+        ]
+        if not domain_tags and 445 not in attrs.get("open_ports", []):
+            continue
+        results.append(DomainEnumHost(
+            ip=ip,
+            os_name=(attrs.get("os_name") or attrs.get("os_family") or ""),
+            hostnames=attrs.get("hostnames", []),
+            domain=domain_tags[0] if domain_tags else "",
+            max_cvss=attrs.get("max_cvss", 0.0),
+        ))
+    results.sort(key=lambda x: -x.max_cvss)
     return results
 
 

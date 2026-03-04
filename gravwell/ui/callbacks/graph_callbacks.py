@@ -482,43 +482,49 @@ def register(app: dash.Dash) -> None:
         return {"ip": ip}, {"ip": ip}
 
     # Clientside callback: when node-focus-store changes, pan the Cytoscape graph
-    # to centre on the target node.  Tries the live cy instance first (accurate for
-    # any layout), then falls back to pre-stored positions in graph-data-store.
+    # to centre on the target node.  Uses cy.animate() so Cytoscape computes the
+    # correct pan itself — avoids blank-graph from stale/in-progress layout positions.
     dash.clientside_callback(
         """
         function(focusData, graphData) {
             var nu = window.dash_clientside.no_update;
             if (!focusData || !focusData.ip) return [nu, nu];
             var ip = focusData.ip;
-            var pos = null;
 
-            /* Primary: live cy instance — works with any layout */
+            /* Primary: live cy instance — cy.animate handles compound nodes and
+               in-progress layouts correctly; no manual pan calculation needed. */
             var cy = window._gravwell_cy;
-            if (cy) {
+            if (cy && (!cy.destroyed || !cy.destroyed())) {
                 try {
                     var node = cy.getElementById(ip);
-                    if (node && node.length > 0) pos = node.position();
+                    if (node && node.length > 0) {
+                        cy.animate({ center: { eles: node }, zoom: 1.8 },
+                                   { duration: 250 });
+                        return [nu, nu];
+                    }
                 } catch(e) {}
             }
 
-            /* Fallback: stored element positions (preset layout only) */
-            if (!pos && graphData && graphData.elements) {
+            /* Fallback: saved positions in graph-data-store (preset layout only).
+               Guard against zero/NaN positions from an unfinished layout. */
+            if (graphData && graphData.elements) {
                 var els = graphData.elements;
                 for (var i = 0; i < els.length; i++) {
                     var el = els[i];
                     if (el.data && el.data.id === ip && el.position) {
-                        pos = el.position;
-                        break;
+                        var px = el.position.x, py = el.position.y;
+                        if (!isFinite(px) || !isFinite(py) ||
+                            (px === 0 && py === 0)) break;
+                        var container = document.getElementById('network-graph');
+                        var vw = (container && container.offsetWidth)  || 800;
+                        var vh = (container && container.offsetHeight) || 600;
+                        var zoom = 1.8;
+                        return [zoom, {x: vw/2 - px*zoom, y: vh/2 - py*zoom}];
                     }
                 }
             }
 
-            if (!pos) return [nu, nu];
-            var container = document.getElementById('network-graph');
-            var vw = (container && container.offsetWidth)  || 800;
-            var vh = (container && container.offsetHeight) || 600;
-            var zoom = 1.8;
-            return [zoom, {x: vw/2 - pos.x * zoom, y: vh/2 - pos.y * zoom}];
+            return [nu, nu];
         }
         """,
         Output("network-graph", "zoom",  allow_duplicate=True),

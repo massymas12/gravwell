@@ -228,6 +228,8 @@ def create_layout() -> html.Div:
                       debounce=False, style={"display": "none"}),
             dcc.Input(id="_delete-node-js-trigger", type="text", value="",
                       debounce=False, style={"display": "none"}),
+            dcc.Input(id="_path-host-focus-trigger", type="text", value="",
+                      debounce=False, style={"display": "none"}),
             # Edit modal (always in DOM so callback IDs are static)
             _create_edit_modal(),
             # Add Node modal

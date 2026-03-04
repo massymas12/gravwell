@@ -64,6 +64,41 @@ def _shares_vuln(shares: list[str]) -> Vulnerability:
     )
 
 
+def _groups_vuln(groups: list[str]) -> Vulnerability:
+    return Vulnerability(
+        name="SMB Group Enumeration",
+        severity="medium",
+        cvss_score=5.3,
+        plugin_id="enum4linux-groups-enumerable",
+        port=445,
+        description=f"{len(groups)} group(s) enumerated via SMB:\n" + ", ".join(groups),
+        solution="Restrict anonymous RPC enumeration via Group Policy.",
+    )
+
+
+def _pwpolicy_vuln(min_len: int, lockout: int | None) -> Vulnerability | None:
+    issues = []
+    if min_len < 8:
+        issues.append(f"Minimum password length is {min_len} (recommend >= 8)")
+    if not lockout:
+        issues.append("No account lockout threshold (brute-force risk)")
+    if not issues:
+        return None
+    sev = "medium" if len(issues) == 2 else "low"
+    return Vulnerability(
+        name="Weak Password Policy",
+        severity=sev,
+        cvss_score=5.3 if sev == "medium" else 3.1,
+        plugin_id="enum4linux-password-policy",
+        port=445,
+        description="Weak AD password policy:\n" + "\n".join(issues),
+        solution=(
+            "Set minimum password length >= 8 and configure account lockout threshold "
+            "via Group Policy: Account Lockout Policy."
+        ),
+    )
+
+
 def _os_family(os_string: str) -> str:
     return normalize_os_family(os_string)
 
@@ -178,6 +213,30 @@ class Enum4linuxParser(BaseParser):
         if non_default:
             host.vulnerabilities.append(_shares_vuln(non_default))
 
+        # Groups
+        groups_block = data.get("groups", {})
+        seen_groups: set[str] = set()
+        all_groups: list[str] = []
+        for key in ("via_rpc_enumdomgroups", "via_rpc_enumlocalgroups",
+                    "via_ldap_enumdomgroups"):
+            for entry in groups_block.get(key, []):
+                gname = (entry.get("groupname") or entry.get("name") or "").strip()
+                if gname and gname not in seen_groups:
+                    seen_groups.add(gname)
+                    all_groups.append(gname)
+        if all_groups:
+            host.vulnerabilities.append(_groups_vuln(all_groups))
+
+        # Password policy
+        policy = data.get("password_policy", {})
+        if policy:
+            v = _pwpolicy_vuln(
+                policy.get("min_pw_length", 8),
+                policy.get("lockout_threshold"),
+            )
+            if v:
+                host.vulnerabilities.append(v)
+
         result.hosts.append(host)
 
     # ------------------------------------------------------------------
@@ -284,5 +343,30 @@ class Enum4linuxParser(BaseParser):
         non_default = [s for s in shares if s.upper() not in _DEFAULT_SHARES]
         if non_default:
             host.vulnerabilities.append(_shares_vuln(non_default))
+
+        # Groups — "Group:[Domain Admins] RID:[0x200]"
+        seen_groups: set[str] = set()
+        groups: list[str] = []
+        for m in re.finditer(r"[Gg]roup:\[([^\]]+)\]", text):
+            g = m.group(1).strip()
+            if g and g not in seen_groups:
+                seen_groups.add(g)
+                groups.append(g)
+        if groups:
+            host.vulnerabilities.append(_groups_vuln(groups))
+
+        # Password policy
+        m_len  = re.search(r"[Mm]inimum password length:\s*(\d+)", text)
+        m_lock = re.search(r"[Ll]ockout threshold:\s*(\d+|None)", text)
+        min_len = int(m_len.group(1)) if m_len else 8
+        lockout_str = m_lock.group(1) if m_lock else None
+        lockout = (
+            int(lockout_str)
+            if lockout_str and lockout_str.lower() != "none"
+            else None
+        )
+        v = _pwpolicy_vuln(min_len, lockout)
+        if v:
+            host.vulnerabilities.append(v)
 
         result.hosts.append(host)

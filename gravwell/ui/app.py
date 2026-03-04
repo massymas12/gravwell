@@ -217,6 +217,12 @@ table { width: 100%; }
 th { background: #2d2d2d; color: #aaa; padding: 4px 8px;
      text-align: left; font-size: 11px; }
 td { padding: 3px 8px; font-size: 11px; border-bottom: 1px solid #2d2d2d; }
+
+/* Clickable host cells — children are transparent to pointer events so the
+   click always lands on the g-host-link element itself (e.target), avoiding
+   the need to walk up the DOM tree and making focus reliable. */
+.g-host-link { cursor: pointer; }
+.g-host-link * { pointer-events: none; }
 """
 
 
@@ -382,6 +388,29 @@ _CY_GLOBAL_JS = """
     if (_ctxMenu)  _ctxMenu.style.display  = 'none';
     if (_delMenu)  _delMenu.style.display   = 'none';
   }, false);
+
+  /* ── Path-table host cell click → focus graph node ──
+     CSS rule ".g-host-link * { pointer-events: none }" ensures e.target IS
+     the g-host-link element, so the walk is just a safety fallback. */
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    for (var i = 0; i < 5 && el && el.tagName !== 'BODY'; i++) {
+      if (el.classList && el.classList.contains('g-host-link') && el.title) {
+        var inp = document.getElementById('_path-host-focus-trigger');
+        if (inp) {
+          var setter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value');
+          if (setter && setter.set) {
+            setter.set.call(inp, JSON.stringify({ip: el.title, _t: Date.now()}));
+            inp.dispatchEvent(new Event('input', {bubbles: true}));
+          }
+        }
+        return;
+      }
+      el = el.parentElement;
+    }
+  }, false);
+
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
     if (_ctxMenu) _ctxMenu.style.display = 'none';

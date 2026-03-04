@@ -129,6 +129,7 @@ def build_graph(session: Session) -> nx.Graph:
             "kev_count": kev_count_map.get(h.id, 0),
             "max_epss": epss_map.get(h.id, 0.0),
             "additional_ips": h.additional_ips,
+            "tags": list(h.tags),
         })
 
     # Add nodes

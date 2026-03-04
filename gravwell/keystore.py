@@ -115,7 +115,7 @@ def add_user(db_path: str, username: str, password: str,
     if find_user(ks, username):
         raise ValueError(f"User '{username}' already exists.")
     if permissions is None:
-        permissions = ["edit", "import", "discover", "export"] if is_admin else ["edit", "import"]
+        permissions = ["edit", "import", "discover"] if is_admin else ["edit", "import"]
     if allowed_projects is None:
         allowed_projects = ["*"]
     entry = {

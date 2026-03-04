@@ -4,12 +4,11 @@ from dash import Input, Output, State, no_update, html
 from flask import current_app
 from flask_login import current_user
 
-_ALL_PERMS = ["edit", "import", "discover", "export"]
+_ALL_PERMS = ["edit", "import", "discover"]
 _PERM_LABELS = {
     "edit":     "Edit",
     "import":   "Import",
     "discover": "Discover",
-    "export":   "Export",
 }
 
 
@@ -270,7 +269,7 @@ def register(app: dash.Dash) -> None:
 
         is_admin = bool(is_admin_list)
         # Admins get all permissions regardless of checkboxes
-        final_perms = ["edit", "import", "discover", "export"] if is_admin else (perms or [])
+        final_perms = ["edit", "import", "discover"] if is_admin else (perms or [])
         final_projects = ["*"] if project_access == "all" else (project_list or ["*"])
 
         try:

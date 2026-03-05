@@ -444,6 +444,25 @@ _CY_GLOBAL_JS = """
     if (cy) {
       if (cy !== _lastCy) {
         _lastCy = cy;
+        /* ── Auto-save positions 800 ms after a node drag ends ── */
+        var _dragTimer = null;
+        cy.on('dragfree', function(evt) {
+          if (!evt.target.isNode || !evt.target.isNode()) return;
+          if (evt.target.data('node_type') !== 'host') return;
+          clearTimeout(_dragTimer);
+          _dragTimer = setTimeout(function() {
+            var inp = document.getElementById('_autosave-positions-trigger');
+            if (inp) {
+              var setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value');
+              if (setter && setter.set) {
+                setter.set.call(inp, 'drag_' + Date.now());
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+              }
+            }
+          }, 800);
+        });
+
         cy.on('cxttap', function(evt) {
           if (evt.target === cy) {
             /* Empty canvas right-click → Add Node */

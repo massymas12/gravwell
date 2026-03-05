@@ -35,7 +35,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=False,
     )
     def update_graph(n_intervals, n_clicks, _trigger, hostname, subnet,
-                     os_families, severity, port_service, current_graph_data):
+                     os_families, severity, port_service,
+                     current_graph_data):
         import logging as _log
         db_path = current_app.config["GRAVWELL_DB_PATH"]
         try:

@@ -25,6 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+discovery = [
+    "scapy>=2.5",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

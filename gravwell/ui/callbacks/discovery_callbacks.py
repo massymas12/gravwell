@@ -57,6 +57,10 @@ def register(app: dash.Dash) -> None:
             f"{'Already ingested' if already else 'Ingested'}: "
             f"{h_count} hosts, {v_count} vulns  ({counts})"
         )
+        warnings_div = html.Div(
+            [html.Div(w, style={"color": "#E67E22", "fontSize": "10px"})
+             for w in result.warnings],
+        ) if result.warnings else None
         return (
             html.Div([
                 html.Div(f"✓ {msg}", style={"color": "#27AE60"}),
@@ -64,6 +68,66 @@ def register(app: dash.Dash) -> None:
                     f"{len(result.hosts)} total discovered",
                     style={"color": "#888", "fontSize": "10px"},
                 ),
+                warnings_div,
             ]),
+            (trigger or 0) + 1,
+        )
+
+    # ── Passive listener — separate blocking callback ─────────────────────
+    @app.callback(
+        Output("passive-listen-status", "children"),
+        Output("project-switch-trigger", "data", allow_duplicate=True),
+        Input("passive-listen-btn", "n_clicks"),
+        State("passive-interface", "value"),
+        State("passive-duration", "value"),
+        State("discover-target", "value"),
+        State("project-switch-trigger", "data"),
+        prevent_initial_call=True,
+    )
+    def run_passive_listen(n_clicks, interface, duration, target, trigger):
+        if not interface or not interface.strip():
+            return html.Span(
+                "Enter a network interface name.",
+                style={"color": "#E74C3C"},
+            ), no_update
+
+        from gravwell.discovery.passive import passive_listen
+        from gravwell.models.dataclasses import ParseResult
+
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        dur = float(duration or 30)
+        net = (target or "").strip() or None
+
+        try:
+            hosts = passive_listen(interface.strip(), duration=dur, target_net=net)
+        except RuntimeError as e:
+            return html.Span(str(e), style={"color": "#E74C3C",
+                                            "whiteSpace": "pre-wrap"}), no_update
+        except Exception as e:
+            return html.Span(f"Passive listen error: {e}",
+                             style={"color": "#E74C3C"}), no_update
+
+        if not hosts:
+            return html.Span(
+                f"No hosts observed in {dur:.0f}s on '{interface.strip()}'.",
+                style={"color": "#888"},
+            ), no_update
+
+        pr = ParseResult(
+            hosts=hosts,
+            source_file="discovery:passive",
+            parser_name="discovery",
+        )
+        try:
+            with get_session(db_path) as session:
+                h_count, _, already = ingest_parse_result(session, pr)
+        except Exception as e:
+            return html.Span(f"Ingest error: {e}",
+                             style={"color": "#E74C3C"}), no_update
+
+        msg = (f"{'Already ingested' if already else 'Ingested'}: "
+               f"{h_count} of {len(hosts)} hosts from passive listen")
+        return (
+            html.Div(f"✓ {msg}", style={"color": "#27AE60"}),
             (trigger or 0) + 1,
         )

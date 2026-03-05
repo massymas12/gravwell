@@ -15,7 +15,8 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 - **CVE enrichment** — CISA KEV + FIRST.org EPSS exploit probability signals fetched on demand
 - **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover) and per-project access control; all managed from the web UI
 - **Multi-project** — separate encrypted databases per engagement; create, rename, and delete from the sidebar
-- **Active discovery** — ping sweep, ARP, TCP port scan, SNMP enumeration
+- **Active discovery** — ping sweep, ARP, TCP port scan, UDP probes (DNS/NTP/SNMP), SNMP enumeration with neighbor walk (ARP cache, CDP, LLDP)
+- **Passive discovery** — sniff a VPN or network interface to find hosts that won't respond to active probes; tags DNS resolver sources automatically
 - **CLI + Web UI** — full-featured CLI for scripted workflows, browser-based UI for analysis
 
 ---
@@ -54,6 +55,24 @@ sudo pacman -S sqlcipher
 ```
 
 On **Windows x64** and **macOS** the `sqlcipher3` wheel bundles the native library — no extra steps needed.
+
+### Optional: passive discovery
+
+Passive network capture requires [scapy](https://scapy.net/). Install it via the `discovery` extras:
+
+```bash
+pip install "gravwell[discovery]"
+# or
+uv tool install --with scapy git+https://github.com/massymas12/gravwell.git
+```
+
+**Linux** — run GravWell as root, or grant the raw-socket capability once to avoid needing root:
+
+```bash
+sudo setcap cap_net_raw,cap_net_admin=eip $(which python3)
+```
+
+**Windows** — install [Npcap](https://npcap.com/) (free, replaces the deprecated WinPcap). The standard installer option "Install Npcap in WinPcap API-compatible mode" is sufficient.
 
 ---
 
@@ -178,7 +197,7 @@ Every user has a **Role** and a set of **Permissions**, configured at creation t
 |------------|----------------|
 | **Edit** | Modify host properties, tags, notes, and node layout |
 | **Import** | Upload and ingest scan files |
-| **Discover** | Run active network discovery (ping, ARP, TCP, SNMP) |
+| **Discover** | Run active and passive network discovery (ping, ARP, TCP, UDP, SNMP, passive listen) |
 
 **Project access** can be set to *All projects* (including future ones) or restricted to a named list of specific projects. Non-admin users only see projects they are allowed to access in the sidebar dropdown.
 
@@ -244,6 +263,37 @@ Tags from all three sources are merged in the database, so re-ingesting a file o
 ### Multi-node selection
 
 Hold **Shift** and drag on the empty canvas to draw a box selection over multiple nodes. Then drag any selected node to move the entire group together.
+
+---
+
+## Active & Passive Discovery
+
+GravWell can discover hosts directly from the **Discover** section of the sidebar, without needing an external scanner.
+
+### Active discovery
+
+| Method | What it does |
+|--------|-------------|
+| **Ping** | ICMP echo sweep across the target CIDR |
+| **ARP** | Reads the local ARP cache (finds hosts on directly connected subnets) |
+| **TCP** | Parallel TCP connect scan on common ports (22, 80, 443, 445, 3389, …) |
+| **UDP** | Application-level probes to DNS (53), NTP (123), and SNMP (161) — works without raw sockets |
+| **SNMP** | SNMP v1/v2c poll for sysDescr, sysName, ifTable; walks the ARP cache, CDP, and LLDP neighbor tables on responsive devices |
+
+Enter a target CIDR or single IP, tick the methods you want, and click **Start Discovery**. Discovered hosts are ingested immediately and appear on the graph.
+
+### Passive discovery
+
+Passive listen captures live traffic on any network interface (VPN tunnel, LAN adapter, Wi-Fi) to surface hosts that firewalls silently drop active probes for — the host only needs to *send* a single packet to be discovered.
+
+**Requirements:** `pip install "gravwell[discovery]"` (installs scapy). See [Requirements](#requirements) for platform notes.
+
+1. Enter the interface name in the **Passive Listen** section of the sidebar (e.g. `tun0`, `eth0`, `Ethernet 2`).
+2. Set a capture duration (5–300 s; default 30 s).
+3. Optionally enter a target CIDR in the **Discover** field above to filter results to that network.
+4. Click **Start Passive Listen**. GravWell blocks for the capture duration, then ingests all observed unique unicast IPs.
+
+Hosts discovered passively are tagged `dns-resolver` if they were observed sending DNS queries to port 53 — a useful pivot for internal DNS enumeration.
 
 ---
 

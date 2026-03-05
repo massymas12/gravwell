@@ -210,6 +210,7 @@ def create_sidebar() -> html.Div:
                         {"label": " Ping",  "value": "ping"},
                         {"label": " ARP",   "value": "arp"},
                         {"label": " TCP",   "value": "tcp"},
+                        {"label": " UDP",   "value": "udp"},
                         {"label": " SNMP",  "value": "snmp"},
                     ],
                     value=["ping", "arp", "tcp"],
@@ -233,6 +234,48 @@ def create_sidebar() -> html.Div:
                             style={"marginTop": "4px", "width": "100%"}),
             ]),
             html.Div(id="discover-status",
+                     style={"fontSize": "11px", "marginTop": "4px",
+                            "color": "#5DADE2"}),
+
+            # ── Passive Listener ──────────────────────────────────────────
+            html.H3("Passive Listen", className="sidebar-section-title"),
+            html.Div(
+                "Sniff VPN interface traffic to find hosts that don't respond "
+                "to active probes. Requires scapy + Npcap (Windows).",
+                style={"fontSize": "10px", "color": "#666", "marginBottom": "4px"},
+            ),
+            dcc.Input(
+                id="passive-interface",
+                type="text",
+                placeholder="Interface (e.g. tun0, Ethernet 2)",
+                debounce=False,
+                className="filter-input",
+                style={"fontSize": "11px"},
+            ),
+            html.Div([
+                html.Label("Duration (s)",
+                           style={"fontSize": "11px", "color": "#aaa",
+                                  "marginRight": "6px", "whiteSpace": "nowrap"}),
+                dcc.Input(
+                    id="passive-duration",
+                    type="number",
+                    value=30,
+                    min=5,
+                    max=300,
+                    step=5,
+                    debounce=True,
+                    className="filter-input",
+                    style={"width": "70px", "fontSize": "11px"},
+                ),
+            ], style={"display": "flex", "alignItems": "center",
+                      "gap": "4px", "marginTop": "4px"}),
+            html.Button(
+                "Start Passive Listen",
+                id="passive-listen-btn",
+                className="btn btn-secondary",
+                style={"marginTop": "4px", "width": "100%", "fontSize": "11px"},
+            ),
+            html.Div(id="passive-listen-status",
                      style={"fontSize": "11px", "marginTop": "4px",
                             "color": "#5DADE2"}),
 

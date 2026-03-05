@@ -18,6 +18,31 @@ _NOTE_URI = "data:image/svg+xml;base64," + base64.b64encode(_NOTE_SVG).decode()
 
 CYTOSCAPE_STYLESHEET = [
     # -------------------------------------------------------------------------
+    # Domain compound group nodes (wrap subnet boxes)
+    # -------------------------------------------------------------------------
+    {
+        "selector": ".domain-group",
+        "style": {
+            "label": "data(label)",
+            "text-valign": "top",
+            "text-halign": "center",
+            "font-size": "15px",
+            "font-weight": "bold",
+            "color": "#FFFFFF",
+            "text-outline-color": "#000000",
+            "text-outline-width": "2px",
+            "background-color": "data(bg_color)",
+            "background-opacity": 0.2,
+            "border-color": "data(border_color)",
+            "border-width": "2.5px",
+            "border-style": "dashed",
+            "border-opacity": 0.8,
+            "padding": "50px",
+            "shape": "roundrectangle",
+        },
+    },
+
+    # -------------------------------------------------------------------------
     # Subnet compound group nodes
     # -------------------------------------------------------------------------
     {

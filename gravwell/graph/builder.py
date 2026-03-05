@@ -754,26 +754,67 @@ def get_cytoscape_elements(
         else:
             subnet_hub[subnet] = ips[0]
 
-    # 4. Subnet compound parent nodes (must precede children)
+    # 4. Determine domain grouping: assign each subnet to the majority domain
+    #    of its member hosts (>= 50% must share the same domain tag).
+    _DOMAIN_PALETTE = [
+        ("#050f1e", "#5DADE2"),   # blue
+        ("#051408", "#2ECC71"),   # green
+        ("#1a0d05", "#E67E22"),   # orange
+        ("#100514", "#9B59B6"),   # purple
+        ("#141405", "#F1C40F"),   # yellow
+        ("#05141a", "#16A085"),   # teal
+    ]
+    subnet_domain: dict[str, str] = {}
+    for subnet, ips in subnet_ips.items():
+        votes: dict[str, int] = {}
+        for ip in ips:
+            for t in (G.nodes[ip].get("tags") or []):
+                if t.lower().startswith("domain:"):
+                    d = t[len("domain:"):].upper()
+                    votes[d] = votes.get(d, 0) + 1
+        if votes:
+            best = max(votes, key=votes.get)  # type: ignore[arg-type]
+            if votes[best] >= max(1, len(ips) * 0.5):
+                subnet_domain[subnet] = best
+
+    domain_subnets: dict[str, list[str]] = {}
+    for subnet, domain in subnet_domain.items():
+        domain_subnets.setdefault(domain, []).append(subnet)
+
+    # Domain compound nodes must be added before subnet nodes (their children)
+    for i, domain_name in enumerate(sorted(domain_subnets)):
+        bg, border = _DOMAIN_PALETTE[i % len(_DOMAIN_PALETTE)]
+        elements.append({
+            "data": {
+                "id": f"domain_{domain_name}",
+                "label": domain_name,
+                "node_type": "domain_group",
+                "bg_color": bg,
+                "border_color": border,
+            },
+            "classes": "domain-group",
+        })
+
+    # 4b. Subnet compound parent nodes (must precede children)
     for subnet in subnets_sorted:
         if not subnet_ips.get(subnet):
             continue
         bg, border = subnet_colors[subnet]
         display_label = (subnet_labels or {}).get(subnet, subnet)
         box_padding = (subnet_paddings or {}).get(subnet, 30)
-        elements.append({
-            "data": {
-                "id": f"sub_{subnet}",
-                "label": display_label,
-                "subnet_cidr": subnet,       # always the raw CIDR
-                "node_type": "subnet_group",
-                "bg_color": bg,
-                "border_color": border,
-                "host_count": sum(1 for n in subnet_ips[subnet] if n not in multi_subnet_nodes),
-                "box_padding": box_padding,
-            },
-            "classes": "subnet-group",
-        })
+        node_data: dict = {
+            "id": f"sub_{subnet}",
+            "label": display_label,
+            "subnet_cidr": subnet,       # always the raw CIDR
+            "node_type": "subnet_group",
+            "bg_color": bg,
+            "border_color": border,
+            "host_count": sum(1 for n in subnet_ips[subnet] if n not in multi_subnet_nodes),
+            "box_padding": box_padding,
+        }
+        if subnet in subnet_domain:
+            node_data["parent"] = f"domain_{subnet_domain[subnet]}"
+        elements.append({"data": node_data, "classes": "subnet-group"})
 
     # 5. Virtual switch nodes
     for subnet in virtual_switches:

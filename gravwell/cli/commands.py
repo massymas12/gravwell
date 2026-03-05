@@ -17,10 +17,26 @@ from gravwell.graph import analysis
 
 console = Console()
 
-_VALID_FORMATS = ["nmap", "nessus", "masscan", "openvas", "enum4linux", "cisco"]
+_VALID_FORMATS = [
+    "nmap", "nessus", "masscan", "openvas", "nuclei",
+    "enum4linux", "crowdstrike", "cisco", "juniper", "fortinet", "paloalto",
+]
+
+_BANNER = r"""  ___  _ __    __ _ __   __  __      __    ___  | || |
+ / __|  | '__|/ _` \ \ \ / / \ \    / /  / _ \ | || |
+| (_ \  | |  | (_| |\ V /   \ \/\/ /  |  __/ | || |
+ \___/  |_|   \__,_| \_/     \_/\_/    \___|  |_||_|
+"""
+
+_TAGLINE = "network mapping + attack path analysis"
 
 
-@click.group()
+def _print_banner() -> None:
+    console.print(_BANNER, style="bold magenta", markup=False, highlight=False)
+    console.print(f"  {_TAGLINE}\n", style="dim")
+
+
+@click.group(invoke_without_command=True)
 @click.option("--db", default=None, envvar="GRAVWELL_DB",
               help="Path to SQLite database (default: ~/.gravwell/gravwell.db)")
 @click.pass_context
@@ -28,6 +44,9 @@ def cli(ctx, db):
     """GravWell — Network mapping and attack path analysis tool."""
     ctx.ensure_object(dict)
     ctx.obj["db"] = get_db_path(db)
+    if ctx.invoked_subcommand is None:
+        _print_banner()
+        console.print(ctx.get_help())
     # DB is opened lazily after the MEK is unlocked — do not call init_db here
 
 
@@ -395,8 +414,9 @@ def serve(ctx, port, host_addr, debug):
         console.print("[red]No users configured. Create one first:[/red]")
         console.print("  gravwell user add admin --admin")
         raise SystemExit(1)
-    console.print(f"[bold magenta]GravWell[/bold magenta] starting on "
-                  f"http://{host_addr}:{port}")
+    _print_banner()
+    console.print(f"[bold magenta]Starting[/bold magenta] on "
+                  f"[cyan]http://{host_addr}:{port}[/cyan]")
     console.print(f"Database: [dim]{db_path}[/dim]")
     from gravwell.ui.app import create_app
     app = create_app(db_path)

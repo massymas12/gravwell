@@ -16,7 +16,7 @@ class NmapParser(BaseParser):
     @classmethod
     def can_parse(cls, filepath: Path) -> bool:
         head = cls._read_head(filepath)
-        return "<nmaprun" in head
+        return "nmaprun" in head
 
     @classmethod
     def parse(cls, filepath: Path) -> ParseResult:

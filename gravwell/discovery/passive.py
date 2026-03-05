@@ -127,7 +127,13 @@ def _is_interesting(
     ip_str: str,
     target_net: ipaddress.IPv4Network | None = None,
 ) -> bool:
-    """Return True for unicast, non-loopback, non-link-local IPv4 addresses."""
+    """Return True for internal unicast IPv4 addresses.
+
+    When no target_net is given, only RFC 1918 + CGNAT private ranges are
+    accepted — this prevents internet IPs from polluting results when the
+    capture interface sees routed traffic.  Providing a target_net overrides
+    this and restricts to that specific CIDR instead.
+    """
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -137,6 +143,7 @@ def _is_interesting(
     if (addr.is_multicast or addr.is_loopback or addr.is_unspecified
             or addr.is_link_local or str(addr) == "255.255.255.255"):
         return False
-    if target_net is not None and addr not in target_net:
-        return False
-    return True
+    if target_net is not None:
+        return addr in target_net
+    # No explicit target — restrict to RFC 1918 + CGNAT private space
+    return addr.is_private

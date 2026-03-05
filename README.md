@@ -194,6 +194,43 @@ Every user has a **Role** and a set of **Permissions**, configured at creation t
 
 ---
 
+## Network Graph
+
+The graph view visualises every discovered host as a node, grouped into coloured subnet boxes. Edges represent relationships between hosts.
+
+### Edge types
+
+| Edge | Style | Description |
+|------|-------|-------------|
+| **Intra-subnet** | Thin grey line, no arrows | Connects each host to its subnet's hub (gateway, router, or virtual switch) |
+| **Inter-subnet** | Bold orange line, bidirectional arrows | Connects the hubs of adjacent subnets within the same /16 block |
+| **Bridge** | Purple dashed, bidirectional arrows | Connects a multi-homed network device (router/firewall) to the hub of each subnet it spans |
+| **Custom** | Green dashed, bidirectional arrows | Manually added by the user via the **+ Edge** button |
+
+### How arrows are placed
+
+Arrows are **not** derived from observed traffic — they are inferred from scan data using three rules:
+
+1. **Subnet chaining** — subnets in the same /16 block are sorted by IP address and chained hub-to-hub: `10.1.1.0/24` ↔ `10.1.2.0/24` ↔ `10.1.3.0/24`. This produces O(n) inter-subnet edges rather than a full mesh. Pairs where both hubs are virtual switches (no real routing evidence) are skipped.
+
+2. **Bridge detection** — hosts classified as routers or firewalls (via OS family, MAC vendor such as Cisco/Juniper/Fortinet, or router-specific ports like 161/SNMP, 179/BGP, 520/RIP) that have IPs in multiple subnets float outside the subnet boxes and get a bridge edge to each subnet's hub. The edge label shows the specific IP on that interface.
+
+3. **Manual edges** — any edge added via **+ Edge** is stored in the database and rendered as a green dashed line between the two specified hosts.
+
+### Hub selection
+
+Each subnet's centre node (hub) is chosen in priority order:
+
+1. A host classified as a **router** (network OS, network MAC vendor, or router ports)
+2. A host classified as a **gateway** (last octet `.1` or `.254`)
+3. A **virtual switch** node (synthesised automatically when no real gateway is found)
+
+### Multi-node selection
+
+Hold **Shift** and drag on the empty canvas to draw a box selection over multiple nodes. Then drag any selected node to move the entire group together.
+
+---
+
 ## Attack Path Analysis
 
 The **Attack Paths** tab provides several automated analyses:

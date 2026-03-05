@@ -4,11 +4,12 @@ from dash import Input, Output, State, no_update, html
 from flask import current_app
 from flask_login import current_user
 
-_ALL_PERMS = ["edit", "import", "discover"]
+_ALL_PERMS = ["edit", "import", "discover", "export"]
 _PERM_LABELS = {
     "edit":     "Edit",
     "import":   "Import",
     "discover": "Discover",
+    "export":   "Export",
 }
 
 
@@ -121,8 +122,12 @@ def register(app: dash.Dash) -> None:
     )
     def populate_user_store(_n):
         if not current_user.is_authenticated:
-            return {"username": "", "is_admin": False}
-        return {"username": current_user.username, "is_admin": current_user.is_admin}
+            return {"username": "", "is_admin": False, "permissions": []}
+        return {
+            "username":    current_user.username,
+            "is_admin":    current_user.is_admin,
+            "permissions": current_user.permissions,
+        }
 
     # ── Hamburger header: username label + show/hide Add User item ────────────
 
@@ -130,15 +135,20 @@ def register(app: dash.Dash) -> None:
         Output("hamburger-username", "children"),
         Output("add-user-menu-item", "style"),
         Output("manage-users-menu-item", "style"),
+        Output("export-csv-menu-item", "style"),
+        Output("export-xlsx-menu-item", "style"),
+        Output("export-png-menu-item", "style"),
         Input("current-user-store", "data"),
     )
     def update_hamburger_content(user_data):
         user_data = user_data or {}
         username = user_data.get("username", "")
         is_admin = user_data.get("is_admin", False)
+        perms    = user_data.get("permissions", [])
         label = f"Signed in as {username}" if username else ""
-        admin_style = {"display": "block"} if is_admin else {"display": "none"}
-        return label, admin_style, admin_style
+        admin_style  = {"display": "block"} if is_admin else {"display": "none"}
+        export_style = {"display": "block"} if (is_admin or "export" in perms) else {"display": "none"}
+        return label, admin_style, admin_style, export_style, export_style, export_style
 
     # ── Hamburger toggle (open / close) + backdrop ────────────────────────────
 
@@ -269,7 +279,7 @@ def register(app: dash.Dash) -> None:
 
         is_admin = bool(is_admin_list)
         # Admins get all permissions regardless of checkboxes
-        final_perms = ["edit", "import", "discover"] if is_admin else (perms or [])
+        final_perms = ["edit", "import", "discover", "export"] if is_admin else (perms or [])
         final_projects = ["*"] if project_access == "all" else (project_list or ["*"])
 
         try:

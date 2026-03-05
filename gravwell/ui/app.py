@@ -17,6 +17,7 @@ from gravwell.ui.callbacks import (
     browse_callbacks,
     add_node_callbacks,
     settings_callbacks,
+    export_callbacks,
 )
 
 _FAVICON_SVG = (
@@ -599,5 +600,35 @@ def create_app(db_path: str) -> dash.Dash:
     browse_callbacks.register(app)
     add_node_callbacks.register(app)
     settings_callbacks.register(app)
+    export_callbacks.register(app)
+
+    # Clientside callback: watch export-png-dummy store and trigger PNG download
+    app.clientside_callback(
+        """function(store_data) {
+            if (!store_data) return window.dash_clientside.no_update;
+            var cy = window._gravwell_cy;
+            if (!cy) return window.dash_clientside.no_update;
+            var dataUrl = cy.png({scale: 2, full: true, bg: '#121212'});
+            // Convert data URL to Blob — avoids browser limits on large data URIs
+            var b64 = dataUrl.split(',')[1];
+            var byteStr = atob(b64);
+            var arr = new Uint8Array(byteStr.length);
+            for (var i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+            var blob = new Blob([arr], {type: 'image/png'});
+            var blobUrl = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = blobUrl;
+            var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
+            a.download = 'network-map_' + ts + '.png';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
+            return window.dash_clientside.no_update;
+        }""",
+        dash.Output("export-png-dummy", "data", allow_duplicate=True),
+        dash.Input("export-png-dummy", "data"),
+        prevent_initial_call=True,
+    )
 
     return app

@@ -41,6 +41,20 @@ def ingest_parse_result(
     return len(result.hosts), total_vulns, False
 
 
+def _infer_domain_tags(hostnames: list[str]) -> list[str]:
+    """Return domain: tags inferred from FQDNs (host.domain.tld → domain:DOMAIN.TLD).
+
+    Only considers hostnames with 3+ labels (host + domain + tld) to avoid
+    false positives from simple single-label or .local mDNS names.
+    """
+    domains: set[str] = set()
+    for hn in (hostnames or []):
+        parts = hn.rstrip(".").split(".")
+        if len(parts) >= 3:
+            domains.add("domain:" + ".".join(parts[1:]).upper())
+    return sorted(domains)
+
+
 def _upsert_host(session: Session, host: Host) -> HostORM:
     existing = session.query(HostORM).filter_by(ip=host.ip).first()
     if not existing and host.mac:
@@ -70,9 +84,12 @@ def _upsert_host(session: Session, host: Host) -> HostORM:
         if host.mac and not orm.mac:
             orm.mac = host.mac
             orm.mac_vendor = host.mac_vendor
-        # Union source files and tags
+        # Union source files and tags (also infer domain from FQDNs)
         orm.source_files = list(dict.fromkeys(orm.source_files + host.source_files))
-        orm.tags = list(dict.fromkeys(orm.tags + host.tags))
+        merged_tags = list(dict.fromkeys(
+            orm.tags + host.tags + _infer_domain_tags(orm.hostnames)
+        ))
+        orm.tags = merged_tags
         # Union additional_ips from the incoming host (e.g. CrowdStrike multi-IP devices)
         if host.additional_ips:
             already = set([orm.ip] + orm.additional_ips)
@@ -90,7 +107,7 @@ def _upsert_host(session: Session, host: Host) -> HostORM:
         )
         orm.hostnames = host.hostnames
         orm.source_files = host.source_files
-        orm.tags = host.tags
+        orm.tags = list(dict.fromkeys(host.tags + _infer_domain_tags(host.hostnames)))
         orm.additional_ips = host.additional_ips
         session.add(orm)
         session.flush()

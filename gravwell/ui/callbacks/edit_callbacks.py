@@ -36,6 +36,7 @@ def register(app: dash.Dash) -> None:
         Output("edit-mac",              "value"),
         Output("edit-mac-vendor",       "value"),
         Output("edit-additional-ips",   "value"),
+        Output("edit-domain",           "value"),
         Output("edit-tags",             "value"),
         Output("edit-roles",            "value"),
         Output("edit-subnet-override",  "value"),
@@ -46,7 +47,7 @@ def register(app: dash.Dash) -> None:
     )
     def open_edit_modal(n_clicks, node_store):
         _nu = no_update
-        _empty = (_nu,) * 13
+        _empty = (_nu,) * 14
         if not n_clicks or not node_store:
             return _empty
         ip = node_store.get("ip")
@@ -64,7 +65,13 @@ def register(app: dash.Dash) -> None:
             status          = host.status or "up"
             mac             = host.mac or ""
             mac_vendor      = host.mac_vendor or ""
-            tags            = ", ".join(host.tags or [])
+            all_tags        = host.tags or []
+            domain_tags     = [t[len("domain:"):] for t in all_tags
+                               if t.lower().startswith("domain:")]
+            domain          = domain_tags[0] if domain_tags else ""
+            other_tags      = [t for t in all_tags
+                               if not t.lower().startswith("domain:")]
+            tags            = ", ".join(other_tags)
             additional_ips  = ", ".join(host.additional_ips or [])
             subnet_override = host.subnet_override or ""
 
@@ -95,7 +102,8 @@ def register(app: dash.Dash) -> None:
 
         return (
             _MODAL_SHOWN, ip, hostnames, os_name, os_family, status,
-            mac, mac_vendor, additional_ips, tags, effective_roles, subnet_override, "",
+            mac, mac_vendor, additional_ips, domain, tags, effective_roles,
+            subnet_override, "",
         )
 
     # ── Close modal (× or Cancel) ─────────────────────────────────────────
@@ -121,6 +129,7 @@ def register(app: dash.Dash) -> None:
         State("edit-mac",             "value"),
         State("edit-mac-vendor",      "value"),
         State("edit-additional-ips",  "value"),
+        State("edit-domain",          "value"),
         State("edit-tags",            "value"),
         State("edit-roles",             "value"),
         State("edit-subnet-override",   "value"),
@@ -129,8 +138,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def save_node_edits(n_clicks, hostnames_str, os_name, os_family, status,
-                        mac, mac_vendor, additional_ips_str, tags_str, roles,
-                        subnet_override_str, node_store, trigger):
+                        mac, mac_vendor, additional_ips_str, domain_str,
+                        tags_str, roles, subnet_override_str, node_store, trigger):
         if not n_clicks or not node_store:
             return no_update, no_update, no_update
         ip = node_store.get("ip")
@@ -156,7 +165,11 @@ def register(app: dash.Dash) -> None:
                 host.mac            = (mac or "").strip() or None
                 host.mac_vendor     = (mac_vendor or "").strip() or None
                 host.additional_ips  = _split(additional_ips_str)
-                host.tags            = _split(tags_str)
+                other_tags = _split(tags_str)
+                domain_clean = (domain_str or "").strip().upper()
+                domain_tag = [f"domain:{domain_clean}"] if domain_clean else []
+                host.tags = domain_tag + [t for t in other_tags
+                                          if not t.lower().startswith("domain:")]
                 host.subnet_override = (subnet_override_str or "").strip() or None
                 _update_host_aggregates(session, host)
 

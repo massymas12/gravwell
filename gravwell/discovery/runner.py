@@ -18,10 +18,15 @@ class DiscoveryConfig:
         "public", "private", "community", "snmp", "cisco", "manager",
     ])
     tcp_ports: list[int] | None = None  # None → use default port list
+    udp_probes: list[str] | None = None  # None → dns/ntp/snmp
     ping_timeout_ms: int = 800
     max_workers: int = 64
     # Walk ARP/CDP/LLDP on discovered SNMP-enabled devices
     follow_snmp_neighbors: bool = True
+    # Passive listener options (only used when "passive" is in methods)
+    passive_interface: str = ""
+    passive_duration: float = 30.0
+    passive_target_net: str | None = None  # restrict passive results to CIDR
 
 
 @dataclass
@@ -130,6 +135,19 @@ def discover(cfg: DiscoveryConfig) -> DiscoveryResult:
         except Exception as e:
             result.warnings.append(f"TCP scan error: {e}")
 
+    # ── UDP probe sweep ───────────────────────────────────────────────────
+    if "udp" in cfg.methods:
+        try:
+            from gravwell.discovery.udp import udp_probe_sweep
+            ips = list(merged.keys()) if merged else _expand_target(cfg.target)
+            hosts = udp_probe_sweep(ips, probes=cfg.udp_probes,
+                                    max_workers=cfg.max_workers)
+            for h in hosts:
+                _add(h)
+            result.method_counts["udp"] = len(hosts)
+        except Exception as e:
+            result.warnings.append(f"UDP probe error: {e}")
+
     # ── SNMP poll on live hosts ───────────────────────────────────────────
     snmp_hosts: list[Host] = []
     if "snmp" in cfg.methods:
@@ -203,6 +221,29 @@ def discover(cfg: DiscoveryConfig) -> DiscoveryResult:
                 result.method_counts["cdp"] = cdp_found
             if lldp_found:
                 result.method_counts["lldp"] = lldp_found
+
+    # ── Passive listener ──────────────────────────────────────────────────
+    if "passive" in cfg.methods:
+        if not cfg.passive_interface:
+            result.warnings.append(
+                "Passive discovery skipped: no interface specified "
+                "(set passive_interface in DiscoveryConfig)."
+            )
+        else:
+            try:
+                from gravwell.discovery.passive import passive_listen
+                hosts = passive_listen(
+                    cfg.passive_interface,
+                    duration=cfg.passive_duration,
+                    target_net=cfg.passive_target_net or cfg.target,
+                )
+                for h in hosts:
+                    _add(h)
+                result.method_counts["passive"] = len(hosts)
+            except RuntimeError as e:
+                result.warnings.append(f"Passive discovery: {e}")
+            except Exception as e:
+                result.warnings.append(f"Passive discovery error: {e}")
 
     result.hosts = list(merged.values())
     return result

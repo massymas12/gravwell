@@ -165,15 +165,16 @@ def _render_hosts_table(db_path: str):
         )
         rows = [
             {
-                "ip":       h.ip,
-                "hostname": (h.hostnames or [""])[0] if h.hostnames else "",
-                "os":       h.os_name or h.os_family or "",
-                "ports":    str(open_count or 0),
-                "max_cvss": f"{h.max_cvss:.1f}",
-                "critical": str(h.vuln_count_critical),
-                "high":     str(h.vuln_count_high),
-                "medium":   str(h.vuln_count_medium),
-                "sources":  ", ".join(h.source_files),
+                "ip":         h.ip,
+                "hostname":   (h.hostnames or [""])[0] if h.hostnames else "",
+                "os":         h.os_name or h.os_family or "",
+                "ports":      str(open_count or 0),
+                "max_cvss":   f"{h.max_cvss:.1f}",
+                "critical":   str(h.vuln_count_critical),
+                "high":       str(h.vuln_count_high),
+                "medium":     str(h.vuln_count_medium),
+                "sources":    ", ".join(h.source_files),
+                "note":       "\u2713" if h.notes else "",
             }
             for h, open_count in results
         ]
@@ -190,6 +191,7 @@ def _render_hosts_table(db_path: str):
             {"name": "High",       "id": "high"},
             {"name": "Med",        "id": "medium"},
             {"name": "Sources",    "id": "sources"},
+            {"name": "Note",       "id": "note"},
         ],
         filter_action="native", sort_action="native", sort_mode="multi",
         page_size=20,

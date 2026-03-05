@@ -225,6 +225,22 @@ Each subnet's centre node (hub) is chosen in priority order:
 2. A host classified as a **gateway** (last octet `.1` or `.254`)
 3. A **virtual switch** node (synthesised automatically when no real gateway is found)
 
+### Domain grouping
+
+When hosts belong to an Active Directory domain, GravWell draws an outer **domain box** that wraps the relevant subnet boxes, giving you a three-level hierarchy: **domain → subnet → host**.
+
+A subnet is assigned to a domain when at least 50% of its hosts carry a matching `domain:` tag. Subnets with no clear majority remain ungrouped.
+
+**How domain tags are populated:**
+
+| Source | How |
+|--------|-----|
+| **enum4linux** | Domain name read directly from LDAP (`ldap.domain`), SMB (`domain_name`), or NetBIOS workgroup — most authoritative |
+| **FQDN inference** | Any hostname with 3+ labels (e.g. `pc01.corp.local`) automatically produces a `domain:CORP.LOCAL` tag at ingest time |
+| **Manual** | Click any host node → **Edit** → fill in the **Domain** field |
+
+Tags from all three sources are merged in the database, so re-ingesting a file or editing a node adds to existing domain information rather than replacing it.
+
 ### Multi-node selection
 
 Hold **Shift** and drag on the empty canvas to draw a box selection over multiple nodes. Then drag any selected node to move the entire group together.

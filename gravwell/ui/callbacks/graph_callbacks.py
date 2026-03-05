@@ -31,42 +31,48 @@ def register(app: dash.Dash) -> None:
         State("filter-os", "value"),
         State("filter-severity", "value"),
         State("filter-port-service", "value"),
+        State("graph-data-store", "data"),
         prevent_initial_call=False,
     )
     def update_graph(n_intervals, n_clicks, _trigger, hostname, subnet,
-                     os_families, severity, port_service):
+                     os_families, severity, port_service, current_graph_data):
+        import logging as _log
         db_path = current_app.config["GRAVWELL_DB_PATH"]
-        with get_session(db_path) as session:
-            G = build_graph(session)
-            hidden_edge_ids = {
-                r.edge_id for r in session.query(HiddenEdgeORM).all()
-            }
-            custom_edges = [
-                {"source": r.source_ip, "target": r.target_ip,
-                 "label": r.label or ""}
-                for r in session.query(CustomEdgeORM).all()
-            ]
-            _subnet_records = session.query(SubnetLabelORM).all()
-            subnet_labels = {r.subnet_cidr: r.label or "" for r in _subnet_records}
-            subnet_paddings = {r.subnet_cidr: r.box_padding or 30 for r in _subnet_records}
-            role_overrides = {
-                r.host_ip: json.loads(r.roles_json or "[]")
-                for r in session.query(HostRoleOverrideORM).all()
-            }
-            noted_ips = {
-                row[0] for row in session.query(HostORM.ip).filter(
-                    HostORM.notes.isnot(None), HostORM.notes != ""
-                ).all()
-            }
-            saved_positions = {
-                r.node_ip: (r.x, r.y)
-                for r in session.query(NodePositionORM).all()
-            }
-            subnet_overrides = {
-                h.ip: h.subnet_override
-                for h in session.query(HostORM.ip, HostORM.subnet_override).all()
-                if h.subnet_override
-            }
+        try:
+            with get_session(db_path) as session:
+                G = build_graph(session)
+                hidden_edge_ids = {
+                    r.edge_id for r in session.query(HiddenEdgeORM).all()
+                }
+                custom_edges = [
+                    {"source": r.source_ip, "target": r.target_ip,
+                     "label": r.label or ""}
+                    for r in session.query(CustomEdgeORM).all()
+                ]
+                _subnet_records = session.query(SubnetLabelORM).all()
+                subnet_labels = {r.subnet_cidr: r.label or "" for r in _subnet_records}
+                subnet_paddings = {r.subnet_cidr: r.box_padding or 30 for r in _subnet_records}
+                role_overrides = {
+                    r.host_ip: json.loads(r.roles_json or "[]")
+                    for r in session.query(HostRoleOverrideORM).all()
+                }
+                noted_ips = {
+                    row[0] for row in session.query(HostORM.ip).filter(
+                        HostORM.notes.isnot(None), HostORM.notes != ""
+                    ).all()
+                }
+                saved_positions = {
+                    r.node_ip: (r.x, r.y)
+                    for r in session.query(NodePositionORM).all()
+                }
+                subnet_overrides = {
+                    h.ip: h.subnet_override
+                    for h in session.query(HostORM.ip, HostORM.subnet_override).all()
+                    if h.subnet_override
+                }
+        except Exception as exc:
+            _log.error("update_graph DB error: %s", exc, exc_info=True)
+            return no_update, no_update, no_update, no_update
 
         # Apply role overrides to graph nodes before rendering
         for node_id, attrs in G.nodes(data=True):
@@ -191,7 +197,28 @@ def register(app: dash.Dash) -> None:
         host_count = sum(
             1 for _, d in G.nodes(data=True) if d.get("node_type") == "host"
         )
-        return elements, str(host_count), str(G.number_of_edges()), \
+        edge_count = G.number_of_edges()
+
+        # On interval ticks only: skip the element update if graph structure
+        # is unchanged (same node + edge IDs).  This prevents a blank-flash
+        # each minute and stops positions resetting mid-drag.
+        from dash import ctx
+        if ctx.triggered_id == "refresh-interval" and current_graph_data:
+            prev_els = current_graph_data.get("elements", [])
+            prev_ids = {
+                el["data"]["id"]
+                for el in prev_els
+                if "data" in el and "id" in el.get("data", {})
+            }
+            new_ids = {
+                el["data"]["id"]
+                for el in elements
+                if "data" in el and "id" in el.get("data", {})
+            }
+            if prev_ids == new_ids:
+                return no_update, str(host_count), str(edge_count), no_update
+
+        return elements, str(host_count), str(edge_count), \
                {"elements": elements}
 
     @app.callback(
@@ -583,6 +610,32 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
 
+    # ── Auto-save: capture positions after a drag ends ────────────────────
+    dash.clientside_callback(
+        """
+        function(trigger) {
+            if (!trigger) return window.dash_clientside.no_update;
+            var cy = window._gravwell_cy;
+            if (!cy) return window.dash_clientside.no_update;
+            var positions = {};
+            cy.nodes().forEach(function(node) {
+                var data = node.data();
+                if (data.node_type === 'host' && data.ip) {
+                    var pos = node.position();
+                    positions[data.ip] = {
+                        x: Math.round(pos.x * 10) / 10,
+                        y: Math.round(pos.y * 10) / 10
+                    };
+                }
+            });
+            return positions;
+        }
+        """,
+        Output("node-positions-store", "data", allow_duplicate=True),
+        Input("_autosave-positions-trigger", "value"),
+        prevent_initial_call=True,
+    )
+
     # ── Persist captured positions to DB ─────────────────────────────────
     @app.callback(
         Output("save-layout-status", "children"),
@@ -592,15 +645,25 @@ def register(app: dash.Dash) -> None:
     def persist_node_positions(positions_data):
         if not positions_data:
             return no_update
+        import math
+        # Drop any positions with NaN/Infinity (can come from in-flight layouts)
+        clean = {
+            ip: pos for ip, pos in positions_data.items()
+            if isinstance(pos, dict)
+            and isinstance(pos.get("x"), (int, float))
+            and isinstance(pos.get("y"), (int, float))
+            and math.isfinite(pos["x"]) and math.isfinite(pos["y"])
+        }
+        if not clean:
+            return no_update
         db_path = current_app.config["GRAVWELL_DB_PATH"]
         try:
             with get_session(db_path) as session:
-                # Load all existing records in one query, key by node_ip
                 existing = {
                     r.node_ip: r
                     for r in session.query(NodePositionORM).all()
                 }
-                for ip, pos in positions_data.items():
+                for ip, pos in clean.items():
                     x, y = pos["x"], pos["y"]
                     if ip in existing:
                         existing[ip].x = x
@@ -610,7 +673,7 @@ def register(app: dash.Dash) -> None:
         except Exception as e:
             return f"Error saving: {e}"
         return html.Span([
-            f"Layout saved ({len(positions_data)} nodes)",
+            f"Layout saved ({len(clean)} nodes)",
             html.Span(str(time.time()), style={"display": "none"}),
         ])
 

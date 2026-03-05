@@ -97,8 +97,12 @@ def _get_engine(db_path: str):
         for stmt in _COLUMN_MIGRATIONS:
             try:
                 conn.execute(text(stmt))
-            except Exception:
-                pass  # column already exists
+            except Exception as _e:
+                # Expected when the column already exists; log anything else
+                if "duplicate column" not in str(_e).lower() and \
+                        "already exists" not in str(_e).lower():
+                    import logging as _log
+                    _log.warning("Column migration skipped (%s): %s", stmt[:60], _e)
         conn.commit()
 
     _engines[db_path] = engine

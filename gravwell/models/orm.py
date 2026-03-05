@@ -47,7 +47,10 @@ class HostORM(Base):
 
     @property
     def hostnames(self) -> list[str]:
-        return json.loads(self._hostnames or "[]")
+        try:
+            return json.loads(self._hostnames or "[]")
+        except (json.JSONDecodeError, ValueError):
+            return []
 
     @hostnames.setter
     def hostnames(self, val: list[str]) -> None:
@@ -55,7 +58,10 @@ class HostORM(Base):
 
     @property
     def tags(self) -> list[str]:
-        return json.loads(self._tags or "[]")
+        try:
+            return json.loads(self._tags or "[]")
+        except (json.JSONDecodeError, ValueError):
+            return []
 
     @tags.setter
     def tags(self, val: list[str]) -> None:
@@ -63,7 +69,10 @@ class HostORM(Base):
 
     @property
     def source_files(self) -> list[str]:
-        return json.loads(self._source_files or "[]")
+        try:
+            return json.loads(self._source_files or "[]")
+        except (json.JSONDecodeError, ValueError):
+            return []
 
     @source_files.setter
     def source_files(self, val: list[str]) -> None:
@@ -71,7 +80,10 @@ class HostORM(Base):
 
     @property
     def additional_ips(self) -> list[str]:
-        return json.loads(self._additional_ips or "[]")
+        try:
+            return json.loads(self._additional_ips or "[]")
+        except (json.JSONDecodeError, ValueError):
+            return []
 
     @additional_ips.setter
     def additional_ips(self, val: list[str]) -> None:

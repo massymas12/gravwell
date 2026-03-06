@@ -16,6 +16,7 @@ _LEGEND_SHAPES = [
 _LEGEND_OS = [
     ("#2471A3", "Windows"),
     ("#1E8449", "Linux"),
+    ("#1ABC9C", "macOS / iOS"),
     ("#B7950B", "Network Device"),
     ("#616A6B", "Unknown"),
 ]

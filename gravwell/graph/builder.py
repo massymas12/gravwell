@@ -851,6 +851,8 @@ def get_cytoscape_elements(
             classes.append("os-windows")
         elif os_family == "Linux":
             classes.append("os-linux")
+        elif os_family == "macOS":
+            classes.append("os-macos")
         elif os_family == "Network":
             classes.append("os-network")
         else:

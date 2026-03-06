@@ -45,6 +45,14 @@ _WIN_PORTS: dict[int, int] = {
     47001: 56,   # WinRM alt
 }
 
+# ── macOS port fingerprints ───────────────────────────────────────────────────
+_MACOS_PORTS: dict[int, int] = {
+    548:   68,   # AFP (Apple Filing Protocol) — near-exclusive to macOS
+    5900:  36,   # VNC (common on macOS, but not exclusive)
+    62078: 60,   # Apple iOS/macOS mobile sync
+    7000:  44,   # AirPlay
+}
+
 # ── Linux/Unix port fingerprints ─────────────────────────────────────────────
 _LINUX_PORTS: dict[int, int] = {
     111:   52,   # rpcbind / portmapper
@@ -90,6 +98,8 @@ _PRODUCT_HINTS: list[tuple[list[str], str, int]] = [
       "MSSQL", "MS-SQL", "Windows RPC"], "Windows", 68),
     (["OpenSSH for Windows", "WinSSH", "Microsoft SFTP"], "Windows", 65),
     (["IIS"], "Windows", 60),
+    (["macOS", "Mac OS X", "Darwin", "Apple Remote Desktop",
+      "Apple Filing Protocol", "Bonjour"], "macOS", 60),
     (["OpenSSH", "vsftpd", "ProFTPD", "Samba", "Postfix", "Dovecot",
       "Exim", "lighttpd", "nginx", "Apache httpd", "Apache", "OpenBSD Secure Shell",
       "Linux rpcbind"], "Linux", 48),
@@ -100,6 +110,7 @@ _MAC_VENDOR_HINTS: list[tuple[list[str], str, int]] = [
     (["Cisco", "Juniper", "Aruba Networks", "Palo Alto", "Fortinet",
       "Extreme Networks", "Brocade", "MikroTik", "Ubiquiti", "Meraki",
       "Huawei", "Zyxel", "D-Link", "Netgear"], "Network", 48),
+    (["Apple"], "macOS", 44),
     # VMware: virtual NIC — family says nothing about guest OS
 ]
 
@@ -134,7 +145,7 @@ def infer_os(
 
     The returned ``os_name`` is the caller's ``explicit_os_name`` unless it
     was None, in which case it falls back to the inferred os_family string.
-    The returned ``os_family`` is always one of: Windows, Linux, Network, Unknown.
+    The returned ``os_family`` is always one of: Windows, Linux, macOS, Network, Unknown.
     """
     best_name   = explicit_os_name
     best_family = explicit_os_family
@@ -160,6 +171,8 @@ def infer_os(
         if p in _WIN_PORTS:
             win_hits += 1
             _try("Windows", _WIN_PORTS[p])
+        elif p in _MACOS_PORTS:
+            _try("macOS", _MACOS_PORTS[p])
         elif p in _LINUX_PORTS:
             _try("Linux", _LINUX_PORTS[p])
         elif p in _NET_PORTS:
@@ -218,12 +231,14 @@ def infer_os(
 
 
 def normalize_os_family(raw: str) -> str:
-    """Map any OS family/name string to Windows | Linux | Network | Unknown."""
+    """Map any OS family/name string to Windows | Linux | macOS | Network | Unknown."""
     r = (raw or "").lower()
     if any(x in r for x in ("windows", "microsoft", "winnt", "win32", "win2k")):
         return "Windows"
-    if any(x in r for x in ("linux", "unix", "bsd", "macos", "mac os", "darwin",
-                              "solaris", "aix", "hpux", "irix")):
+    if any(x in r for x in ("macos", "mac os", "darwin", "ios", "ipados",
+                              "tvos", "watchos")):
+        return "macOS"
+    if any(x in r for x in ("linux", "unix", "bsd", "solaris", "aix", "hpux", "irix")):
         return "Linux"
     if any(x in r for x in ("cisco", "junos", "network", "router", "switch",
                               "firewall", "printer", "appliance", "nx-os",

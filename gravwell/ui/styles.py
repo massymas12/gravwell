@@ -104,6 +104,10 @@ CYTOSCAPE_STYLESHEET = [
         "style": {"background-color": "#1E8449"},  # forest green
     },
     {
+        "selector": ".os-macos",
+        "style": {"background-color": "#1ABC9C"},  # teal — Apple devices
+    },
+    {
         "selector": ".os-network",
         "style": {
             "background-color": "#B7950B",          # gold
@@ -139,6 +143,10 @@ CYTOSCAPE_STYLESHEET = [
     {
         "selector": ".gateway.os-linux",
         "style": {"background-color": "#145A32"},
+    },
+    {
+        "selector": ".gateway.os-macos",
+        "style": {"background-color": "#148F77"},
     },
 
     # -------------------------------------------------------------------------

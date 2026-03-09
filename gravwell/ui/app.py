@@ -671,22 +671,26 @@ def create_app(db_path: str) -> dash.Dash:
             if (!store_data) return window.dash_clientside.no_update;
             var cy = window._gravwell_cy;
             if (!cy) return window.dash_clientside.no_update;
-            var dataUrl = cy.png({scale: 2, full: true, bg: '#121212'});
+            var dataUrl = cy.png({scale: 1, full: true, bg: '#121212'});
+            if (!dataUrl || dataUrl.length < 100) return window.dash_clientside.no_update;
             // Convert data URL to Blob — avoids browser limits on large data URIs
             var b64 = dataUrl.split(',')[1];
-            var byteStr = atob(b64);
-            var arr = new Uint8Array(byteStr.length);
-            for (var i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
-            var blob = new Blob([arr], {type: 'image/png'});
-            var blobUrl = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = blobUrl;
-            var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
-            a.download = 'network-map_' + ts + '.png';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
+            if (!b64) return window.dash_clientside.no_update;
+            try {
+                var byteStr = atob(b64);
+                var arr = new Uint8Array(byteStr.length);
+                for (var i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+                var blob = new Blob([arr], {type: 'image/png'});
+                var blobUrl = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = blobUrl;
+                var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
+                a.download = 'network-map_' + ts + '.png';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
+            } catch(e) { console.error('PNG export failed:', e); }
             return window.dash_clientside.no_update;
         }""",
         dash.Output("export-png-dummy", "data", allow_duplicate=True),

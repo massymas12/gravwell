@@ -417,8 +417,8 @@ def _compute_preset_positions(
       - Cose-bilkent with randomize:false uses them as warm-start positions.
     """
     _GAP = 25         # gap between subnet box edges within a domain/band
-    _GROUP_GAP = 180  # vertical gap between depth bands (larger = clearer hierarchy)
-    _PAD = 40         # internal padding allowance (stylesheet: 30px padding + label)
+    _GROUP_GAP = 150  # vertical gap between depth bands
+    _PAD = 40         # internal padding allowance
     _MAX_COLS = 8     # max columns per domain/band grid
 
     def _node_sz(n_hosts: int) -> int:
@@ -455,15 +455,15 @@ def _compute_preset_positions(
         r = max(60.0, (min(12, k) * (sz + 4)) / (2 * math.pi))
         idx = 0
         while idx < k:
-            cap = _ring_capacity(r, sz)
-            ring = nodes[idx: idx + cap]
+            ring = nodes[idx: idx + _ring_capacity(r, sz)]
+            n_ring = len(ring)
             for i, ip in enumerate(ring):
-                angle = (2 * math.pi * i) / len(ring)
+                angle = (2 * math.pi * i) / max(n_ring, 1)
                 positions[ip] = {
                     "x": round(cx + r * math.cos(angle), 1),
                     "y": round(cy + r * math.sin(angle), 1),
                 }
-            idx += cap
+            idx += n_ring
             r += sz + 8
         return positions
 
@@ -596,7 +596,7 @@ def _compute_preset_positions(
     # Undomained subnets form a final band at the bottom, also BFS-ordered.
 
     _DOM_GAP = 80    # horizontal gap between domain blocks in the same band
-    _BAND_GAP = 120  # vertical gap between depth bands
+    _BAND_GAP = 150  # vertical gap between depth bands
 
     def _ip_sort_key(s: str):
         try:

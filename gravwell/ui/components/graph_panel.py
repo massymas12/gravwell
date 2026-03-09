@@ -105,6 +105,23 @@ def create_graph_panel() -> html.Div:
                     html.Span(id="edge-add-status",
                               style={"fontSize": "11px", "color": "#27AE60",
                                      "fontStyle": "italic"}),
+                    html.Span("Edges:", style={
+                        "marginLeft": "12px", "marginRight": "4px",
+                        "fontSize": "11px", "color": "#aaa", "whiteSpace": "nowrap",
+                    }),
+                    dcc.Checklist(
+                        id="edge-type-visibility",
+                        options=[
+                            {"label": "Routes",  "value": "inter-subnet"},
+                            {"label": "Bridges", "value": "multi-ip-link"},
+                            {"label": "Spokes",  "value": "intra-subnet"},
+                            {"label": "Manual",  "value": "custom-edge"},
+                        ],
+                        value=["inter-subnet", "multi-ip-link",
+                               "intra-subnet", "custom-edge"],
+                        inline=True,
+                        className="edge-visibility-checklist",
+                    ),
                     html.Span(id="graph-host-count", className="graph-stat"),
                     html.Span(" hosts | "),
                     html.Span(id="graph-edge-count", className="graph-stat"),

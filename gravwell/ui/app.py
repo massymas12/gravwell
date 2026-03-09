@@ -114,6 +114,10 @@ body, html { margin: 0; padding: 0; background: #121212; color: #ccc;
                  font-size: 12px; }
 .layout-dropdown { width: 160px; }
 .graph-stat { color: #5DADE2; font-weight: bold; }
+.edge-visibility-checklist { display: flex; align-items: center; gap: 6px; }
+.edge-visibility-checklist label { font-size: 11px; color: #ccc; display: flex;
+  align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
+.edge-visibility-checklist input[type=checkbox] { margin: 0; cursor: pointer; }
 #network-graph { flex: 1; }
 
 /* Right panel */

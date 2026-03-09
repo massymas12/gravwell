@@ -416,7 +416,7 @@ def _compute_preset_positions(
       - Cose-bilkent with randomize:false uses them as warm-start positions.
     """
     _GAP = 25         # gap between subnet box edges within a domain/band
-    _GROUP_GAP = 100  # extra vertical gap between depth bands
+    _GROUP_GAP = 180  # vertical gap between depth bands (larger = clearer hierarchy)
     _PAD = 40         # internal padding allowance (stylesheet: 30px padding + label)
     _MAX_COLS = 8     # max columns per domain/band grid
 
@@ -447,7 +447,7 @@ def _compute_preset_positions(
     # (depth 0) share the same y row, depth-1 subdomains appear on the row
     # below, and so on.  Undomained subnets fall to the bottom via /16 grouping.
 
-    _DOMAIN_GAP = 60   # horizontal gap between adjacent domain boxes at the same depth
+    _DOMAIN_GAP = 120  # horizontal gap between adjacent domain boxes (wider = clearer parent-child lines)
 
     def _sort_subs(subs: list[str]) -> list[str]:
         return sorted(subs, key=lambda s: (
@@ -464,7 +464,9 @@ def _compute_preset_positions(
         Returns (subnet_centers_dict, total_width, total_height).
         """
         n = len(subs)
-        ncols = max(1, min(_MAX_COLS, math.ceil(math.sqrt(n))))
+        # Prefer wide single-row layout; only add rows when n > _MAX_COLS.
+        # This keeps domain boxes short and wide rather than tall and narrow.
+        ncols = min(_MAX_COLS, n)
         nrows = math.ceil(n / ncols)
 
         grid: list[list[str | None]] = [
@@ -537,7 +539,7 @@ def _compute_preset_positions(
     def _dom_own_width(dom: str) -> float:
         subs = domain_to_subs[dom]
         n = len(subs)
-        ncols = max(1, min(_MAX_COLS, math.ceil(math.sqrt(n))))
+        ncols = min(_MAX_COLS, n)          # match _place_subnet_grid formula
         nrows = math.ceil(n / ncols)
         col_ws = []
         for c in range(ncols):

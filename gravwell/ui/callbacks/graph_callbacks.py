@@ -687,6 +687,19 @@ def register(app: dash.Dash) -> None:
             html.Span(str(time.time()), style={"display": "none"}),
         ])
 
+    # ── Edge type visibility ───────────────────────────────────────────────
+    @app.callback(
+        Output("network-graph", "stylesheet"),
+        Input("edge-type-visibility", "value"),
+        prevent_initial_call=False,
+    )
+    def update_edge_visibility(visible: list[str] | None):
+        from gravwell.ui.styles import CYTOSCAPE_STYLESHEET
+        _ALL = ["inter-subnet", "multi-ip-link", "intra-subnet", "custom-edge"]
+        hidden = [t for t in _ALL if t not in (visible or [])]
+        extra = [{"selector": f".{t}", "style": {"display": "none"}} for t in hidden]
+        return CYTOSCAPE_STYLESHEET + extra
+
 
 def _ip_in_cidr(ip: str, cidr: str) -> bool:
     try:

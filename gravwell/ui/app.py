@@ -672,7 +672,11 @@ def create_app(db_path: str) -> dash.Dash:
             var cy = window._gravwell_cy;
             if (!cy) return window.dash_clientside.no_update;
             try {
-                cy.png({output: 'blob-promise', scale: 1, full: true, bg: '#121212'})
+                // Auto-scale so canvas never exceeds ~8000px on the longest side
+                var bb = cy.elements().boundingBox();
+                var longest = Math.max(bb.w || 1, bb.h || 1);
+                var scale = Math.min(1, 8000 / longest);
+                cy.png({output: 'blob-promise', scale: scale, full: true, bg: '#121212'})
                   .then(function(blob) {
                     if (!blob || blob.size === 0) {
                         console.error('PNG export: empty blob');

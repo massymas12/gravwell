@@ -1,13 +1,13 @@
-"""Callbacks for on-demand CVE enrichment (CISA KEV + FIRST.org EPSS)."""
+"""Callbacks for on-demand CVE enrichment (CISA KEV + FIRST.org EPSS + NVD CVSS)."""
 from __future__ import annotations
 import threading
 import dash
-from dash import Input, Output, html, no_update
+from dash import Input, Output, State, html, no_update
 from flask import current_app
 from gravwell.models.enrichment import enrich_cves
 
 _lock = threading.Lock()
-_state: dict = {"running": False, "message": ""}
+_state: dict = {"running": False, "message": "", "completed": False}
 
 
 def register(app: dash.Dash) -> None:
@@ -43,6 +43,7 @@ def register(app: dash.Dash) -> None:
                 )
                 with _lock:
                     _state["message"] = msg
+                    _state["completed"] = True
             except Exception as e:
                 with _lock:
                     _state["message"] = f"Error: {e}"
@@ -56,14 +57,23 @@ def register(app: dash.Dash) -> None:
 
     @app.callback(
         Output("enrich-status", "children", allow_duplicate=True),
+        Output("data-refresh-trigger", "data", allow_duplicate=True),
         Input("refresh-interval", "n_intervals"),
+        State("data-refresh-trigger", "data"),
         prevent_initial_call=True,
     )
-    def poll_enrich(_):
+    def poll_enrich(_, refresh_counter):
         with _lock:
             msg = _state["message"]
             running = _state["running"]
+            just_done = _state["completed"]
+            if just_done:
+                _state["completed"] = False  # consume the flag
+
         if not msg:
-            return no_update
+            return no_update, no_update
         color = "#5DADE2" if running else "#27AE60"
-        return html.Span(msg, style={"color": color, "fontSize": "11px"})
+        status = html.Span(msg, style={"color": color, "fontSize": "11px"})
+        # Fire the refresh trigger once when enrichment completes so all tabs reload
+        new_counter = (refresh_counter or 0) + 1 if just_done else no_update
+        return status, new_counter

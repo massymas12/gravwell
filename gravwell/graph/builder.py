@@ -1,4 +1,5 @@
 from __future__ import annotations
+import collections
 import ipaddress
 import math
 import networkx as nx
@@ -449,6 +450,58 @@ def _compute_preset_positions(
 
     _DOMAIN_GAP = 120  # horizontal gap between adjacent domain boxes (wider = clearer parent-child lines)
 
+    # ── Connectivity-aware ordering helpers ───────────────────────────────────
+    # Build a reverse lookup: hub IP → subnet (used to trace edges back to subnets)
+    hub_subnet: dict[str, str] = {
+        hub: sub for sub, hub in subnet_hub.items() if hub
+    }
+
+    # Build subnet adjacency from the inter-subnet edges already in elements.
+    # These are the gold edges — subnets that share one are "neighbours" and
+    # should be placed close to each other.
+    subnet_adj: dict[str, set[str]] = {s: set() for s in subnet_ips}
+    for _el in elements:
+        if "inter-subnet" in _el.get("classes", ""):
+            _s1 = hub_subnet.get(_el["data"].get("source", ""))
+            _s2 = hub_subnet.get(_el["data"].get("target", ""))
+            if _s1 and _s2 and _s1 != _s2:
+                subnet_adj[_s1].add(_s2)
+                subnet_adj[_s2].add(_s1)
+
+    def _bfs_order(items: list[str], adj: dict[str, set[str]]) -> list[str]:
+        """Return items in BFS traversal order so connected items are adjacent.
+
+        Starts from the node with the most connections; unconnected items are
+        appended at the end in sorted order.
+        """
+        if not items:
+            return items
+        remaining = set(items)
+        # Start from the most-connected node as the seed
+        start = max(items, key=lambda x: len(adj.get(x, set()) & remaining))
+        ordered: list[str] = []
+        visited: set[str] = {start}
+        queue: collections.deque[str] = collections.deque([start])
+        while queue:
+            curr = queue.popleft()
+            if curr in remaining:
+                ordered.append(curr)
+                remaining.discard(curr)
+            # Visit neighbours sorted by their own connectivity (hubs first)
+            for nb in sorted(
+                adj.get(curr, set()) & remaining,
+                key=lambda x: -len(adj.get(x, set()) & remaining),
+            ):
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+            # If queue empties but nodes remain, restart from next most-connected
+            if not queue and remaining:
+                nxt = max(remaining, key=lambda x: len(adj.get(x, set()) & remaining))
+                visited.add(nxt)
+                queue.append(nxt)
+        return ordered
+
     def _sort_subs(subs: list[str]) -> list[str]:
         return sorted(subs, key=lambda s: (
             ipaddress.ip_network(s, strict=False).network_address
@@ -457,16 +510,18 @@ def _compute_preset_positions(
         ))
 
     def _place_subnet_grid(
-        subs: list[str], x_start: float, y_start: float
+        subs: list[str], x_start: float, y_start: float,
+        ncols: int | None = None,
     ) -> tuple[dict[str, tuple[float, float]], float, float]:
         """Place subnets in a compact grid starting at (x_start, y_start).
 
         Returns (subnet_centers_dict, total_width, total_height).
+        ncols overrides the default single-row heuristic when provided.
         """
         n = len(subs)
-        # Prefer wide single-row layout; only add rows when n > _MAX_COLS.
-        # This keeps domain boxes short and wide rather than tall and narrow.
-        ncols = min(_MAX_COLS, n)
+        if ncols is None:
+            # Prefer wide single-row layout; only add rows when n > _MAX_COLS.
+            ncols = min(_MAX_COLS, n)
         nrows = math.ceil(n / ncols)
 
         grid: list[list[str | None]] = [
@@ -553,12 +608,25 @@ def _compute_preset_positions(
 
     dom_own_w: dict[str, float] = {d: _dom_own_width(d) for d in domain_to_subs}
 
+    # ── Build domain adjacency from subnet adjacency ──────────────────────────
+    # Two domains are adjacent if any of their subnets share a gold inter-subnet
+    # edge. Using this to order depth-0 domains keeps gold cross-domain edges short.
+    domain_adj: dict[str, set[str]] = {d: set() for d in domain_to_subs}
+    for _s1, _neighbours in subnet_adj.items():
+        _d1 = (subnet_domain or {}).get(_s1)
+        for _s2 in _neighbours:
+            _d2 = (subnet_domain or {}).get(_s2)
+            if _d1 and _d2 and _d1 != _d2 and _d1 in domain_adj and _d2 in domain_adj:
+                domain_adj[_d1].add(_d2)
+                domain_adj[_d2].add(_d1)
+
     # ── Order each depth band: children grouped under their parent ────────────
     ordered_at: dict[int, list[str]] = {}
     for dep in sorted(depth_to_doms.keys()):
         doms = depth_to_doms[dep]
         if dep == 0:
-            ordered_at[dep] = sorted(doms)
+            # BFS ordering so domains connected by gold edges are placed adjacent
+            ordered_at[dep] = _bfs_order(sorted(doms), domain_adj)
         else:
             parent_rank = {d: i for i, d in enumerate(ordered_at.get(dep - 1, []))}
             ordered_at[dep] = sorted(
@@ -648,26 +716,34 @@ def _compute_preset_positions(
             )
             subnet_center.update(centers)
 
-    # Subnets with no domain: placed at the bottom using /16 grouping
+    # Subnets with no domain: consolidated into one 2-D grid.
+    # BFS ordering ensures subnets connected by gold edges end up adjacent,
+    # minimising line length. Grid shape is roughly square (wider than tall)
+    # to avoid the mega-horizontal single-row problem.
     domained_set = set(subnet_domain.keys()) if subnet_domain else set()
     undomained = [s for s in subnet_ips if s not in domained_set]
     if undomained:
-        ugroups: dict[str, list[str]] = {}
-        for s in undomained:
-            ugroups.setdefault(_subnet_net16(s), []).append(s)
-        for g in ugroups.values():
-            g[:] = _sort_subs(g)
-        ugroups_sorted = sorted(ugroups.values(), key=lambda g: g[0])
-        # Place /16 groups side-by-side horizontally (same row), not stacked.
-        x_cursor = 0.0
-        max_band_h = 0.0
-        for group_subs in ugroups_sorted:
-            centers, grp_w, grp_h = _place_subnet_grid(group_subs, x_cursor, y_cursor)
-            subnet_center.update(centers)
-            x_cursor += grp_w + _DOMAIN_GAP
-            max_band_h = max(max_band_h, grp_h)
-        if max_band_h > 0:
-            y_cursor += max_band_h + _GROUP_GAP
+        # BFS order over subnet connectivity; fall back to numerical sort
+        undomained_ordered = _bfs_order(
+            sorted(
+                undomained,
+                key=lambda s: (
+                    ipaddress.ip_network(_subnet_net16(s), strict=False).network_address,
+                    ipaddress.ip_network(s, strict=False).network_address
+                    if s != "unknown" else 0,
+                ),
+            ),
+            subnet_adj,
+        )
+        n_un = len(undomained_ordered)
+        # Prefer roughly-square grid: max 10 cols, at least 4 unless fewer items
+        ncols_un = min(10, max(1, math.ceil(math.sqrt(n_un * 1.4))))
+        centers, _, grp_h = _place_subnet_grid(
+            undomained_ordered, 0.0, y_cursor, ncols=ncols_un
+        )
+        subnet_center.update(centers)
+        if grp_h > 0:
+            y_cursor += grp_h + _GROUP_GAP
 
     # Compute leaf-node positions (hub at centre, hosts on spoke circle).
     # If the user has previously saved positions (by dragging), those are used

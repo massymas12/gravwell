@@ -17,6 +17,7 @@ Detection heuristics (most-to-least specific):
 from __future__ import annotations
 import csv
 import io
+import ipaddress
 import json
 import re
 from pathlib import Path
@@ -200,22 +201,39 @@ class CrowdStrikeParser(BaseParser):
         )
 
         host_map: dict[str, Host] = {}
+        skipped_no_ip = 0
+        skipped_dupe  = 0
+        total_recs    = 0
         try:
             with open(filepath, "rb") as fh:
                 for rec in ijson.items(fh, prefix):
                     if not isinstance(rec, dict):
                         continue
+                    total_recs += 1
                     if is_spotlight:
                         _spotlight_rec_to_host_map(rec, host_map, result.source_file)
                     elif is_flat_vuln:
                         _flat_vuln_rec_to_host_map(rec, host_map, result.source_file)
                     else:
                         host = _device_to_host(rec, result.source_file)
-                        if host and host.ip and host.ip != "0.0.0.0":
-                            if host.ip not in host_map:
-                                host_map[host.ip] = host
+                        if not host or not host.ip or host.ip == "0.0.0.0":
+                            skipped_no_ip += 1
+                        elif host.ip in host_map:
+                            skipped_dupe += 1
+                        else:
+                            host_map[host.ip] = host
         except Exception as e:
             result.errors.append(f"JSON stream error: {e}")
+
+        if skipped_no_ip:
+            result.warnings.append(
+                f"{skipped_no_ip} of {total_recs} records skipped — no valid IP address. "
+                "Ensure 'Sensor IP address' (local_ip) is included in the export fields."
+            )
+        if skipped_dupe:
+            result.warnings.append(
+                f"{skipped_dupe} duplicate IPs merged into existing host records."
+            )
 
         result.hosts = list(host_map.values())
         return result
@@ -244,6 +262,8 @@ class CrowdStrikeParser(BaseParser):
         host_map: dict[str, Host] = {}
         first = resources[0] if resources and isinstance(resources[0], dict) else {}
         is_spotlight = "cve" in first or ("aid" in first and "host_info" in first)
+        skipped_no_ip = 0
+        skipped_dupe  = 0
 
         for rec in resources:
             if not isinstance(rec, dict):
@@ -252,9 +272,22 @@ class CrowdStrikeParser(BaseParser):
                 _spotlight_rec_to_host_map(rec, host_map, result.source_file)
             else:
                 host = _device_to_host(rec, result.source_file)
-                if host and host.ip and host.ip != "0.0.0.0":
-                    if host.ip not in host_map:
-                        host_map[host.ip] = host
+                if not host or not host.ip or host.ip == "0.0.0.0":
+                    skipped_no_ip += 1
+                elif host.ip in host_map:
+                    skipped_dupe += 1
+                else:
+                    host_map[host.ip] = host
+
+        if skipped_no_ip:
+            result.warnings.append(
+                f"{skipped_no_ip} of {len(resources)} records skipped — no valid IP address. "
+                "Ensure 'Sensor IP address' (local_ip) is included in the export fields."
+            )
+        if skipped_dupe:
+            result.warnings.append(
+                f"{skipped_dupe} duplicate IPs merged into existing host records."
+            )
 
         result.hosts = list(host_map.values())
         return result
@@ -487,10 +520,10 @@ def _looks_like_mac(s: str) -> bool:
 
 
 def _pick_primary_ip(ips: list) -> str:
-    """Pick the best IP from a list: prefer non-APIPA (169.254.x.x), non-loopback."""
+    """Pick the best IP from a list: prefer non-link-local, non-loopback (IPv4 or IPv6)."""
     valid = [i.strip() for i in ips if isinstance(i, str) and _valid_ip(i.strip())]
-    non_apipa = [ip for ip in valid if not ip.startswith("169.254.") and not ip.startswith("127.")]
-    return non_apipa[0] if non_apipa else (valid[0] if valid else "")
+    preferred = [ip for ip in valid if not _is_link_local_or_loopback(ip)]
+    return preferred[0] if preferred else (valid[0] if valid else "")
 
 
 def _device_to_host(rec: dict, source: str) -> Host | None:
@@ -511,7 +544,7 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
         extra_ips = [
             i.strip() for i in local_ips_raw
             if isinstance(i, str) and _valid_ip(i.strip())
-            and i.strip() != ip and not i.strip().startswith("169.254.")
+            and i.strip() != ip and not _is_link_local_or_loopback(i.strip())
         ]
     else:
         # Falcon API format or single-IP field
@@ -523,7 +556,7 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
     if isinstance(ip_hist_raw, list) and ip_hist_raw:
         hist_ips = [i.strip() for i in ip_hist_raw
                     if isinstance(i, str) and _valid_ip(i.strip())
-                    and not i.strip().startswith("169.254.")]
+                    and not _is_link_local_or_loopback(i.strip())]
         if not ip or not _valid_ip(ip):
             # No current IP — use most recent history entry
             ip = hist_ips[0] if hist_ips else ip
@@ -616,7 +649,7 @@ def _device_row_to_host(norm: dict[str, str], source: str) -> Host | None:
               or norm.get("ip") or "").strip()
     ip_parts = [i.strip() for i in ip_raw.split(",")
                 if i.strip() and _valid_ip(i.strip())
-                and not i.strip().startswith("169.254.")]
+                and not _is_link_local_or_loopback(i.strip())]
     ip = ip_parts[0] if ip_parts else ip_raw.split(",")[0].strip()
     extra_ips = ip_parts[1:]
     if not ip or not _valid_ip(ip):
@@ -680,11 +713,18 @@ def _map_platform(platform: str) -> str:
 
 
 def _valid_ip(s: str) -> bool:
-    """Quick IPv4 sanity check — avoids importing ipaddress for every row."""
-    parts = s.split(".")
-    if len(parts) != 4:
-        return False
+    """Validate an IPv4 or IPv6 address string."""
     try:
-        return all(0 <= int(p) <= 255 for p in parts)
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_link_local_or_loopback(s: str) -> bool:
+    """Return True if the IP is a link-local or loopback address (IPv4 or IPv6)."""
+    try:
+        a = ipaddress.ip_address(s)
+        return a.is_loopback or a.is_link_local or a.is_unspecified
     except ValueError:
         return False

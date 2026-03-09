@@ -61,7 +61,7 @@ def _create_edit_modal() -> html.Div:
                         html.Label("Additional IPs (comma-separated)",
                                    className="edit-label"),
                         dcc.Input(id="edit-additional-ips", type="text",
-                                  placeholder="e.g. 10.0.0.1, 172.16.0.1",
+                                  placeholder="e.g. 10.0.0.1, 2001:db8::1",
                                   className="edit-input"),
                         html.Label("Domain", className="edit-label"),
                         dcc.Input(id="edit-domain", type="text",

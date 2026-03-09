@@ -231,7 +231,7 @@ class CrowdStrikeParser(BaseParser):
                         _console_spotlight_rec_to_host_map(rec, host_map, result.source_file)
                     else:
                         host = _device_to_host(rec, result.source_file)
-                        if not host or not host.ip or host.ip == "0.0.0.0":
+                        if not host:
                             skipped_no_ip += 1
                         elif host.ip in host_map:
                             skipped_dupe += 1
@@ -242,7 +242,8 @@ class CrowdStrikeParser(BaseParser):
 
         if skipped_no_ip:
             msg = (
-                f"{skipped_no_ip} of {total_recs} records skipped — no valid IP address. "
+                f"{skipped_no_ip} of {total_recs} records skipped — no routable IP found "
+                f"(checked: local_ip, local_ips, network_interfaces, ip_address_history, external_ip). "
             )
             if is_console_spotlight:
                 msg += (
@@ -251,11 +252,14 @@ class CrowdStrikeParser(BaseParser):
                     "device inventory export. Import the device inventory first."
                 )
             else:
-                msg += "Ensure 'Sensor IP address' (local_ip) is included in the export fields."
+                msg += (
+                    "These are likely offline or sensor-less assets. "
+                    "Add 'Sensor IP address' (local_ip) to your export fields if not already included."
+                )
             result.warnings.append(msg)
         if skipped_dupe:
             result.warnings.append(
-                f"{skipped_dupe} duplicate IPs merged into existing host records."
+                f"{skipped_dupe} of {total_recs} records had a duplicate IP — merged into existing host."
             )
 
         result.hosts = list(host_map.values())
@@ -311,7 +315,7 @@ class CrowdStrikeParser(BaseParser):
                 _console_spotlight_rec_to_host_map(rec, host_map, result.source_file)
             else:
                 host = _device_to_host(rec, result.source_file)
-                if not host or not host.ip or host.ip == "0.0.0.0":
+                if not host:
                     skipped_no_ip += 1
                 elif host.ip in host_map:
                     skipped_dupe += 1
@@ -320,12 +324,12 @@ class CrowdStrikeParser(BaseParser):
 
         if skipped_no_ip:
             result.warnings.append(
-                f"{skipped_no_ip} of {len(resources)} records skipped — no valid IP address. "
-                "Ensure 'Sensor IP address' (local_ip) is included in the export fields."
+                f"{skipped_no_ip} of {len(resources)} records skipped — no routable IP found. "
+                "These are likely offline or sensor-less assets."
             )
         if skipped_dupe:
             result.warnings.append(
-                f"{skipped_dupe} duplicate IPs merged into existing host records."
+                f"{skipped_dupe} of {len(resources)} records had a duplicate IP — merged into existing host."
             )
 
         result.hosts = list(host_map.values())
@@ -660,37 +664,57 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
     # ── IP resolution ─────────────────────────────────────────────────────────
     extra_ips: list[str] = []
 
-    # local_ips: current known IPs (Discover array export)
+    def _is_usable(addr: str) -> bool:
+        """True if addr is a valid, routable (non-link-local, non-loopback) IP."""
+        return _valid_ip(addr) and not _is_link_local_or_loopback(addr)
+
+    # 1. local_ips: current known IPs array (Discover export)
     local_ips_raw = rec.get("local_ips")
     if isinstance(local_ips_raw, list) and local_ips_raw:
         ip = _pick_primary_ip(local_ips_raw)
         extra_ips = [
             i.strip() for i in local_ips_raw
-            if isinstance(i, str) and _valid_ip(i.strip())
-            and i.strip() != ip and not _is_link_local_or_loopback(i.strip())
+            if isinstance(i, str) and _is_usable(i.strip()) and i.strip() != ip
         ]
     else:
-        # Falcon API format or single-IP field
-        ip = (rec.get("local_ip") or rec.get("connection_ip") or "").strip()
+        # 2. Scalar local_ip / connection_ip — only use if routable
+        _scalar = (rec.get("local_ip") or rec.get("connection_ip") or "").strip()
+        ip = _scalar if _is_usable(_scalar) else ""
 
-    # ip_address_history: historical IPs — use as primary if nothing else found,
-    # and always merge into additional_ips
+    # 3. network_interfaces array — each element may carry a local_ip
+    if not ip:
+        net_ifaces = rec.get("network_interfaces") or []
+        if isinstance(net_ifaces, list):
+            iface_ips = [
+                iface.get("local_ip", "").strip()
+                for iface in net_ifaces
+                if isinstance(iface, dict) and _is_usable(iface.get("local_ip", "").strip())
+            ]
+            ip = iface_ips[0] if iface_ips else ""
+            extra_ips = list(dict.fromkeys(
+                [a for a in iface_ips[1:] if a != ip] + extra_ips
+            ))
+
+    # 4. ip_address_history — most recent routable historical IP
     ip_hist_raw = rec.get("ip_address_history")
     if isinstance(ip_hist_raw, list) and ip_hist_raw:
-        hist_ips = [i.strip() for i in ip_hist_raw
-                    if isinstance(i, str) and _valid_ip(i.strip())
-                    and not _is_link_local_or_loopback(i.strip())]
-        if not ip or not _valid_ip(ip):
-            # No current IP — use most recent history entry
-            ip = hist_ips[0] if hist_ips else ip
-        # Remaining history IPs become additional IPs
+        hist_ips = [
+            i.strip() for i in ip_hist_raw
+            if isinstance(i, str) and _is_usable(i.strip())
+        ]
+        if not ip:
+            ip = hist_ips[0] if hist_ips else ""
         for h in hist_ips:
             if h != ip and h not in extra_ips:
                 extra_ips.append(h)
 
-    if not ip or not _valid_ip(ip):
-        ip = (rec.get("external_ip") or "").strip()
-    if not ip or not _valid_ip(ip):
+    # 5. external_ip as last resort
+    if not ip:
+        _ext = (rec.get("external_ip") or "").strip()
+        if _is_usable(_ext):
+            ip = _ext
+
+    if not ip:
         return None
 
     # ── Hostname / MAC ────────────────────────────────────────────────────────

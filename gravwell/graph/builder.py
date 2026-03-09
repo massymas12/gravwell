@@ -682,80 +682,55 @@ def _compute_preset_positions(
             else:
                 node_positions[ip] = algo_pos.get(ip, {"x": cx, "y": cy})
 
-    # Position floating bridge nodes above the actual bounding boxes of the
-    # subnets they bridge.  Using the real top-edge of the compound boxes
-    # (not a fixed pixel offset) prevents overlap with the subnet groups.
-    # Bridge nodes connecting the same subnet pair are spread horizontally.
+    # Position bridge (multi-subnet) nodes in a dedicated row ABOVE the entire
+    # subnet grid so they never overlap any subnet box.
+    # x-position = centroid of their connected subnets → short bridge edges.
+    # Multiple bridge nodes at the same x are spread horizontally.
     if multi_subnet_nodes and node_subnets:
-        bridge_groups: dict[tuple, list] = {}
-        # Extra clearance beyond the estimated box edge — accounts for
-        # Cytoscape compound-node padding and label height.
-        _CLEAR = 40
+        # Find the top edge of the entire grid so we can place bridges above it.
+        if subnet_center:
+            grid_top_y = min(
+                cy - subnet_box.get(s, 120.0) / 2
+                for s, (_, cy) in subnet_center.items()
+            )
+        else:
+            grid_top_y = 0.0
+        _BRIDGE_ROW_Y = grid_top_y - 120  # 120 px clear of the topmost subnet box
+
+        # Group bridges by the sorted set of subnets they connect so that
+        # bridges spanning the same pair are spread rather than stacked.
+        bridge_entries: list[tuple[str, float]] = []  # (node_id, target_x)
         for node_id in multi_subnet_nodes:
+            if saved_positions and node_id in saved_positions:
+                sx, sy = saved_positions[node_id]
+                node_positions[node_id] = {"x": sx, "y": sy}
+                continue
             subnets = node_subnets.get(node_id, set())
             valid = [s for s in subnets if s in subnet_center]
-            if not valid:
-                continue
-            centers_v = [subnet_center[s] for s in valid]
-            # Start at the centroid of the connected subnet centres — for
-            # two adjacent subnets this already lands in the gap.
-            cx = sum(c[0] for c in centers_v) / len(centers_v)
-            cy = sum(c[1] for c in centers_v) / len(centers_v)
-            # Iteratively push the position outside every subnet box it
-            # overlaps.  Needed when 3+ subnets from different /16 bands
-            # are bridged and the centroid falls inside the middle band.
-            for _ in range(10):
-                pushed = False
-                for s in valid:
-                    scx, scy = subnet_center[s]
-                    h = subnet_box.get(s, 120.0) / 2 + _CLEAR
-                    dx, dy = cx - scx, cy - scy
-                    if abs(dx) < h and abs(dy) < h:
-                        pushed = True
-                        # Exit through whichever axis we're already further
-                        # along — this picks the shortest escape route.
-                        if abs(dx) >= abs(dy):
-                            cx = scx + h * (math.copysign(1, dx) if dx else 1.0)
-                        else:
-                            cy = scy + h * (math.copysign(1, dy) if dy else 1.0)
-                if not pushed:
-                    break
-            key = tuple(sorted(valid))
-            bridge_groups.setdefault(key, []).append((node_id, cx, cy))
+            if valid:
+                target_x = sum(subnet_center[s][0] for s in valid) / len(valid)
+            else:
+                # No known subnets: park far left in the bridge row
+                target_x = -200.0
+            bridge_entries.append((node_id, target_x))
 
-        _BRIDGE_SPREAD = 70  # px between co-located bridge nodes
-        for node_list in bridge_groups.values():
-            n = len(node_list)
-            for i, (node_id, cx, cy) in enumerate(node_list):
-                x_off = (i - (n - 1) / 2) * _BRIDGE_SPREAD
-                node_positions[node_id] = {
-                    "x": round(cx + x_off, 1),
-                    "y": round(cy, 1),
-                }
+        # Sort by target_x so nearby bridges stay near each other
+        bridge_entries.sort(key=lambda t: t[1])
 
-        # Push apart bridge nodes that ended up too close to each other
-        # (happens when several switches share many of the same subnets).
-        bridge_ids = [n for n in multi_subnet_nodes if n in node_positions]
-        _MIN_SEP = 80
-        for _ in range(30):
-            moved = False
-            for i in range(len(bridge_ids)):
-                for j in range(i + 1, len(bridge_ids)):
-                    a, b = bridge_ids[i], bridge_ids[j]
-                    ax, ay = node_positions[a]["x"], node_positions[a]["y"]
-                    bx, by = node_positions[b]["x"], node_positions[b]["y"]
-                    dx, dy = bx - ax, by - ay
-                    dist = math.sqrt(dx * dx + dy * dy) or 0.01
-                    if dist < _MIN_SEP:
-                        moved = True
-                        push = (_MIN_SEP - dist) / 2 + 1
-                        ux, uy = dx / dist, dy / dist
-                        node_positions[a]["x"] = round(ax - ux * push, 1)
-                        node_positions[a]["y"] = round(ay - uy * push, 1)
-                        node_positions[b]["x"] = round(bx + ux * push, 1)
-                        node_positions[b]["y"] = round(by + uy * push, 1)
-            if not moved:
-                break
+        # Assign x positions: keep _MIN_SEP apart if they would overlap
+        _MIN_SEP = 90
+        placed_x: list[float] = []
+        for node_id, tx in bridge_entries:
+            x = tx
+            # Nudge right until at least _MIN_SEP from every already-placed node
+            for px in placed_x:
+                if abs(x - px) < _MIN_SEP:
+                    x = px + _MIN_SEP
+            placed_x.append(x)
+            node_positions[node_id] = {
+                "x": round(x, 1),
+                "y": round(_BRIDGE_ROW_Y, 1),
+            }
 
     # Inject positions into leaf-node elements (not compound nodes, not edges)
     result: list[dict] = []

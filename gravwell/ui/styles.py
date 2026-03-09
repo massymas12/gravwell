@@ -41,7 +41,7 @@ CYTOSCAPE_STYLESHEET = [
             "border-width": "2.5px",
             "border-style": "dashed",
             "border-opacity": 0.8,
-            "padding": "25px",
+            "padding": "12px",
             "shape": "roundrectangle",
         },
     },
@@ -178,22 +178,6 @@ CYTOSCAPE_STYLESHEET = [
             "shape": "pentagon",
         },
     },
-    # -------------------------------------------------------------------------
-    # Bridge / multi-subnet nodes — extra large so they're visible between boxes
-    # -------------------------------------------------------------------------
-    {
-        "selector": ".bridge-node",
-        "style": {
-            "width": "70px",
-            "height": "70px",
-            "border-width": "4px",
-            "font-size": "9px",
-            "text-wrap": "wrap",
-            "text-max-width": "90px",
-            "z-index": 100,
-        },
-    },
-
     # -------------------------------------------------------------------------
     # Domain Controller — star shape, deep purple (overrides router/gateway)
     # -------------------------------------------------------------------------
@@ -467,6 +451,23 @@ CYTOSCAPE_STYLESHEET = [
         "style": {
             "opacity": 0.25,
             "width": "0.5px",
+        },
+    },
+
+    # -------------------------------------------------------------------------
+    # Bridge / multi-subnet nodes — placed last so severity/dense classes
+    # cannot shrink them back down (later rules win in Cytoscape).
+    # -------------------------------------------------------------------------
+    {
+        "selector": ".bridge-node",
+        "style": {
+            "width": "70px",
+            "height": "70px",
+            "border-width": "4px",
+            "font-size": "9px",
+            "text-wrap": "wrap",
+            "text-max-width": "90px",
+            "z-index": 100,
         },
     },
 ]

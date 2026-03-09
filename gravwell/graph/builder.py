@@ -415,10 +415,10 @@ def _compute_preset_positions(
       - The "preset" layout uses them directly (zero overlap guaranteed).
       - Cose-bilkent with randomize:false uses them as warm-start positions.
     """
-    _GAP = 100        # gap between subnet boxes within a /16 band
-    _GROUP_GAP = 220  # extra vertical gap between /16 bands
-    _PAD = 70         # internal padding allowance (stylesheet: 30px + labels)
-    _MAX_COLS = 8     # max columns per /16 band
+    _GAP = 25         # gap between subnet box edges within a domain/band
+    _GROUP_GAP = 100  # extra vertical gap between depth bands
+    _PAD = 40         # internal padding allowance (stylesheet: 30px padding + label)
+    _MAX_COLS = 8     # max columns per domain/band grid
 
     def _node_sz(n_hosts: int) -> int:
         if n_hosts > 30:
@@ -441,100 +441,135 @@ def _compute_preset_positions(
         r = _spoke_r(k, sz)
         subnet_box[subnet] = max(120.0, 2 * r + 2 * _PAD + sz * 2)
 
-    # Group subnets by /16, sort groups by total-hosts descending
-    groups: dict[str, list[str]] = {}
-    for subnet in subnet_ips:
-        groups.setdefault(_subnet_net16(subnet), []).append(subnet)
+    # ── Domain-depth layout ───────────────────────────────────────────────────
+    # Group subnets by their domain, then group domains by depth.
+    # Each depth level occupies a full horizontal band so all top-level domains
+    # (depth 0) share the same y row, depth-1 subdomains appear on the row
+    # below, and so on.  Undomained subnets fall to the bottom via /16 grouping.
 
-    def _group_sort_key(subs: list[str]) -> tuple:
-        # Primary: minimum domain depth of any subnet in this /16 group.
-        #   Depth 0 (top-level domain) → appears above depth 1 (subdomain).
-        #   Groups with no domain assignment sort last.
-        if subnet_domain and domain_depth:
-            depths = [domain_depth.get(subnet_domain.get(s, ""), 999) for s in subs]
-            min_depth = min(depths)
-        else:
-            min_depth = 999
-        # Secondary: total host count descending (larger groups above smaller).
-        total_hosts = sum(len(subnet_ips[s]) for s in subs)
-        return (min_depth, -total_hosts)
+    _DOMAIN_GAP = 60   # horizontal gap between adjacent domain boxes at the same depth
 
-    groups_sorted = sorted(groups.values(), key=_group_sort_key)
-    # Within each /16 band: sort by CIDR numerical address.
-    # This places 10.1.1.0/24 → 10.1.2.0/24 → 10.1.3.0/24 side-by-side so
-    # the chain inter-subnet edges always connect adjacent grid cells and
-    # never cross each other.
-    for group in groups_sorted:
-        group.sort(key=lambda s: (
+    def _sort_subs(subs: list[str]) -> list[str]:
+        return sorted(subs, key=lambda s: (
             ipaddress.ip_network(s, strict=False).network_address
-            if s != "unknown" else 0
+            if s != "unknown"
+            else ipaddress.ip_network("0.0.0.0/0").network_address
         ))
 
-    # Place each /16 group as a horizontal band
-    subnet_center: dict[str, tuple[float, float]] = {}
-    y_cursor = 0.0
+    def _place_subnet_grid(
+        subs: list[str], x_start: float, y_start: float
+    ) -> tuple[dict[str, tuple[float, float]], float, float]:
+        """Place subnets in a compact grid starting at (x_start, y_start).
 
-    for group_subnets in groups_sorted:
-        n_g = len(group_subnets)
-        ncols = max(1, min(_MAX_COLS, math.ceil(math.sqrt(n_g))))
-        nrows = math.ceil(n_g / ncols)
+        Returns (subnet_centers_dict, total_width, total_height).
+        """
+        n = len(subs)
+        ncols = max(1, min(_MAX_COLS, math.ceil(math.sqrt(n))))
+        nrows = math.ceil(n / ncols)
 
         grid: list[list[str | None]] = [
-            [group_subnets[r * ncols + c] if r * ncols + c < n_g else None
+            [subs[r * ncols + c] if r * ncols + c < n else None
              for c in range(ncols)]
             for r in range(nrows)
         ]
-
         col_widths = [
-            max((subnet_box[grid[r][c]] for r in range(nrows) if grid[r][c]), default=120.0)
+            max((subnet_box[grid[r][c]] for r in range(nrows) if grid[r][c]),
+                default=120.0)
             for c in range(ncols)
         ]
         row_heights = [
-            max((subnet_box[grid[r][c]] for c in range(ncols) if grid[r][c]), default=120.0)
+            max((subnet_box[grid[r][c]] for c in range(ncols) if grid[r][c]),
+                default=120.0)
             for r in range(nrows)
         ]
 
         col_x: list[float] = []
-        x = 0.0
+        x = x_start
         for w in col_widths:
             col_x.append(x + w / 2)
             x += w + _GAP
 
         row_y: list[float] = []
-        y = y_cursor
+        y = y_start
         for h in row_heights:
             row_y.append(y + h / 2)
             y += h + _GAP
 
+        centers: dict[str, tuple[float, float]] = {}
         for r in range(nrows):
             for c in range(ncols):
                 s = grid[r][c]
                 if s:
-                    subnet_center[s] = (col_x[c], row_y[r])
+                    centers[s] = (col_x[c], row_y[r])
 
+        total_w = sum(col_widths) + _GAP * max(0, ncols - 1)
         total_h = sum(row_heights) + _GAP * max(0, nrows - 1)
-        y_cursor += total_h + _GROUP_GAP
+        return centers, total_w, total_h
+
+    # domain → sorted subnets
+    domain_to_subs: dict[str, list[str]] = {}
+    for sn, dom in (subnet_domain or {}).items():
+        if sn in subnet_ips:
+            domain_to_subs.setdefault(dom, []).append(sn)
+    for dom in domain_to_subs:
+        domain_to_subs[dom] = _sort_subs(domain_to_subs[dom])
+
+    # depth → list of domain names (largest first within each depth)
+    depth_to_doms: dict[int, list[str]] = {}
+    for dom, dep in (domain_depth or {}).items():
+        if dom in domain_to_subs:
+            depth_to_doms.setdefault(dep, []).append(dom)
+    for dep in depth_to_doms:
+        depth_to_doms[dep].sort(
+            key=lambda d: -sum(len(subnet_ips[s]) for s in domain_to_subs[d])
+        )
+
+    subnet_center: dict[str, tuple[float, float]] = {}
+    y_cursor = 0.0
+
+    # One horizontal band per depth level
+    for dep in sorted(depth_to_doms.keys()):
+        max_band_h = 0.0
+        x_cursor = 0.0
+        for dom in depth_to_doms[dep]:
+            centers, dom_w, dom_h = _place_subnet_grid(
+                domain_to_subs[dom], x_cursor, y_cursor
+            )
+            subnet_center.update(centers)
+            x_cursor += dom_w + _DOMAIN_GAP
+            max_band_h = max(max_band_h, dom_h)
+        y_cursor += max_band_h + _GROUP_GAP
+
+    # Subnets with no domain: placed at the bottom using /16 grouping
+    domained_set = set(subnet_domain.keys()) if subnet_domain else set()
+    undomained = [s for s in subnet_ips if s not in domained_set]
+    if undomained:
+        ugroups: dict[str, list[str]] = {}
+        for s in undomained:
+            ugroups.setdefault(_subnet_net16(s), []).append(s)
+        for g in ugroups.values():
+            g[:] = _sort_subs(g)
+        ugroups_sorted = sorted(
+            ugroups.values(),
+            key=lambda g: -sum(len(subnet_ips[s]) for s in g)
+        )
+        for group_subs in ugroups_sorted:
+            centers, grp_w, grp_h = _place_subnet_grid(group_subs, 0.0, y_cursor)
+            subnet_center.update(centers)
+            y_cursor += grp_h + _GROUP_GAP
 
     # Compute leaf-node positions (hub at centre, hosts on spoke circle)
     node_positions: dict[str, dict[str, float]] = {}
     for subnet, ips in subnet_ips.items():
         hub_id = subnet_hub.get(subnet)
+        # Always use the algorithmically computed subnet centre so the
+        # domain-depth layout is respected.  Saved positions are NOT used here
+        # because stale DB positions from a previous layout would pull nodes
+        # into the wrong part of the canvas (different corner of the screen).
+        # Saved positions are still used by cose-bilkent as a warm start via
+        # the element["position"] field, but the preset layout always reflects
+        # the current algorithm.
         cx, cy = subnet_center.get(subnet, (0.0, 0.0))
-        # If the hub has a persisted position, centre the spoke ring there so
-        # newly-added nodes (which have no saved position yet) still orbit the
-        # hub and stay inside the compound box rather than snapping to wherever
-        # the old grid math put the subnet centre.
-        if saved_positions and hub_id and hub_id in saved_positions:
-            cx, cy = saved_positions[hub_id]
-        elif saved_positions:
-            # Hub has no saved position; use centroid of any saved spoke
-            # positions so that new nodes orbit the existing cluster instead
-            # of snapping to wherever the grid math placed this subnet.
-            saved_spokes = [saved_positions[ip] for ip in ips
-                            if ip != hub_id and ip in saved_positions]
-            if saved_spokes:
-                cx = sum(p[0] for p in saved_spokes) / len(saved_spokes)
-                cy = sum(p[1] for p in saved_spokes) / len(saved_spokes)
         sz = _node_sz(len(ips))
         non_hub = [ip for ip in ips if ip != hub_id]
         k = len(non_hub)
@@ -544,15 +579,11 @@ def _compute_preset_positions(
             node_positions[hub_id] = {"x": cx, "y": cy}
 
         for i, ip in enumerate(non_hub):
-            if saved_positions and ip in saved_positions:
-                sx, sy = saved_positions[ip]
-                node_positions[ip] = {"x": sx, "y": sy}
-            else:
-                angle = (2 * math.pi * i) / max(k, 1)
-                node_positions[ip] = {
-                    "x": round(cx + r * math.cos(angle), 1),
-                    "y": round(cy + r * math.sin(angle), 1),
-                }
+            angle = (2 * math.pi * i) / max(k, 1)
+            node_positions[ip] = {
+                "x": round(cx + r * math.cos(angle), 1),
+                "y": round(cy + r * math.sin(angle), 1),
+            }
 
     # Position floating bridge nodes above the actual bounding boxes of the
     # subnets they bridge.  Using the real top-edge of the compound boxes
@@ -564,10 +595,6 @@ def _compute_preset_positions(
         # Cytoscape compound-node padding and label height.
         _CLEAR = 40
         for node_id in multi_subnet_nodes:
-            if saved_positions and node_id in saved_positions:
-                sx, sy = saved_positions[node_id]
-                node_positions[node_id] = {"x": sx, "y": sy}
-                continue
             subnets = node_subnets.get(node_id, set())
             valid = [s for s in subnets if s in subnet_center]
             if not valid:

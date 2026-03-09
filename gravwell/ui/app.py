@@ -671,16 +671,12 @@ def create_app(db_path: str) -> dash.Dash:
             if (!store_data) return window.dash_clientside.no_update;
             var cy = window._gravwell_cy;
             if (!cy) return window.dash_clientside.no_update;
-            var dataUrl = cy.png({scale: 1, full: true, bg: '#121212'});
-            if (!dataUrl || dataUrl.length < 100) return window.dash_clientside.no_update;
-            // Convert data URL to Blob — avoids browser limits on large data URIs
-            var b64 = dataUrl.split(',')[1];
-            if (!b64) return window.dash_clientside.no_update;
             try {
-                var byteStr = atob(b64);
-                var arr = new Uint8Array(byteStr.length);
-                for (var i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
-                var blob = new Blob([arr], {type: 'image/png'});
+                var blob = cy.png({output: 'blob', scale: 1, full: true, bg: '#121212'});
+                if (!blob || blob.size === 0) {
+                    console.error('PNG export: cy.png returned empty blob');
+                    return window.dash_clientside.no_update;
+                }
                 var blobUrl = URL.createObjectURL(blob);
                 var a = document.createElement('a');
                 a.href = blobUrl;

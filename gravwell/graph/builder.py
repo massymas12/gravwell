@@ -614,8 +614,8 @@ def _compute_preset_positions(
     def _ip_sort_key(s: str):
         try:
             return (
-                ipaddress.ip_network(_subnet_net16(s), strict=False).network_address,
-                ipaddress.ip_network(s, strict=False).network_address,
+                int(ipaddress.ip_network(_subnet_net16(s), strict=False).network_address),
+                int(ipaddress.ip_network(s, strict=False).network_address),
             )
         except ValueError:
             return (0, 0)

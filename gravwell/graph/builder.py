@@ -482,8 +482,6 @@ def _compute_preset_positions(
     # (depth 0) share the same y row, depth-1 subdomains appear on the row
     # below, and so on.  Undomained subnets fall to the bottom via /16 grouping.
 
-    _DOMAIN_GAP = 120  # horizontal gap between adjacent domain boxes (wider = clearer parent-child lines)
-
     # ── Connectivity-aware ordering helpers ───────────────────────────────────
     # Build a reverse lookup: hub IP → subnet (used to trace edges back to subnets)
     hub_subnet: dict[str, str] = {
@@ -535,13 +533,6 @@ def _compute_preset_positions(
                 visited.add(nxt)
                 queue.append(nxt)
         return ordered
-
-    def _sort_subs(subs: list[str]) -> list[str]:
-        return sorted(subs, key=lambda s: (
-            ipaddress.ip_network(s, strict=False).network_address
-            if s != "unknown"
-            else ipaddress.ip_network("0.0.0.0/0").network_address
-        ))
 
     def _place_subnet_grid(
         subs: list[str], x_start: float, y_start: float,
@@ -597,187 +588,54 @@ def _compute_preset_positions(
         total_h = sum(row_heights) + _GAP * max(0, nrows - 1)
         return centers, total_w, total_h
 
-    # domain → sorted subnets
-    domain_to_subs: dict[str, list[str]] = {}
-    for sn, dom in (subnet_domain or {}).items():
-        if sn in subnet_ips:
-            domain_to_subs.setdefault(dom, []).append(sn)
-    for dom in domain_to_subs:
-        domain_to_subs[dom] = _sort_subs(domain_to_subs[dom])
+    # ── Depth-layered placement with per-layer BFS connectivity ordering ─────
+    # Subnets are bucketed by domain depth so the visual hierarchy is preserved:
+    #   depth 0 (top-level domains) → top rows
+    #   depth 1 (subdomains)        → rows below
+    #   undomained                  → bottom rows
+    # Within each depth bucket the subnets are BFS-ordered by gold-edge
+    # connectivity so subnets that route to each other land in adjacent cells —
+    # minimising inter-subnet line lengths regardless of domain membership.
 
-    # depth → ordered list of domain names.
-    # Ordering goal: minimise edge length and crossings.
-    #   Depth 0: alphabetical (arbitrary tie-break, no parent to align to).
-    #   Depth N: sort by (parent's position in the depth-N-1 band, then name).
-    #     This groups all children of CORP.COM together, directly below CORP.COM,
-    #     and all children of EXTERNAL.COM together below EXTERNAL.COM — so the
-    #     edges from subdomains to their parent never cross each other.
-    all_dom_names = list(domain_to_subs.keys())
-
-    def _dom_parent(dom: str) -> str | None:
-        """Most-specific parent domain (longest suffix that is a known domain)."""
-        candidates = [d for d in all_dom_names if d != dom and dom.endswith("." + d)]
-        return max(candidates, key=len) if candidates else None
-
-    depth_to_doms: dict[int, list[str]] = {}
-    for dom, dep in (domain_depth or {}).items():
-        if dom in domain_to_subs:
-            depth_to_doms.setdefault(dep, []).append(dom)
-
-    # ── Compute each domain's own grid width ─────────────────────────────────
-    def _dom_own_width(dom: str) -> float:
-        subs = domain_to_subs[dom]
-        n = len(subs)
-        ncols = min(_MAX_COLS, n)          # match _place_subnet_grid formula
-        nrows = math.ceil(n / ncols)
-        col_ws = []
-        for c in range(ncols):
-            cw = max(
-                (subnet_box[subs[r * ncols + c]] for r in range(nrows)
-                 if r * ncols + c < n),
-                default=120.0,
-            )
-            col_ws.append(cw)
-        return sum(col_ws) + _GAP * max(0, ncols - 1)
-
-    dom_own_w: dict[str, float] = {d: _dom_own_width(d) for d in domain_to_subs}
-
-    # ── Build domain adjacency from subnet adjacency ──────────────────────────
-    # Two domains are adjacent if any of their subnets share a gold inter-subnet
-    # edge. Using this to order depth-0 domains keeps gold cross-domain edges short.
-    domain_adj: dict[str, set[str]] = {d: set() for d in domain_to_subs}
-    for _s1, _neighbours in subnet_adj.items():
-        _d1 = (subnet_domain or {}).get(_s1)
-        for _s2 in _neighbours:
-            _d2 = (subnet_domain or {}).get(_s2)
-            if _d1 and _d2 and _d1 != _d2 and _d1 in domain_adj and _d2 in domain_adj:
-                domain_adj[_d1].add(_d2)
-                domain_adj[_d2].add(_d1)
-
-    # ── Order each depth band: children grouped under their parent ────────────
-    ordered_at: dict[int, list[str]] = {}
-    for dep in sorted(depth_to_doms.keys()):
-        doms = depth_to_doms[dep]
-        if dep == 0:
-            # BFS ordering so domains connected by gold edges are placed adjacent
-            ordered_at[dep] = _bfs_order(sorted(doms), domain_adj)
+    # Build per-depth buckets
+    subnet_depth: dict[str, int] = {}
+    for s in subnet_ips:
+        dom = (subnet_domain or {}).get(s)
+        if dom and domain_depth:
+            subnet_depth[s] = domain_depth.get(dom, 0)
         else:
-            parent_rank = {d: i for i, d in enumerate(ordered_at.get(dep - 1, []))}
-            ordered_at[dep] = sorted(
-                doms,
-                key=lambda d: (parent_rank.get(_dom_parent(d), 999), d),
+            subnet_depth[s] = 9999  # undomained always below domained
+
+    depth_buckets: dict[int, list[str]] = collections.defaultdict(list)
+    for s in subnet_ips:
+        depth_buckets[subnet_depth[s]].append(s)
+
+    # BFS-order within each bucket then concatenate in depth order
+    def _ip_sort_key(s: str):
+        try:
+            return (
+                ipaddress.ip_network(_subnet_net16(s), strict=False).network_address,
+                ipaddress.ip_network(s, strict=False).network_address,
             )
-        depth_to_doms[dep] = ordered_at[dep]
+        except ValueError:
+            return (0, 0)
 
-    # ── Build children list per domain (ordered) ──────────────────────────────
-    dom_children: dict[str, list[str]] = {d: [] for d in domain_to_subs}
-    for dep in sorted(depth_to_doms.keys()):
-        for dom in depth_to_doms[dep]:
-            par = _dom_parent(dom)
-            if par and par in dom_children:
-                dom_children[par].append(dom)
+    all_subnets_ordered: list[str] = []
+    for dep in sorted(depth_buckets.keys()):
+        bucket_sorted = sorted(depth_buckets[dep], key=_ip_sort_key)
+        all_subnets_ordered.extend(_bfs_order(bucket_sorted, subnet_adj))
 
-    # ── Bottom-up: subtree width = space needed by domain + all descendants ───
-    subtree_w: dict[str, float] = {}
+    n_total = len(all_subnets_ordered)
+    # ncols chosen so each depth level spans at most ~2 rows, keeping the
+    # hierarchy vertically compact.  Use the widest bucket as the target width.
+    widest_bucket = max(len(b) for b in depth_buckets.values()) if depth_buckets else 1
+    ncols_total = min(12, max(1, math.ceil(math.sqrt(widest_bucket * 2.0))))
 
-    def _subtree_width(dom: str) -> float:
-        if dom in subtree_w:
-            return subtree_w[dom]
-        children = dom_children[dom]
-        if not children:
-            subtree_w[dom] = dom_own_w[dom]
-        else:
-            ch_total = (sum(_subtree_width(c) for c in children)
-                        + _DOMAIN_GAP * (len(children) - 1))
-            subtree_w[dom] = max(dom_own_w[dom], ch_total)
-        return subtree_w[dom]
-
-    for dom in domain_to_subs:
-        _subtree_width(dom)
-
-    # ── Top-down: assign x allocation ranges ─────────────────────────────────
-    # Root domains (depth 0) are placed left-to-right with subtree_w spacing
-    # so each root gets enough room for itself AND all its descendants.
-    # Each domain's children are then centered within the parent's allocation.
-    alloc_x: dict[str, float] = {}
-    alloc_w: dict[str, float] = {}
-
-    x_cursor = 0.0
-    for root in depth_to_doms.get(0, []):
-        alloc_x[root] = x_cursor
-        alloc_w[root] = subtree_w[root]
-        x_cursor += subtree_w[root] + _DOMAIN_GAP
-
-    def _assign_alloc(dom: str) -> None:
-        children = dom_children[dom]
-        if not children:
-            return
-        ch_total = (sum(subtree_w[c] for c in children)
-                    + _DOMAIN_GAP * (len(children) - 1))
-        # Center child block within parent's allocated range
-        child_x = alloc_x[dom] + alloc_w[dom] / 2 - ch_total / 2
-        for child in children:
-            alloc_x[child] = child_x
-            alloc_w[child] = subtree_w[child]
-            child_x += subtree_w[child] + _DOMAIN_GAP
-            _assign_alloc(child)
-
-    for root in depth_to_doms.get(0, []):
-        _assign_alloc(root)
-
-    # ── Compute per-depth y positions (all domains at same depth share y) ─────
-    depth_y: dict[int, float] = {}
-    y_cursor = 0.0
-    for dep in sorted(depth_to_doms.keys()):
-        depth_y[dep] = y_cursor
-        max_h = max(
-            (_place_subnet_grid(domain_to_subs[d], 0, 0)[2]
-             for d in depth_to_doms[dep]),
-            default=0.0,
-        )
-        y_cursor += max_h + _GROUP_GAP
-
-    # ── Place each domain's subnets centered in its allocated x range ─────────
     subnet_center: dict[str, tuple[float, float]] = {}
-    for dep in sorted(depth_to_doms.keys()):
-        y_start = depth_y[dep]
-        for dom in depth_to_doms[dep]:
-            x_alloc = alloc_x.get(dom, 0.0)
-            w_alloc = alloc_w.get(dom, dom_own_w[dom])
-            x_start = x_alloc + (w_alloc - dom_own_w[dom]) / 2
-            centers, _, _ = _place_subnet_grid(
-                domain_to_subs[dom], x_start, y_start
-            )
-            subnet_center.update(centers)
-
-    # Subnets with no domain: consolidated into one 2-D grid.
-    # BFS ordering ensures subnets connected by gold edges end up adjacent,
-    # minimising line length. Grid shape is roughly square (wider than tall)
-    # to avoid the mega-horizontal single-row problem.
-    domained_set = set(subnet_domain.keys()) if subnet_domain else set()
-    undomained = [s for s in subnet_ips if s not in domained_set]
-    if undomained:
-        # BFS order over subnet connectivity; fall back to numerical sort
-        undomained_ordered = _bfs_order(
-            sorted(
-                undomained,
-                key=lambda s: (
-                    ipaddress.ip_network(_subnet_net16(s), strict=False).network_address,
-                    ipaddress.ip_network(s, strict=False).network_address
-                    if s != "unknown" else 0,
-                ),
-            ),
-            subnet_adj,
-        )
-        n_un = len(undomained_ordered)
-        # Prefer roughly-square grid: max 10 cols, at least 4 unless fewer items
-        ncols_un = min(10, max(1, math.ceil(math.sqrt(n_un * 1.4))))
-        centers, _, grp_h = _place_subnet_grid(
-            undomained_ordered, 0.0, y_cursor, ncols=ncols_un
-        )
-        subnet_center.update(centers)
-        if grp_h > 0:
-            y_cursor += grp_h + _GROUP_GAP
+    centers, _, _ = _place_subnet_grid(
+        all_subnets_ordered, 0.0, 0.0, ncols=ncols_total
+    )
+    subnet_center.update(centers)
 
     # Compute leaf-node positions (hub at centre, hosts on spoke circle).
     # If the user has previously saved positions (by dragging), those are used

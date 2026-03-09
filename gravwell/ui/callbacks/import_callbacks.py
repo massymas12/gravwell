@@ -388,17 +388,19 @@ def register(app: dash.Dash) -> None:
         Output("ingest-progress-interval", "disabled", allow_duplicate=True),
         Output("upload-status", "children",       allow_duplicate=True),
         Output("scan-file-list", "children",      allow_duplicate=True),
+        Output("data-refresh-trigger", "data",    allow_duplicate=True),
         Input("ingest-progress-interval", "n_intervals"),
+        State("data-refresh-trigger", "data"),
         prevent_initial_call=True,
     )
-    def poll_ingest_progress(_n):
+    def poll_ingest_progress(_n, refresh_counter):
         snap = _snapshot()
 
         if not snap["finished"]:
             bar_style, bar_children = _render_bar(snap)
-            return bar_style, bar_children, False, no_update, no_update
+            return bar_style, bar_children, False, no_update, no_update, no_update
 
-        # Ingestion complete — hide bar, stop interval, show results
+        # Ingestion complete — hide bar, stop interval, show results, refresh tables
         db_path = snap["db_path"]
         return (
             {"display": "none"},
@@ -406,6 +408,7 @@ def register(app: dash.Dash) -> None:
             True,           # disable the interval
             _render_final(snap["messages"]),
             _build_scan_file_list(db_path),
+            (refresh_counter or 0) + 1,   # signal bottom tabs to reload
         )
 
     @app.callback(

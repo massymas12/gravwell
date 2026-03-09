@@ -382,6 +382,7 @@ def create_layout() -> html.Div:
             dcc.Store(id="node-positions-store"),
             dcc.Store(id="add-node-position-store"),
             dcc.Store(id="current-user-store"),
+            dcc.Store(id="data-refresh-trigger", data=0),
             dcc.Download(id="export-download"),
             dcc.Store(id="export-png-dummy"),
             # Hidden text input: JS writes graph coords here to trigger the Add Node modal.

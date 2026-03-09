@@ -15,16 +15,19 @@ def register(app: dash.Dash) -> None:
         Output("bottom-tab-content", "children"),
         Input("bottom-tabs", "value"),
         Input("apply-filters-btn", "n_clicks"),
-        Input("refresh-interval", "n_intervals"),
+        Input("data-refresh-trigger", "data"),
+        Input("project-switch-trigger", "data"),
         prevent_initial_call=False,
     )
-    def update_bottom_tab(tab, _, __):
+    def update_bottom_tab(tab, _filters, _refresh, _project):
         from dash import ctx
         triggered = ctx.triggered_id
 
-        # Never re-render the paths tab on interval or filter refresh — it
-        # would wipe any analysis results the user just ran.
-        if tab == "tab-paths" and triggered in ("refresh-interval", "apply-filters-btn"):
+        # Never re-render the paths tab on filter/refresh/project signals —
+        # it would wipe any analysis results the user just ran.
+        if tab == "tab-paths" and triggered in (
+            "data-refresh-trigger", "apply-filters-btn", "project-switch-trigger"
+        ):
             return no_update
 
         db_path = current_app.config["GRAVWELL_DB_PATH"]

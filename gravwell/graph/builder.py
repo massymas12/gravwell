@@ -428,19 +428,53 @@ def _compute_preset_positions(
             return 20
         return 32
 
-    def _spoke_r(k: int, sz: int) -> float:
+    # Max nodes on the innermost ring before adding a second ring.
+    # At sz=32 and R_MIN=60: circumference=~377px / 32 ≈ 11 nodes fit.
+    # At sz=20 → ~18 nodes, at sz=12 → ~31 nodes.
+    def _ring_capacity(ring_r: float, sz: int) -> int:
+        return max(1, int(2 * math.pi * ring_r / (sz + 4)))
+
+    def _outer_ring_r(k: int, sz: int) -> float:
+        """Radius of the outermost concentric ring needed to hold k nodes."""
         if k == 0:
             return 0.0
-        return max(60.0, (k * sz) / (2 * math.pi))
+        r = max(60.0, (min(12, k) * (sz + 4)) / (2 * math.pi))
+        placed = 0
+        while placed < k:
+            placed += _ring_capacity(r, sz)
+            if placed < k:
+                r += sz + 8
+        return r
 
-    # Estimate compound bounding-box side for each subnet
+    def _place_rings(cx: float, cy: float, nodes: list[str], sz: int) -> dict:
+        """Distribute nodes onto concentric rings around (cx, cy)."""
+        positions: dict[str, dict] = {}
+        if not nodes:
+            return positions
+        k = len(nodes)
+        r = max(60.0, (min(12, k) * (sz + 4)) / (2 * math.pi))
+        idx = 0
+        while idx < k:
+            cap = _ring_capacity(r, sz)
+            ring = nodes[idx: idx + cap]
+            for i, ip in enumerate(ring):
+                angle = (2 * math.pi * i) / len(ring)
+                positions[ip] = {
+                    "x": round(cx + r * math.cos(angle), 1),
+                    "y": round(cy + r * math.sin(angle), 1),
+                }
+            idx += cap
+            r += sz + 8
+        return positions
+
+    # Estimate compound bounding-box side for each subnet (uses outer ring radius)
     subnet_box: dict[str, float] = {}
     for subnet, ips in subnet_ips.items():
         hub = subnet_hub.get(subnet, "")
         k = sum(1 for ip in ips if ip != hub)
         sz = _node_sz(len(ips))
-        r = _spoke_r(k, sz)
-        subnet_box[subnet] = max(120.0, 2 * r + 2 * _PAD + sz * 2)
+        outer_r = _outer_ring_r(k, sz)
+        subnet_box[subnet] = max(120.0, 2 * outer_r + 2 * _PAD + sz * 2)
 
     # ── Domain-depth layout ───────────────────────────────────────────────────
     # Group subnets by their domain, then group domains by depth.
@@ -774,22 +808,21 @@ def _compute_preset_positions(
 
         sz = _node_sz(len(ips))
         non_hub = [ip for ip in ips if ip != hub_id]
-        k = len(non_hub)
-        r = _spoke_r(k, sz)
 
         if hub_id:
             node_positions[hub_id] = {"x": cx, "y": cy}
 
-        for i, ip in enumerate(non_hub):
+        # Nodes without saved positions are placed on concentric rings
+        needs_place = [ip for ip in non_hub
+                       if not (saved_positions and ip in saved_positions)]
+        algo_pos = _place_rings(cx, cy, needs_place, sz)
+
+        for ip in non_hub:
             if saved_positions and ip in saved_positions:
                 sx, sy = saved_positions[ip]
                 node_positions[ip] = {"x": sx, "y": sy}
             else:
-                angle = (2 * math.pi * i) / max(k, 1)
-                node_positions[ip] = {
-                    "x": round(cx + r * math.cos(angle), 1),
-                    "y": round(cy + r * math.sin(angle), 1),
-                }
+                node_positions[ip] = algo_pos.get(ip, {"x": cx, "y": cy})
 
     # Position floating bridge nodes above the actual bounding boxes of the
     # subnets they bridge.  Using the real top-edge of the compound boxes

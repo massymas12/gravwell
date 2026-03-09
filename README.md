@@ -31,13 +31,34 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 | **OpenVAS / Greenbone** | XML report | Vulnerabilities, NVT details, CVSS |
 | **Nuclei** | JSON / JSONL | Template-based vulnerability findings |
 | **enum4linux** | Text / JSON-NG | SMB shares, users, groups, password policy, domain info |
-| **CrowdStrike Falcon** | JSON export | Asset inventory, Spotlight vulnerability data |
+| **CrowdStrike Falcon** | JSON / CSV export | Asset inventory, Spotlight vulnerability data (see below) |
 | **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
 | **Juniper JunOS** | `show` command output | Interfaces, routes, version |
 | **Fortinet FortiOS** | `show` / `get` output | Interfaces, routing, system info |
 | **Palo Alto PAN-OS** | XML operational output | Interfaces, routing, system info |
 
 All formats are auto-detected. You can also force a specific parser with `--format`.
+
+### CrowdStrike Falcon export guide
+
+GravWell accepts **Discover asset exports** (JSON or CSV) and **Spotlight vulnerability exports** (JSON or CSV). Auto-detection works on any combination of the fields below — you do not need to include all of them, but the more you include the richer the graph nodes will be.
+
+**Recommended fields to select when exporting from the Falcon console:**
+
+| Field name in Falcon UI | JSON key | What GravWell uses it for |
+|-------------------------|----------|--------------------------|
+| Hostname | `hostname` | Node label |
+| Sensor IP address | `local_ip` | **Primary IP — use this as the IP field** |
+| IP address history | `ip_address_history` | Additional IPs on the same node |
+| OS version | `os_version` | OS family colouring (Windows / Linux / macOS) |
+| System manufacturer | `system_manufacturer` | MAC vendor enrichment |
+| MAC address(es) | `mac_addresses` | MAC-based host deduplication |
+| Device type | `device_type` | `device-type:laptop` / `server` tag |
+| Machine domain | `machine_domain` | `domain:CORP.LOCAL` tag — feeds AD domain grouping |
+
+> **Tip:** Use **Sensor IP address** (not "IP address history") as the IP column. The sensor IP is the current active address; history IPs are merged in automatically as secondary addresses when both fields are exported.
+
+For Spotlight vulnerability exports include `cve_id`, `severity`, `cvss_base_score`, and `local_ip` (or `hostname`) so findings can be attributed to the correct host.
 
 ---
 

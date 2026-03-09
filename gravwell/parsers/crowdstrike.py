@@ -51,12 +51,14 @@ _PRODUCT_PORTS: dict[str, tuple[int, str, str]] = {
 
 # Strong CS-only keys — any one of these is sufficient to confirm CrowdStrike.
 _CS_STRONG = (
-    '"local_ips"',          # CrowdStrike Discover / Asset Management export (array of IPs)
-    '"device_id"',          # Falcon device inventory — very CS-specific
-    '"falcon_host_link"',   # Falcon device inventory
-    '"agent_version"',      # Falcon device inventory
-    '"product_type_desc"',  # Falcon device inventory ("Workstation", "Server", "DC")
-    '"crowdstrike_id"',     # some export formats
+    '"local_ips"',           # CrowdStrike Discover / Asset Management export (array of IPs)
+    '"device_id"',           # Falcon device inventory — very CS-specific
+    '"falcon_host_link"',    # Falcon device inventory
+    '"agent_version"',       # Falcon device inventory
+    '"product_type_desc"',   # Falcon device inventory ("Workstation", "Server", "DC")
+    '"crowdstrike_id"',      # some export formats
+    '"mac_addresses"',       # Discover asset export (array of MACs)
+    '"ip_address_history"',  # Discover export: historical IPs array
 )
 
 # Weak CS keys that appear in many tools; need TWO of these to confirm.
@@ -69,6 +71,10 @@ _CS_WEAK = (
     '"host_id"',             # flat vulnerability export format
     '"vuln_type"',           # Spotlight API vuln type field
     '"local_ip"',            # flat vuln export (singular, not array)
+    '"machine_domain"',      # Discover asset export — AD domain name
+    '"last_seen_timestamp"', # Discover asset export timestamp field
+    '"device_type"',         # Discover asset export — device category (Laptop/Server/etc.)
+    '"ip_address_history"',  # also listed as weak fallback (already strong above)
 )
 
 # Filename hints — file was exported from a CrowdStrike product
@@ -490,13 +496,16 @@ def _pick_primary_ip(ips: list) -> str:
 def _device_to_host(rec: dict, source: str) -> Host | None:
     """Convert a CrowdStrike device JSON record to a Host.
 
-    Handles both the Falcon API format (``local_ip`` string) and the
-    CrowdStrike Discover/Asset Management export format (``local_ips`` array).
+    Handles the Falcon API format, CrowdStrike Discover/Asset Management
+    export, and all selectable export fields:
+      hostname, os_version, system_manufacturer, mac_addresses,
+      ip_address_history, device_type, local_ip, local_ips, connection_ip.
     """
     # ── IP resolution ─────────────────────────────────────────────────────────
-    # Discover format: "local_ips": ["10.0.0.1", "169.254.x.x", ...]
-    local_ips_raw = rec.get("local_ips")
     extra_ips: list[str] = []
+
+    # local_ips: current known IPs (Discover array export)
+    local_ips_raw = rec.get("local_ips")
     if isinstance(local_ips_raw, list) and local_ips_raw:
         ip = _pick_primary_ip(local_ips_raw)
         extra_ips = [
@@ -505,8 +514,23 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
             and i.strip() != ip and not i.strip().startswith("169.254.")
         ]
     else:
-        # Falcon API format: single string
+        # Falcon API format or single-IP field
         ip = (rec.get("local_ip") or rec.get("connection_ip") or "").strip()
+
+    # ip_address_history: historical IPs — use as primary if nothing else found,
+    # and always merge into additional_ips
+    ip_hist_raw = rec.get("ip_address_history")
+    if isinstance(ip_hist_raw, list) and ip_hist_raw:
+        hist_ips = [i.strip() for i in ip_hist_raw
+                    if isinstance(i, str) and _valid_ip(i.strip())
+                    and not i.strip().startswith("169.254.")]
+        if not ip or not _valid_ip(ip):
+            # No current IP — use most recent history entry
+            ip = hist_ips[0] if hist_ips else ip
+        # Remaining history IPs become additional IPs
+        for h in hist_ips:
+            if h != ip and h not in extra_ips:
+                extra_ips.append(h)
 
     if not ip or not _valid_ip(ip):
         ip = (rec.get("external_ip") or "").strip()
@@ -521,22 +545,33 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
         hostname = ""
     else:
         hostname = hostname_raw
-        mac_raw = (rec.get("mac_address") or "").strip()
+        # mac_addresses is an array in Discover exports; mac_address is a string
+        mac_addresses_raw = rec.get("mac_addresses")
+        if isinstance(mac_addresses_raw, list) and mac_addresses_raw:
+            mac_raw = mac_addresses_raw[0]
+        else:
+            mac_raw = (rec.get("mac_address") or "").strip()
         mac = mac_raw.replace("-", ":").upper() if mac_raw else None
 
-    os_ver       = (rec.get("os_version") or rec.get("os_build") or "").strip()
-    platform     = (rec.get("platform_name") or "").strip()
-    manufacturer = (rec.get("system_manufacturer") or "").strip() or None
-    product_desc = (rec.get("product_type_desc") or "").strip()
-    agent_ver    = (rec.get("agent_version") or "").strip()
-    status_raw   = (rec.get("status") or "normal").lower()
+    os_ver         = (rec.get("os_version") or rec.get("os_build") or "").strip()
+    platform       = (rec.get("platform_name") or "").strip()
+    manufacturer   = (rec.get("system_manufacturer") or "").strip() or None
+    product_desc   = (rec.get("product_type_desc") or "").strip()
+    device_type    = (rec.get("device_type") or "").strip()          # Laptop/Desktop/Server/Mobile
+    agent_ver      = (rec.get("agent_version") or "").strip()
+    machine_domain = (rec.get("machine_domain") or "").strip()
+    status_raw     = (rec.get("status") or "normal").lower()
     status = "up" if "normal" in status_raw or "detected" in status_raw else "up"
 
     tags: list[str] = ["crowdstrike"]
     if product_desc:
         tags.append(f"product-type:{product_desc.lower().replace(' ', '-')}")
+    if device_type:
+        tags.append(f"device-type:{device_type.lower()}")
     if agent_ver:
         tags.append(f"cs-agent:{agent_ver}")
+    if machine_domain:
+        tags.append(f"domain:{machine_domain.upper()}")
 
     # CrowdStrike group tags: "SensorGroupingTags/Production" → strip prefix
     raw_tags = rec.get("tags") or rec.get("groups") or []

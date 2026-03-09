@@ -514,31 +514,137 @@ def _compute_preset_positions(
     for dom in domain_to_subs:
         domain_to_subs[dom] = _sort_subs(domain_to_subs[dom])
 
-    # depth → list of domain names (largest first within each depth)
+    # depth → ordered list of domain names.
+    # Ordering goal: minimise edge length and crossings.
+    #   Depth 0: alphabetical (arbitrary tie-break, no parent to align to).
+    #   Depth N: sort by (parent's position in the depth-N-1 band, then name).
+    #     This groups all children of CORP.COM together, directly below CORP.COM,
+    #     and all children of EXTERNAL.COM together below EXTERNAL.COM — so the
+    #     edges from subdomains to their parent never cross each other.
+    all_dom_names = list(domain_to_subs.keys())
+
+    def _dom_parent(dom: str) -> str | None:
+        """Most-specific parent domain (longest suffix that is a known domain)."""
+        candidates = [d for d in all_dom_names if d != dom and dom.endswith("." + d)]
+        return max(candidates, key=len) if candidates else None
+
     depth_to_doms: dict[int, list[str]] = {}
     for dom, dep in (domain_depth or {}).items():
         if dom in domain_to_subs:
             depth_to_doms.setdefault(dep, []).append(dom)
-    for dep in depth_to_doms:
-        depth_to_doms[dep].sort(
-            key=lambda d: -sum(len(subnet_ips[s]) for s in domain_to_subs[d])
-        )
 
-    subnet_center: dict[str, tuple[float, float]] = {}
-    y_cursor = 0.0
+    # ── Compute each domain's own grid width ─────────────────────────────────
+    def _dom_own_width(dom: str) -> float:
+        subs = domain_to_subs[dom]
+        n = len(subs)
+        ncols = max(1, min(_MAX_COLS, math.ceil(math.sqrt(n))))
+        nrows = math.ceil(n / ncols)
+        col_ws = []
+        for c in range(ncols):
+            cw = max(
+                (subnet_box[subs[r * ncols + c]] for r in range(nrows)
+                 if r * ncols + c < n),
+                default=120.0,
+            )
+            col_ws.append(cw)
+        return sum(col_ws) + _GAP * max(0, ncols - 1)
 
-    # One horizontal band per depth level
+    dom_own_w: dict[str, float] = {d: _dom_own_width(d) for d in domain_to_subs}
+
+    # ── Order each depth band: children grouped under their parent ────────────
+    ordered_at: dict[int, list[str]] = {}
     for dep in sorted(depth_to_doms.keys()):
-        max_band_h = 0.0
-        x_cursor = 0.0
+        doms = depth_to_doms[dep]
+        if dep == 0:
+            ordered_at[dep] = sorted(doms)
+        else:
+            parent_rank = {d: i for i, d in enumerate(ordered_at.get(dep - 1, []))}
+            ordered_at[dep] = sorted(
+                doms,
+                key=lambda d: (parent_rank.get(_dom_parent(d), 999), d),
+            )
+        depth_to_doms[dep] = ordered_at[dep]
+
+    # ── Build children list per domain (ordered) ──────────────────────────────
+    dom_children: dict[str, list[str]] = {d: [] for d in domain_to_subs}
+    for dep in sorted(depth_to_doms.keys()):
         for dom in depth_to_doms[dep]:
-            centers, dom_w, dom_h = _place_subnet_grid(
-                domain_to_subs[dom], x_cursor, y_cursor
+            par = _dom_parent(dom)
+            if par and par in dom_children:
+                dom_children[par].append(dom)
+
+    # ── Bottom-up: subtree width = space needed by domain + all descendants ───
+    subtree_w: dict[str, float] = {}
+
+    def _subtree_width(dom: str) -> float:
+        if dom in subtree_w:
+            return subtree_w[dom]
+        children = dom_children[dom]
+        if not children:
+            subtree_w[dom] = dom_own_w[dom]
+        else:
+            ch_total = (sum(_subtree_width(c) for c in children)
+                        + _DOMAIN_GAP * (len(children) - 1))
+            subtree_w[dom] = max(dom_own_w[dom], ch_total)
+        return subtree_w[dom]
+
+    for dom in domain_to_subs:
+        _subtree_width(dom)
+
+    # ── Top-down: assign x allocation ranges ─────────────────────────────────
+    # Root domains (depth 0) are placed left-to-right with subtree_w spacing
+    # so each root gets enough room for itself AND all its descendants.
+    # Each domain's children are then centered within the parent's allocation.
+    alloc_x: dict[str, float] = {}
+    alloc_w: dict[str, float] = {}
+
+    x_cursor = 0.0
+    for root in depth_to_doms.get(0, []):
+        alloc_x[root] = x_cursor
+        alloc_w[root] = subtree_w[root]
+        x_cursor += subtree_w[root] + _DOMAIN_GAP
+
+    def _assign_alloc(dom: str) -> None:
+        children = dom_children[dom]
+        if not children:
+            return
+        ch_total = (sum(subtree_w[c] for c in children)
+                    + _DOMAIN_GAP * (len(children) - 1))
+        # Center child block within parent's allocated range
+        child_x = alloc_x[dom] + alloc_w[dom] / 2 - ch_total / 2
+        for child in children:
+            alloc_x[child] = child_x
+            alloc_w[child] = subtree_w[child]
+            child_x += subtree_w[child] + _DOMAIN_GAP
+            _assign_alloc(child)
+
+    for root in depth_to_doms.get(0, []):
+        _assign_alloc(root)
+
+    # ── Compute per-depth y positions (all domains at same depth share y) ─────
+    depth_y: dict[int, float] = {}
+    y_cursor = 0.0
+    for dep in sorted(depth_to_doms.keys()):
+        depth_y[dep] = y_cursor
+        max_h = max(
+            (_place_subnet_grid(domain_to_subs[d], 0, 0)[2]
+             for d in depth_to_doms[dep]),
+            default=0.0,
+        )
+        y_cursor += max_h + _GROUP_GAP
+
+    # ── Place each domain's subnets centered in its allocated x range ─────────
+    subnet_center: dict[str, tuple[float, float]] = {}
+    for dep in sorted(depth_to_doms.keys()):
+        y_start = depth_y[dep]
+        for dom in depth_to_doms[dep]:
+            x_alloc = alloc_x.get(dom, 0.0)
+            w_alloc = alloc_w.get(dom, dom_own_w[dom])
+            x_start = x_alloc + (w_alloc - dom_own_w[dom]) / 2
+            centers, _, _ = _place_subnet_grid(
+                domain_to_subs[dom], x_start, y_start
             )
             subnet_center.update(centers)
-            x_cursor += dom_w + _DOMAIN_GAP
-            max_band_h = max(max_band_h, dom_h)
-        y_cursor += max_band_h + _GROUP_GAP
 
     # Subnets with no domain: placed at the bottom using /16 grouping
     domained_set = set(subnet_domain.keys()) if subnet_domain else set()
@@ -549,10 +655,7 @@ def _compute_preset_positions(
             ugroups.setdefault(_subnet_net16(s), []).append(s)
         for g in ugroups.values():
             g[:] = _sort_subs(g)
-        ugroups_sorted = sorted(
-            ugroups.values(),
-            key=lambda g: -sum(len(subnet_ips[s]) for s in g)
-        )
+        ugroups_sorted = sorted(ugroups.values(), key=lambda g: g[0])
         for group_subs in ugroups_sorted:
             centers, grp_w, grp_h = _place_subnet_grid(group_subs, 0.0, y_cursor)
             subnet_center.update(centers)

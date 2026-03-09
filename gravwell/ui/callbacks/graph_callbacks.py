@@ -250,9 +250,10 @@ def register(app: dash.Dash) -> None:
             "numIter": 6000,
             "padding": 80,
             "nodeDimensionsIncludeLabels": True,
-            # randomize: True gives a fresh start each time so the layout doesn't
-            # get stuck in a poor local minimum when the graph changes a lot.
-            "randomize": True,
+            # randomize: False uses preset positions as warm start, which lets the
+            # domain-depth seeding in _compute_preset_positions keep parent domains
+            # above subdomains.  True would ignore all preset positions entirely.
+            "randomize": False,
         }
         # ── Cose-Bilkent Spread — push even harder apart (very dense maps) ──
         _cb_spread = {

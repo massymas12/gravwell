@@ -52,14 +52,16 @@ _PRODUCT_PORTS: dict[str, tuple[int, str, str]] = {
 
 # Strong CS-only keys — any one of these is sufficient to confirm CrowdStrike.
 _CS_STRONG = (
-    '"local_ips"',           # CrowdStrike Discover / Asset Management export (array of IPs)
-    '"device_id"',           # Falcon device inventory — very CS-specific
-    '"falcon_host_link"',    # Falcon device inventory
-    '"agent_version"',       # Falcon device inventory
-    '"product_type_desc"',   # Falcon device inventory ("Workstation", "Server", "DC")
-    '"crowdstrike_id"',      # some export formats
-    '"mac_addresses"',       # Discover asset export (array of MACs)
-    '"ip_address_history"',  # Discover export: historical IPs array
+    '"local_ips"',              # CrowdStrike Discover / Asset Management export (array of IPs)
+    '"device_id"',              # Falcon device inventory — very CS-specific
+    '"falcon_host_link"',       # Falcon device inventory
+    '"agent_version"',          # Falcon device inventory
+    '"product_type_desc"',      # Falcon device inventory ("Workstation", "Server", "DC")
+    '"crowdstrike_id"',         # some export formats
+    '"mac_addresses"',          # Discover asset export (array of MACs)
+    '"ip_address_history"',     # Discover export: historical IPs array
+    '"asset_criticality"',      # Spotlight console export (hostname-only vuln list)
+    '"vulnerability_confidence"',  # Spotlight console export
 )
 
 # Weak CS keys that appear in many tools; need TWO of these to confirm.
@@ -76,6 +78,7 @@ _CS_WEAK = (
     '"last_seen_timestamp"', # Discover asset export timestamp field
     '"device_type"',         # Discover asset export — device category (Laptop/Server/etc.)
     '"ip_address_history"',  # also listed as weak fallback (already strong above)
+    '"vulnerability_id"',    # Spotlight console export CVE field
 )
 
 # Filename hints — file was exported from a CrowdStrike product
@@ -151,8 +154,13 @@ class CrowdStrikeParser(BaseParser):
             except OSError as e:
                 result.errors.append(f"File read error: {e}")
 
+        real_hosts = [h for h in result.hosts if not h.ip.startswith("hn:")]
         if not result.hosts:
             result.warnings.append("No hosts with IP addresses found in CrowdStrike export")
+        elif not real_hosts:
+            # Console-spotlight export: only hostname-keyed records (no IPs)
+            # Warning already added by the stream parser; nothing more to add here.
+            pass
         return result
 
     # ── Streaming JSON (ijson) — O(1) memory regardless of file size ──────────
@@ -189,9 +197,11 @@ class CrowdStrikeParser(BaseParser):
         # at the first record (which would consume the ijson generator).
         #
         # Formats:
-        #   spotlight_api  — {"resources":[{"cve":{...},"host_info":{...}}]}
-        #   flat_vuln      — [{"host_id":"...","local_ip":"...","cve_id":"..."}]
-        #   device         — [{...device fields...}]  (Discover / Asset Mgmt)
+        #   spotlight_api      — {"resources":[{"cve":{...},"host_info":{...}}]}
+        #   flat_vuln          — [{"host_id":"...","local_ip":"...","cve_id":"..."}]
+        #   console_spotlight  — [{hostname, vulnerability_id, exprt_rating, asset_criticality...}]
+        #                        (Spotlight console UI export — hostname-only, no IP field)
+        #   device             — [{...device fields...}]  (Discover / Asset Mgmt)
         is_spotlight = ('"cve"' in head) and (
             '"host_info"' in head or '"aid"' in head
         )
@@ -199,6 +209,9 @@ class CrowdStrikeParser(BaseParser):
             '"cve_id"' in head or '"vulnerability"' in head or
             '"cve"' in head or "vulnerabilities" in filepath.name.lower()
         )
+        is_console_spotlight = (
+            '"asset_criticality"' in head or '"vulnerability_confidence"' in head
+        ) and '"vulnerability_id"' in head
 
         host_map: dict[str, Host] = {}
         skipped_no_ip = 0
@@ -214,6 +227,8 @@ class CrowdStrikeParser(BaseParser):
                         _spotlight_rec_to_host_map(rec, host_map, result.source_file)
                     elif is_flat_vuln:
                         _flat_vuln_rec_to_host_map(rec, host_map, result.source_file)
+                    elif is_console_spotlight:
+                        _console_spotlight_rec_to_host_map(rec, host_map, result.source_file)
                     else:
                         host = _device_to_host(rec, result.source_file)
                         if not host or not host.ip or host.ip == "0.0.0.0":
@@ -226,16 +241,35 @@ class CrowdStrikeParser(BaseParser):
             result.errors.append(f"JSON stream error: {e}")
 
         if skipped_no_ip:
-            result.warnings.append(
+            msg = (
                 f"{skipped_no_ip} of {total_recs} records skipped — no valid IP address. "
-                "Ensure 'Sensor IP address' (local_ip) is included in the export fields."
             )
+            if is_console_spotlight:
+                msg += (
+                    "This Spotlight console export only contains hostnames. "
+                    "Vulnerabilities will be merged into hosts already ingested from a "
+                    "device inventory export. Import the device inventory first."
+                )
+            else:
+                msg += "Ensure 'Sensor IP address' (local_ip) is included in the export fields."
+            result.warnings.append(msg)
         if skipped_dupe:
             result.warnings.append(
                 f"{skipped_dupe} duplicate IPs merged into existing host records."
             )
 
         result.hosts = list(host_map.values())
+        if is_console_spotlight:
+            hn_count = sum(1 for h in result.hosts if h.ip.startswith("hn:"))
+            if hn_count:
+                result.warnings.append(
+                    f"Spotlight console export: {hn_count} hostnames with vulnerabilities. "
+                    "These will be merged into existing hosts from your device inventory import."
+                )
+            elif total_recs:
+                result.warnings.append(
+                    "No vulnerabilities could be parsed from this Spotlight console export."
+                )
         return result
 
     @classmethod
@@ -262,6 +296,9 @@ class CrowdStrikeParser(BaseParser):
         host_map: dict[str, Host] = {}
         first = resources[0] if resources and isinstance(resources[0], dict) else {}
         is_spotlight = "cve" in first or ("aid" in first and "host_info" in first)
+        is_console_spotlight = (
+            "asset_criticality" in first or "vulnerability_confidence" in first
+        ) and "vulnerability_id" in first
         skipped_no_ip = 0
         skipped_dupe  = 0
 
@@ -270,6 +307,8 @@ class CrowdStrikeParser(BaseParser):
                 continue
             if is_spotlight:
                 _spotlight_rec_to_host_map(rec, host_map, result.source_file)
+            elif is_console_spotlight:
+                _console_spotlight_rec_to_host_map(rec, host_map, result.source_file)
             else:
                 host = _device_to_host(rec, result.source_file)
                 if not host or not host.ip or host.ip == "0.0.0.0":
@@ -503,6 +542,84 @@ def _flat_vuln_rec_to_host_map(
             name=f"{cve_id}: {product}" if product else cve_id,
             severity=severity,
             cvss_score=cvss,
+            plugin_id=cve_id,
+            cve_ids=[cve_id],
+            description=description,
+            solution=solution,
+        )
+    )
+
+
+def _console_spotlight_rec_to_host_map(
+    rec: dict, host_map: dict[str, "Host"], source: str
+) -> None:
+    """Parse one record from the Spotlight console UI export.
+
+    This format is exported from the Falcon Spotlight UI and contains one
+    vulnerability per record, keyed by *hostname* only — no IP address is
+    included.  Records are grouped by a synthetic ``"hn:<hostname>"`` key so
+    they can be matched to existing hosts during ingestion via hostname lookup.
+
+    Example record fields:
+      hostname, vulnerability_id (CVE), severity, exprt_rating,
+      asset_criticality, products, recommended_remediations,
+      vulnerability_confidence, status, days_open, cisa_info
+    """
+    hostname = (rec.get("hostname") or "").strip()
+    if not hostname:
+        return
+
+    # Synthetic key for hostname-keyed host (no IP available)
+    key = f"hn:{hostname.lower()}"
+
+    if key not in host_map:
+        from gravwell.models.dataclasses import Host as _Host
+        host_map[key] = _Host(
+            ip=key,
+            hostnames=[hostname],
+            status="up",
+            source_files=[source],
+            tags=["crowdstrike-spotlight"],
+        )
+
+    host = host_map[key]
+
+    cve_id = (rec.get("vulnerability_id") or "").strip()
+    if not cve_id:
+        return
+
+    # Use the more severe of severity / exprt_rating
+    sev_raw  = (rec.get("severity") or "unknown").lower()
+    expr_raw = (rec.get("exprt_rating") or "").lower()
+    _sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    sev1 = _SEV_MAP.get(sev_raw, "info")
+    sev2 = _SEV_MAP.get(expr_raw, "info")
+    severity = sev1 if _sev_rank.get(sev1, 0) >= _sev_rank.get(sev2, 0) else sev2
+
+    # Product name from products array
+    products = rec.get("products") or []
+    product = ""
+    if isinstance(products, list) and products:
+        p0 = products[0] if isinstance(products[0], dict) else {}
+        product = p0.get("product_name_version") or p0.get("product_name") or ""
+
+    # Remediation detail
+    remeds = rec.get("recommended_remediations") or []
+    solution = ""
+    if isinstance(remeds, list) and remeds:
+        r0 = remeds[0] if isinstance(remeds[0], dict) else {}
+        solution = r0.get("detail") or r0.get("remediation") or ""
+
+    # CISA KEV flag
+    cisa = rec.get("cisa_info") or {}
+    is_kev = isinstance(cisa, dict) and cisa.get("is_cisa_kev", False)
+    description = "CISA Known Exploited Vulnerability" if is_kev else ""
+
+    from gravwell.models.dataclasses import Vulnerability as _Vuln
+    host.vulnerabilities.append(
+        _Vuln(
+            name=f"{cve_id}: {product}" if product else cve_id,
+            severity=severity,
             plugin_id=cve_id,
             cve_ids=[cve_id],
             description=description,

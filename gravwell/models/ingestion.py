@@ -38,7 +38,9 @@ def ingest_parse_result(
             session.expunge_all()
     session.flush()
     _record_scan_file(session, result, checksum)
-    return len(result.hosts), total_vulns, False
+    # Exclude synthetic hostname-keyed hosts from the reported host count
+    real_hosts = sum(1 for h in result.hosts if not h.ip.startswith("hn:"))
+    return real_hosts, total_vulns, False
 
 
 def _infer_domain_tags(hostnames: list[str]) -> list[str]:
@@ -55,7 +57,31 @@ def _infer_domain_tags(hostnames: list[str]) -> list[str]:
     return sorted(domains)
 
 
-def _upsert_host(session: Session, host: Host) -> HostORM:
+def _upsert_host(session: Session, host: Host) -> HostORM | None:
+    # ── Hostname-only spotlight records (synthetic "hn:<hostname>" key) ───────
+    # These come from CrowdStrike Spotlight console exports that contain only
+    # hostnames, no IPs.  Try to match an existing host by hostname and merge
+    # the vulnerabilities into it; if no match exists yet, skip the record so
+    # we don't create a junk "hn:..." entry in the database.
+    if host.ip.startswith("hn:"):
+        hn = host.hostnames[0] if host.hostnames else host.ip[3:]
+        # JSON-stored list: search for the hostname as a quoted JSON string
+        existing = session.query(HostORM).filter(
+            HostORM._hostnames.like(f'%"{hn}"%')
+        ).first()
+        if not existing:
+            return None
+        # Merge vulns into the matched host
+        existing_vuln_map: dict[tuple, VulnerabilityORM] = {
+            (v.plugin_id, v.port): v
+            for v in session.query(VulnerabilityORM).filter_by(host_id=existing.id).all()
+        }
+        for vuln in host.vulnerabilities:
+            svc_id = _find_service_id(session, existing.id, vuln.port)
+            _upsert_vulnerability(session, existing.id, svc_id, vuln, existing_vuln_map)
+        _update_host_aggregates(session, existing)
+        return existing
+
     existing = session.query(HostORM).filter_by(ip=host.ip).first()
     if not existing and host.mac:
         # MAC-based fallback: same physical device seen on a different interface

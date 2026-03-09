@@ -672,20 +672,23 @@ def create_app(db_path: str) -> dash.Dash:
             var cy = window._gravwell_cy;
             if (!cy) return window.dash_clientside.no_update;
             try {
-                var blob = cy.png({output: 'blob', scale: 1, full: true, bg: '#121212'});
-                if (!blob || blob.size === 0) {
-                    console.error('PNG export: cy.png returned empty blob');
-                    return window.dash_clientside.no_update;
-                }
-                var blobUrl = URL.createObjectURL(blob);
-                var a = document.createElement('a');
-                a.href = blobUrl;
-                var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
-                a.download = 'network-map_' + ts + '.png';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
+                cy.png({output: 'blob-promise', scale: 1, full: true, bg: '#121212'})
+                  .then(function(blob) {
+                    if (!blob || blob.size === 0) {
+                        console.error('PNG export: empty blob');
+                        return;
+                    }
+                    var blobUrl = URL.createObjectURL(blob);
+                    var a = document.createElement('a');
+                    a.href = blobUrl;
+                    var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
+                    a.download = 'network-map_' + ts + '.png';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
+                  })
+                  .catch(function(e) { console.error('PNG export promise failed:', e); });
             } catch(e) { console.error('PNG export failed:', e); }
             return window.dash_clientside.no_update;
         }""",

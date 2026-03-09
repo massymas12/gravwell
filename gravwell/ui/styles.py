@@ -170,6 +170,21 @@ CYTOSCAPE_STYLESHEET = [
             "shape": "pentagon",
         },
     },
+    # -------------------------------------------------------------------------
+    # Bridge / multi-subnet nodes — extra large so they're visible between boxes
+    # -------------------------------------------------------------------------
+    {
+        "selector": ".bridge-node",
+        "style": {
+            "width": "70px",
+            "height": "70px",
+            "border-width": "4px",
+            "font-size": "9px",
+            "text-wrap": "wrap",
+            "text-max-width": "90px",
+            "z-index": 100,
+        },
+    },
 
     # -------------------------------------------------------------------------
     # Domain Controller — star shape, deep purple (overrides router/gateway)

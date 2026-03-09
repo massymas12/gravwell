@@ -281,10 +281,9 @@ _LARGE_FILE_JS = """
     }
   }
 
+  // ── Drag-and-drop interception ─────────────────────────────────────────────
   // Listen in the capture phase so we see the event before react-dropzone.
   // We only read File.size — no file content is ever loaded.
-  // NOTE: browsers do not expose the full filesystem path of dropped files
-  // for security reasons; we pre-fill with the filename as a hint.
   document.addEventListener('drop', function (e) {
     var uploadEl = document.getElementById('file-upload');
     if (!uploadEl || !uploadEl.contains(e.target)) return;
@@ -293,10 +292,51 @@ _LARGE_FILE_JS = """
     for (var i = 0; i < files.length; i++) {
       if (files[i].size > LARGE_BYTES) {
         showPathSection(files[i].name, Math.round(files[i].size / (1024 * 1024)));
+        e.stopImmediatePropagation();
+        e.preventDefault();
         return;
       }
     }
   }, true); // capture phase
+
+  // ── Browse-dialog interception ─────────────────────────────────────────────
+  // dcc.Upload hides a real <input type="file"> inside the dropzone div.
+  // When the user clicks "browse files" and picks a file, the browser has a
+  // File reference (with .size) but has NOT yet called FileReader.readAsDataURL.
+  // Intercept the change event in capture phase — BEFORE react-dropzone's
+  // handler — check the size, and cancel the event if the file is too large.
+  function interceptBrowseInput() {
+    var uploadEl = document.getElementById('file-upload');
+    if (!uploadEl) return false;
+    var input = uploadEl.querySelector('input[type="file"]');
+    if (!input || input._gw_intercepted) return false;
+    input._gw_intercepted = true;
+    input.addEventListener('change', function (e) {
+      var files = e.target.files;
+      if (!files || !files.length) return;
+      for (var i = 0; i < files.length; i++) {
+        if (files[i].size > LARGE_BYTES) {
+          var name = files[i].name;
+          var mb   = Math.round(files[i].size / (1024 * 1024));
+          // Clear the input BEFORE stopping propagation so react-dropzone
+          // doesn't receive stale file references on the next open.
+          e.target.value = '';
+          e.stopImmediatePropagation();
+          showPathSection(name, mb);
+          return;
+        }
+      }
+    }, true); // capture phase — runs before react-dropzone's listener
+    return true;
+  }
+
+  // Try immediately, then retry after React mounts the component.
+  if (!interceptBrowseInput()) {
+    var _retries = 0;
+    var _iv = setInterval(function () {
+      if (interceptBrowseInput() || ++_retries > 20) clearInterval(_iv);
+    }, 300);
+  }
 })();
 """
 

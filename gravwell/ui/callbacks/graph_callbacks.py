@@ -237,25 +237,32 @@ def register(app: dash.Dash) -> None:
         # gravity: pull toward the centre.  Lower = more spread-out layout.
         _cb = {
             "name": "cose-bilkent", "animate": True,
-            "nodeRepulsion": 45000,
-            "idealEdgeLength": 120,
-            "edgeElasticity": 0.45,
-            "nestingFactor": 0.6,
-            "gravity": 0.08,
-            "numIter": 5000,
-            "padding": 60,
+            # Higher repulsion pushes large compound boxes apart so they don't
+            # overlap. 45 000 was fine for small maps; 80 000 works for 10+ subnets.
+            "nodeRepulsion": 80000,
+            "idealEdgeLength": 140,
+            "edgeElasticity": 0.4,
+            # nestingFactor: ideal edge length multiplier INSIDE compounds.
+            # 0.7 gives more breathing room between nodes in the same subnet.
+            "nestingFactor": 0.7,
+            # Lower gravity → more spread-out; helps domain compounds separate.
+            "gravity": 0.05,
+            "numIter": 6000,
+            "padding": 80,
             "nodeDimensionsIncludeLabels": True,
-            "randomize": False,  # use pre-computed positions as warm start
+            # randomize: True gives a fresh start each time so the layout doesn't
+            # get stuck in a poor local minimum when the graph changes a lot.
+            "randomize": True,
         }
         # ── Cose-Bilkent Spread — push even harder apart (very dense maps) ──
         _cb_spread = {
             **_cb,
-            "nodeRepulsion": 100000,
-            "idealEdgeLength": 200,
-            "nestingFactor": 0.9,
-            "gravity": 0.04,
+            "nodeRepulsion": 150000,
+            "idealEdgeLength": 220,
+            "nestingFactor": 1.0,
+            "gravity": 0.03,
             "numIter": 8000,
-            "padding": 80,
+            "padding": 100,
         }
         configs = {
             "preset": {

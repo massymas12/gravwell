@@ -392,6 +392,8 @@ def _compute_preset_positions(
     multi_subnet_nodes: set[str] | None = None,
     node_subnets: dict[str, set[str]] | None = None,
     saved_positions: dict[str, tuple[float, float]] | None = None,
+    subnet_domain: dict[str, str] | None = None,
+    domain_depth: dict[str, int] | None = None,
 ) -> list[dict]:
     """
     Assign non-overlapping positions to every leaf node.
@@ -444,11 +446,20 @@ def _compute_preset_positions(
     for subnet in subnet_ips:
         groups.setdefault(_subnet_net16(subnet), []).append(subnet)
 
-    groups_sorted = sorted(
-        groups.values(),
-        key=lambda subs: sum(len(subnet_ips[s]) for s in subs),
-        reverse=True,
-    )
+    def _group_sort_key(subs: list[str]) -> tuple:
+        # Primary: minimum domain depth of any subnet in this /16 group.
+        #   Depth 0 (top-level domain) → appears above depth 1 (subdomain).
+        #   Groups with no domain assignment sort last.
+        if subnet_domain and domain_depth:
+            depths = [domain_depth.get(subnet_domain.get(s, ""), 999) for s in subs]
+            min_depth = min(depths)
+        else:
+            min_depth = 999
+        # Secondary: total host count descending (larger groups above smaller).
+        total_hosts = sum(len(subnet_ips[s]) for s in subs)
+        return (min_depth, -total_hosts)
+
+    groups_sorted = sorted(groups.values(), key=_group_sort_key)
     # Within each /16 band: sort by CIDR numerical address.
     # This places 10.1.1.0/24 → 10.1.2.0/24 → 10.1.3.0/24 side-by-side so
     # the chain inter-subnet edges always connect adjacent grid cells and
@@ -781,8 +792,22 @@ def get_cytoscape_elements(
     for subnet, domain in subnet_domain.items():
         domain_subnets.setdefault(domain, []).append(subnet)
 
-    # Domain compound nodes must be added before subnet nodes (their children)
-    for i, domain_name in enumerate(sorted(domain_subnets)):
+    # Compute domain hierarchy depth so the layout can seed y-positions.
+    # BRANCH.CORP.COM is a subdomain of CORP.COM → depth 1.
+    # Top-level (or unrelated) domains get depth 0.
+    all_domain_names = sorted(domain_subnets)
+
+    def _domain_depth(name: str) -> int:
+        """Return how many other known domains are strict parents of *name*."""
+        return sum(
+            1 for other in all_domain_names
+            if other != name and name.endswith("." + other)
+        )
+
+    # Domain compound nodes must be added before subnet nodes (their children).
+    # Include a `domain_depth` attribute so downstream JS / layout seeds can
+    # place parent domains above their subdomains.
+    for i, domain_name in enumerate(all_domain_names):
         bg, border = _DOMAIN_PALETTE[i % len(_DOMAIN_PALETTE)]
         elements.append({
             "data": {
@@ -791,6 +816,7 @@ def get_cytoscape_elements(
                 "node_type": "domain_group",
                 "bg_color": bg,
                 "border_color": border,
+                "domain_depth": _domain_depth(domain_name),
             },
             "classes": "domain-group",
         })
@@ -897,6 +923,9 @@ def get_cytoscape_elements(
         if node_id in multi_subnet_nodes:
             all_ips = [attrs.get("ip", node_id)] + attrs.get("additional_ips", [])
             label = f"{label}\n{' | '.join(all_ips)}"
+            # Bridge-node class makes them visually larger so they're not dwarfed
+            # by the compound subnet boxes they sit between.
+            classes.append("bridge-node")
 
         element_data: dict = {**attrs, "id": node_id, "label": label}
         if node_id not in multi_subnet_nodes:
@@ -1009,9 +1038,18 @@ def get_cytoscape_elements(
     # 9. Pre-compute non-overlapping grid positions for every leaf node.
     #    Doing this here means the *preset* layout (and cose-bilkent with
     #    randomize:false) will start from a guaranteed non-overlapping state.
+    # Build domain_depth map for position seeding (parent domains placed higher)
+    _all_domain_names = list(domain_subnets.keys())
+    _domain_depth_map = {
+        d: sum(1 for other in _all_domain_names if other != d and d.endswith("." + other))
+        for d in _all_domain_names
+    }
+
     elements = _compute_preset_positions(
         elements, subnet_ips, subnet_hub, multi_subnet_nodes, node_subnets,
         saved_positions=saved_positions,
+        subnet_domain=subnet_domain,
+        domain_depth=_domain_depth_map,
     )
 
     # 10. Custom manually-added edges between host IPs

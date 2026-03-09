@@ -182,6 +182,12 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
         session.add(orm)
         session.flush()
 
+    # ── nip: promotion ────────────────────────────────────────────────────────
+    # If a previous import created a hostname-keyed "nip:<hostname>" placeholder
+    # for this same device (because local_ip was missing at the time), absorb its
+    # vulns/services into this real-IP host and delete the stale nip: row.
+    _absorb_nip_stubs(session, orm, host.hostnames)
+
     for svc in host.services:
         _upsert_service(session, orm.id, svc)
 
@@ -197,6 +203,32 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
 
     _update_host_aggregates(session, orm)
     return orm
+
+
+def _absorb_nip_stubs(
+    session: Session, real_orm: HostORM, hostnames: list[str]
+) -> None:
+    """Migrate data from any stale nip: placeholder rows into *real_orm*.
+
+    When a CrowdStrike device is imported a second time with ip_address_history
+    populated (giving a real IP), a "nip:<hostname>" row may already exist from
+    the first import.  Move its vulns/services to the real-IP host, then delete
+    the stub so it no longer shows a nip: address in the UI.
+    """
+    for hn in hostnames:
+        nip_key = f"nip:{hn.lower()}"
+        stub = session.query(HostORM).filter_by(ip=nip_key).first()
+        if stub and stub.id != real_orm.id:
+            # Re-home vulns
+            session.query(VulnerabilityORM).filter_by(host_id=stub.id).update(
+                {"host_id": real_orm.id}, synchronize_session=False
+            )
+            # Re-home services
+            session.query(ServiceORM).filter_by(host_id=stub.id).update(
+                {"host_id": real_orm.id}, synchronize_session=False
+            )
+            session.delete(stub)
+            session.flush()
 
 
 def _upsert_service(session: Session, host_id: int, svc: Service) -> ServiceORM:

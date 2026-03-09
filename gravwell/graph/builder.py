@@ -800,7 +800,7 @@ def get_cytoscape_elements(
         if not subnet_ips.get(subnet):
             continue
         bg, border = subnet_colors[subnet]
-        display_label = (subnet_labels or {}).get(subnet, subnet)
+        display_label = (subnet_labels or {}).get(subnet) or subnet
         box_padding = (subnet_paddings or {}).get(subnet, 30)
         node_data: dict = {
             "id": f"sub_{subnet}",

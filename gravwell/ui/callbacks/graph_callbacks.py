@@ -240,11 +240,12 @@ def register(app: dash.Dash) -> None:
             # Higher repulsion pushes large compound boxes apart so they don't
             # overlap. 45 000 was fine for small maps; 80 000 works for 10+ subnets.
             "nodeRepulsion": 80000,
-            "idealEdgeLength": 140,
+            "idealEdgeLength": 100,
             "edgeElasticity": 0.4,
             # nestingFactor: ideal edge length multiplier INSIDE compounds.
-            # 0.7 gives more breathing room between nodes in the same subnet.
-            "nestingFactor": 0.7,
+            # Lower value → shorter ideal edge inside subnet boxes → nodes pack
+            # tighter → boxes stay compact.  0.7 caused boxes to balloon.
+            "nestingFactor": 0.35,
             # Lower gravity → more spread-out; helps domain compounds separate.
             "gravity": 0.05,
             "numIter": 6000,

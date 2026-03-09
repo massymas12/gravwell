@@ -588,29 +588,16 @@ def _compute_preset_positions(
         total_h = sum(row_heights) + _GAP * max(0, nrows - 1)
         return centers, total_w, total_h
 
-    # ── Depth-layered placement with per-layer BFS connectivity ordering ─────
-    # Subnets are bucketed by domain depth so the visual hierarchy is preserved:
-    #   depth 0 (top-level domains) → top rows
-    #   depth 1 (subdomains)        → rows below
-    #   undomained                  → bottom rows
-    # Within each depth bucket the subnets are BFS-ordered by gold-edge
-    # connectivity so subnets that route to each other land in adjacent cells —
-    # minimising inter-subnet line lengths regardless of domain membership.
+    # ── Domain-cluster placement with BFS connectivity ordering ──────────────
+    # Each domain gets its own spatial block of subnets.  Blocks at the same
+    # depth share a horizontal band (top-level domains on top, subdomains
+    # below).  Within each band, domains are BFS-ordered by inter-domain
+    # connectivity so domains that share gold edges land adjacent → short lines.
+    # Undomained subnets form a final band at the bottom, also BFS-ordered.
 
-    # Build per-depth buckets
-    subnet_depth: dict[str, int] = {}
-    for s in subnet_ips:
-        dom = (subnet_domain or {}).get(s)
-        if dom and domain_depth:
-            subnet_depth[s] = domain_depth.get(dom, 0)
-        else:
-            subnet_depth[s] = 9999  # undomained always below domained
+    _DOM_GAP = 80    # horizontal gap between domain blocks in the same band
+    _BAND_GAP = 120  # vertical gap between depth bands
 
-    depth_buckets: dict[int, list[str]] = collections.defaultdict(list)
-    for s in subnet_ips:
-        depth_buckets[subnet_depth[s]].append(s)
-
-    # BFS-order within each bucket then concatenate in depth order
     def _ip_sort_key(s: str):
         try:
             return (
@@ -620,22 +607,72 @@ def _compute_preset_positions(
         except ValueError:
             return (0, 0)
 
-    all_subnets_ordered: list[str] = []
-    for dep in sorted(depth_buckets.keys()):
-        bucket_sorted = sorted(depth_buckets[dep], key=_ip_sort_key)
-        all_subnets_ordered.extend(_bfs_order(bucket_sorted, subnet_adj))
+    # Group subnets by domain
+    domain_to_subs: dict[str, list[str]] = {}
+    for s in subnet_ips:
+        dom = (subnet_domain or {}).get(s)
+        if dom:
+            domain_to_subs.setdefault(dom, []).append(s)
 
-    n_total = len(all_subnets_ordered)
-    # ncols chosen so each depth level spans at most ~2 rows, keeping the
-    # hierarchy vertically compact.  Use the widest bucket as the target width.
-    widest_bucket = max(len(b) for b in depth_buckets.values()) if depth_buckets else 1
-    ncols_total = min(12, max(1, math.ceil(math.sqrt(widest_bucket * 2.0))))
+    # Group domains by depth
+    depth_to_doms: dict[int, list[str]] = {}
+    for dom, dep in (domain_depth or {}).items():
+        if dom in domain_to_subs:
+            depth_to_doms.setdefault(dep, []).append(dom)
 
+    # Build domain adjacency from subnet gold-edge connectivity
+    domain_adj: dict[str, set[str]] = {d: set() for d in domain_to_subs}
+    for _s1, _nbrs in subnet_adj.items():
+        _d1 = (subnet_domain or {}).get(_s1)
+        for _s2 in _nbrs:
+            _d2 = (subnet_domain or {}).get(_s2)
+            if _d1 and _d2 and _d1 != _d2 and _d1 in domain_adj:
+                domain_adj[_d1].add(_d2)
+                domain_adj.setdefault(_d2, set()).add(_d1)
+
+    # BFS-order domains within each depth band
+    all_dom_names = list(domain_to_subs.keys())
+
+    def _dom_parent(dom: str) -> str | None:
+        candidates = [d for d in all_dom_names if d != dom and dom.endswith("." + d)]
+        return max(candidates, key=len) if candidates else None
+
+    ordered_at: dict[int, list[str]] = {}
+    for dep in sorted(depth_to_doms.keys()):
+        doms = depth_to_doms[dep]
+        if dep == 0:
+            ordered_at[dep] = _bfs_order(sorted(doms), domain_adj)
+        else:
+            parent_rank = {d: i for i, d in enumerate(ordered_at.get(dep - 1, []))}
+            ordered_at[dep] = sorted(
+                doms, key=lambda d: (parent_rank.get(_dom_parent(d), 999), d)
+            )
+
+    # Place each domain block: subnets in a compact sqrt-shaped grid
     subnet_center: dict[str, tuple[float, float]] = {}
-    centers, _, _ = _place_subnet_grid(
-        all_subnets_ordered, 0.0, 0.0, ncols=ncols_total
-    )
-    subnet_center.update(centers)
+    y_cursor = 0.0
+    for dep in sorted(depth_to_doms.keys()):
+        x_cursor = 0.0
+        band_h = 0.0
+        for dom in ordered_at[dep]:
+            subs = _bfs_order(sorted(domain_to_subs[dom], key=_ip_sort_key), subnet_adj)
+            n = len(subs)
+            ncols = min(8, max(1, math.ceil(math.sqrt(n * 1.5))))
+            centers, w, h = _place_subnet_grid(subs, x_cursor, y_cursor, ncols=ncols)
+            subnet_center.update(centers)
+            x_cursor += w + _DOM_GAP
+            band_h = max(band_h, h)
+        if band_h > 0:
+            y_cursor += band_h + _BAND_GAP
+
+    # Undomained subnets: BFS-ordered band below all domain bands
+    undomained = [s for s in subnet_ips if not (subnet_domain or {}).get(s)]
+    if undomained:
+        uordered = _bfs_order(sorted(undomained, key=_ip_sort_key), subnet_adj)
+        n_un = len(uordered)
+        ncols_un = min(12, max(1, math.ceil(math.sqrt(n_un * 1.5))))
+        centers, _, grp_h = _place_subnet_grid(uordered, 0.0, y_cursor, ncols=ncols_un)
+        subnet_center.update(centers)
 
     # Compute leaf-node positions (hub at centre, hosts on spoke circle).
     # If the user has previously saved positions (by dragging), those are used

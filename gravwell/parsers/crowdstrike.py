@@ -783,6 +783,20 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
     if ip.startswith("nip:"):
         tags.append("no-local-ip")
 
+    # Data providers — indicates how CrowdStrike discovered this asset.
+    # Common values: "CrowdStrike", "Active Directory", "Okta", "ServiceNow", etc.
+    # AD-discovered assets have no sensor; they're known to exist but may have
+    # no current network presence (no IP, no agent_version).
+    data_providers_raw = rec.get("data_providers") or []
+    if isinstance(data_providers_raw, str):
+        data_providers_raw = [p.strip() for p in data_providers_raw.split(",")]
+    data_providers_norm = [dp.strip().lower() for dp in data_providers_raw if dp.strip()]
+    for dp in data_providers_norm:
+        tags.append(f"source:{dp.replace(' ', '-')}")
+    # No agent_version + discovered only via AD = sensorless AD computer account
+    if not agent_ver and any("active" in dp and "directory" in dp for dp in data_providers_norm):
+        tags.append("no-sensor")
+
     if "domain controller" in product_desc.lower():
         tags.append("role:dc")
 

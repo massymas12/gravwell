@@ -596,6 +596,11 @@ def _console_spotlight_rec_to_host_map(
     sev2 = _SEV_MAP.get(expr_raw, "info")
     severity = sev1 if _sev_rank.get(sev1, 0) >= _sev_rank.get(sev2, 0) else sev2
 
+    # This export has no CVSS score; approximate from severity so the CVSS columns
+    # in the UI reflect relative risk rather than showing 0.0 for everything.
+    _sev_to_cvss = {"critical": 9.5, "high": 7.5, "medium": 5.5, "low": 2.0, "info": 0.0}
+    cvss_score = _sev_to_cvss.get(severity, 0.0)
+
     # Product name from products array
     products = rec.get("products") or []
     product = ""
@@ -620,6 +625,7 @@ def _console_spotlight_rec_to_host_map(
         _Vuln(
             name=f"{cve_id}: {product}" if product else cve_id,
             severity=severity,
+            cvss_score=cvss_score,
             plugin_id=cve_id,
             cve_ids=[cve_id],
             description=description,

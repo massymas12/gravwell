@@ -207,11 +207,12 @@ class HostRoleOverrideORM(Base):
 
 
 class CVEEnrichmentORM(Base):
-    """KEV / EPSS enrichment cache keyed by CVE ID.
+    """KEV / EPSS / NVD CVSS enrichment cache keyed by CVE ID.
 
     Populated by the 'Enrich CVEs' action which calls:
       - CISA KEV (Known Exploited Vulnerabilities catalog)
       - FIRST.org EPSS (Exploit Prediction Scoring System)
+      - NIST NVD (real CVSS v3 base scores)
     """
     __tablename__ = "cve_enrichment"
 
@@ -221,6 +222,7 @@ class CVEEnrichmentORM(Base):
     kev_name = Column(String(256))               # short name from KEV catalog
     epss_score = Column(Float)                   # 0.0–1.0 probability of exploitation
     epss_percentile = Column(Float)              # 0.0–1.0 relative rank
+    nvd_cvss = Column(Float)                     # CVSS v3 base score from NVD (0.0–10.0)
     fetched_at = Column(DateTime)
 
 

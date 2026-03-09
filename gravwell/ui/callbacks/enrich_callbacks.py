@@ -37,7 +37,8 @@ def register(app: dash.Dash) -> None:
                 stats = enrich_cves(db_path, progress_cb=_cb)
                 msg = (
                     f"Done: {stats['kev_count']} KEV, "
-                    f"{stats['epss_count']} EPSS "
+                    f"{stats['epss_count']} EPSS, "
+                    f"{stats.get('nvd_count', 0)} NVD CVSS "
                     f"of {stats['cve_count']:,} CVEs"
                 )
                 with _lock:

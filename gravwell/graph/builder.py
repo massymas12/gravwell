@@ -658,23 +658,44 @@ def _compute_preset_positions(
         for g in ugroups.values():
             g[:] = _sort_subs(g)
         ugroups_sorted = sorted(ugroups.values(), key=lambda g: g[0])
+        # Place /16 groups side-by-side horizontally (same row), not stacked.
+        x_cursor = 0.0
+        max_band_h = 0.0
         for group_subs in ugroups_sorted:
-            centers, grp_w, grp_h = _place_subnet_grid(group_subs, 0.0, y_cursor)
+            centers, grp_w, grp_h = _place_subnet_grid(group_subs, x_cursor, y_cursor)
             subnet_center.update(centers)
-            y_cursor += grp_h + _GROUP_GAP
+            x_cursor += grp_w + _DOMAIN_GAP
+            max_band_h = max(max_band_h, grp_h)
+        if max_band_h > 0:
+            y_cursor += max_band_h + _GROUP_GAP
 
-    # Compute leaf-node positions (hub at centre, hosts on spoke circle)
+    # Compute leaf-node positions (hub at centre, hosts on spoke circle).
+    # If the user has previously saved positions (by dragging), those are used
+    # so manual layout adjustments persist across page refreshes.  The
+    # algorithmic subnet_center is only used as fallback when no saved
+    # position exists for a given node.
     node_positions: dict[str, dict[str, float]] = {}
     for subnet, ips in subnet_ips.items():
         hub_id = subnet_hub.get(subnet)
-        # Always use the algorithmically computed subnet centre so the
-        # domain-depth layout is respected.  Saved positions are NOT used here
-        # because stale DB positions from a previous layout would pull nodes
-        # into the wrong part of the canvas (different corner of the screen).
-        # Saved positions are still used by cose-bilkent as a warm start via
-        # the element["position"] field, but the preset layout always reflects
-        # the current algorithm.
-        cx, cy = subnet_center.get(subnet, (0.0, 0.0))
+        algo_cx, algo_cy = subnet_center.get(subnet, (0.0, 0.0))
+
+        # Derive the effective hub centre:
+        # 1. Use saved hub position if present.
+        # 2. Otherwise use centroid of saved spoke positions if most are saved.
+        # 3. Fall back to algorithmic centre.
+        cx, cy = algo_cx, algo_cy
+        if saved_positions and hub_id and hub_id in saved_positions:
+            cx, cy = saved_positions[hub_id]
+        elif saved_positions:
+            saved_spokes = [
+                saved_positions[ip]
+                for ip in ips
+                if ip != hub_id and ip in saved_positions
+            ]
+            if len(saved_spokes) >= max(1, len(ips) // 2):
+                cx = sum(p[0] for p in saved_spokes) / len(saved_spokes)
+                cy = sum(p[1] for p in saved_spokes) / len(saved_spokes)
+
         sz = _node_sz(len(ips))
         non_hub = [ip for ip in ips if ip != hub_id]
         k = len(non_hub)
@@ -684,11 +705,15 @@ def _compute_preset_positions(
             node_positions[hub_id] = {"x": cx, "y": cy}
 
         for i, ip in enumerate(non_hub):
-            angle = (2 * math.pi * i) / max(k, 1)
-            node_positions[ip] = {
-                "x": round(cx + r * math.cos(angle), 1),
-                "y": round(cy + r * math.sin(angle), 1),
-            }
+            if saved_positions and ip in saved_positions:
+                sx, sy = saved_positions[ip]
+                node_positions[ip] = {"x": sx, "y": sy}
+            else:
+                angle = (2 * math.pi * i) / max(k, 1)
+                node_positions[ip] = {
+                    "x": round(cx + r * math.cos(angle), 1),
+                    "y": round(cy + r * math.sin(angle), 1),
+                }
 
     # Position floating bridge nodes above the actual bounding boxes of the
     # subnets they bridge.  Using the real top-edge of the compound boxes

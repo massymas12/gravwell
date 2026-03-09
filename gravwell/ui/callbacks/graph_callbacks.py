@@ -687,6 +687,28 @@ def register(app: dash.Dash) -> None:
             html.Span(str(time.time()), style={"display": "none"}),
         ])
 
+    # ── Reset layout (clear all saved positions, rebuild from algorithm) ──
+    @app.callback(
+        Output("save-layout-status", "children", allow_duplicate=True),
+        Output("project-switch-trigger", "data", allow_duplicate=True),
+        Input("reset-layout-btn", "n_clicks"),
+        State("project-switch-trigger", "data"),
+        prevent_initial_call=True,
+    )
+    def reset_layout(n_clicks, current_trigger):
+        if not n_clicks:
+            return no_update, no_update
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        try:
+            with get_session(db_path) as session:
+                deleted = session.query(NodePositionORM).delete()
+        except Exception as e:
+            return f"Reset error: {e}", no_update
+        return (
+            html.Span(f"Layout reset ({deleted} positions cleared)"),
+            (current_trigger or 0) + 1,
+        )
+
     # ── Edge type visibility ───────────────────────────────────────────────
     @app.callback(
         Output("network-graph", "stylesheet"),

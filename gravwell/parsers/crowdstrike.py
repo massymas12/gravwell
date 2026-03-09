@@ -154,9 +154,13 @@ class CrowdStrikeParser(BaseParser):
             except OSError as e:
                 result.errors.append(f"File read error: {e}")
 
-        real_hosts = [h for h in result.hosts if not h.ip.startswith("hn:")]
+        # hn: = spotlight merges; nip: = device-inventory assets with no local IP
+        real_hosts = [
+            h for h in result.hosts
+            if not h.ip.startswith("hn:")
+        ]
         if not result.hosts:
-            result.warnings.append("No hosts with IP addresses found in CrowdStrike export")
+            result.warnings.append("No hosts found in CrowdStrike export")
         elif not real_hosts:
             # Console-spotlight export: only hostname-keyed records (no IPs)
             # Warning already added by the stream parser; nothing more to add here.
@@ -242,20 +246,13 @@ class CrowdStrikeParser(BaseParser):
 
         if skipped_no_ip:
             msg = (
-                f"{skipped_no_ip} of {total_recs} records skipped — no routable IP found "
-                f"(checked: local_ip, local_ips, network_interfaces, ip_address_history, external_ip). "
+                f"{skipped_no_ip} of {total_recs} records skipped — no routable IP, "
+                f"hostname, or device ID found "
+                f"(checked: local_ip, local_ips, network_interfaces, ip_address_history). "
+                "These records could not be identified. "
+                "Note: devices with a hostname but no local IP are imported with a "
+                "'no-local-ip' tag and can be assigned an IP via the Edit modal."
             )
-            if is_console_spotlight:
-                msg += (
-                    "This Spotlight console export only contains hostnames. "
-                    "Vulnerabilities will be merged into hosts already ingested from a "
-                    "device inventory export. Import the device inventory first."
-                )
-            else:
-                msg += (
-                    "These are likely offline or sensor-less assets. "
-                    "Add 'Sensor IP address' (local_ip) to your export fields if not already included."
-                )
             result.warnings.append(msg)
         if skipped_dupe:
             result.warnings.append(
@@ -708,11 +705,25 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
             if h != ip and h not in extra_ips:
                 extra_ips.append(h)
 
-    # 5. external_ip as last resort
+    # 5. external_ip — intentionally NOT used as primary key.
+    # CrowdStrike often stores a shared NAT/VPN/sensor IP in external_ip; using
+    # it as the host key would collapse hundreds of distinct machines into one
+    # entry (skipped_dupe).  Instead, fall back to a hostname-based synthetic key.
+    ext_ip_val = (rec.get("external_ip") or "").strip()
+
     if not ip:
-        _ext = (rec.get("external_ip") or "").strip()
-        if _is_usable(_ext):
-            ip = _ext
+        _hostname_for_key = (rec.get("hostname") or "").strip()
+        _device_id_for_key = (rec.get("device_id") or rec.get("aid") or "").strip()
+        if _hostname_for_key and not _looks_like_mac(_hostname_for_key):
+            ip = f"nip:{_hostname_for_key.lower()}"
+        elif _device_id_for_key:
+            ip = f"nip:{_device_id_for_key.lower()}"
+        # If we used external_ip as ip before and it's the same as ext_ip_val,
+        # skip adding it to extra_ips (it will be tagged separately below).
+        # Store external_ip as the first additional_ip so ingestion can promote
+        # it to the stored DB ip when it's unique (no other host has claimed it).
+        if ip and ext_ip_val and _is_usable(ext_ip_val) and ext_ip_val not in extra_ips:
+            extra_ips.insert(0, ext_ip_val)
 
     if not ip:
         return None
@@ -765,9 +776,12 @@ def _device_to_host(rec: dict, source: str) -> Host | None:
                 tags.append(f"cs-tag:{rt}")
 
     # External IP as extra tag if different from local
-    ext_ip = (rec.get("external_ip") or "").strip()
-    if ext_ip and ext_ip != ip and _valid_ip(ext_ip):
-        tags.append(f"external-ip:{ext_ip}")
+    if ext_ip_val and ext_ip_val != ip and _valid_ip(ext_ip_val):
+        tags.append(f"external-ip:{ext_ip_val}")
+
+    # Mark hosts that have no real local IP (only found via hostname/device_id key)
+    if ip.startswith("nip:"):
+        tags.append("no-local-ip")
 
     if "domain controller" in product_desc.lower():
         tags.append("role:dc")

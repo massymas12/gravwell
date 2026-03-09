@@ -38,8 +38,12 @@ def ingest_parse_result(
             session.expunge_all()
     session.flush()
     _record_scan_file(session, result, checksum)
-    # Exclude synthetic hostname-keyed hosts from the reported host count
-    real_hosts = sum(1 for h in result.hosts if not h.ip.startswith("hn:"))
+    # hn: → spotlight merges (not new hosts), nip: → device-inventory assets
+    # that were imported without a local IP (these ARE real hosts, count them).
+    real_hosts = sum(
+        1 for h in result.hosts
+        if not h.ip.startswith("hn:")
+    )
     return real_hosts, total_vulns, False
 
 
@@ -58,29 +62,69 @@ def _infer_domain_tags(hostnames: list[str]) -> list[str]:
 
 
 def _upsert_host(session: Session, host: Host) -> HostORM | None:
-    # ── Hostname-only spotlight records (synthetic "hn:<hostname>" key) ───────
-    # These come from CrowdStrike Spotlight console exports that contain only
-    # hostnames, no IPs.  Try to match an existing host by hostname and merge
-    # the vulnerabilities into it; if no match exists yet, skip the record so
-    # we don't create a junk "hn:..." entry in the database.
-    if host.ip.startswith("hn:"):
-        hn = host.hostnames[0] if host.hostnames else host.ip[3:]
+    # ── Hostname-only synthetic-key records ───────────────────────────────────
+    # "hn:<hostname>" — CrowdStrike Spotlight console exports (no IP).
+    #   Merge vulns into existing host by hostname; skip if no match (device
+    #   inventory must be imported first).
+    # "nip:<hostname|device_id>" — CrowdStrike device records with no local IP
+    #   (link-local only, or sensor-behind-NAT).  Try hostname match; if no
+    #   match, CREATE the host so the asset is not silently dropped.
+    if host.ip.startswith(("hn:", "nip:")):
+        hn = host.hostnames[0] if host.hostnames else host.ip.split(":", 1)[1]
         # JSON-stored list: search for the hostname as a quoted JSON string
         existing = session.query(HostORM).filter(
             HostORM._hostnames.like(f'%"{hn}"%')
         ).first()
-        if not existing:
+        if existing:
+            # Merge vulns into the matched host
+            existing_vuln_map: dict[tuple, VulnerabilityORM] = {
+                (v.plugin_id, v.port): v
+                for v in session.query(VulnerabilityORM).filter_by(host_id=existing.id).all()
+            }
+            for vuln in host.vulnerabilities:
+                svc_id = _find_service_id(session, existing.id, vuln.port)
+                _upsert_vulnerability(session, existing.id, svc_id, vuln, existing_vuln_map)
+            _update_host_aggregates(session, existing)
+            return existing
+
+        # Spotlight: skip until device inventory is imported first
+        if host.ip.startswith("hn:"):
             return None
-        # Merge vulns into the matched host
-        existing_vuln_map: dict[tuple, VulnerabilityORM] = {
-            (v.plugin_id, v.port): v
-            for v in session.query(VulnerabilityORM).filter_by(host_id=existing.id).all()
-        }
-        for vuln in host.vulnerabilities:
-            svc_id = _find_service_id(session, existing.id, vuln.port)
-            _upsert_vulnerability(session, existing.id, svc_id, vuln, existing_vuln_map)
-        _update_host_aggregates(session, existing)
-        return existing
+
+        # nip: device-inventory host with no local IP — create it so the asset
+        # is visible.  Use the first additional_ip (external_ip stored there)
+        # as the stored ip if it's a real address; otherwise keep the nip: key.
+        stored_ip = host.ip
+        if host.additional_ips:
+            candidate = host.additional_ips[0]
+            # Only use external_ip as stored_ip if it's not already claimed by
+            # a different host (avoids silently merging distinct devices).
+            if not session.query(HostORM).filter_by(ip=candidate).first():
+                stored_ip = candidate
+        # Check if this nip: host was already created by a prior import
+        existing_nip = session.query(HostORM).filter_by(ip=stored_ip).first()
+        if existing_nip:
+            _update_host_aggregates(session, existing_nip)
+            return existing_nip
+        orm = HostORM(
+            ip=stored_ip,
+            os_name=host.os_name,
+            os_family=host.os_family,
+            mac=host.mac,
+            mac_vendor=host.mac_vendor,
+            status=host.status,
+        )
+        orm.hostnames = host.hostnames
+        orm.source_files = host.source_files
+        orm.tags = list(dict.fromkeys(host.tags + _infer_domain_tags(host.hostnames)))
+        # Store remaining additional_ips (skip the one promoted to stored_ip)
+        orm.additional_ips = [
+            a for a in host.additional_ips if a != stored_ip
+        ]
+        session.add(orm)
+        session.flush()
+        _update_host_aggregates(session, orm)
+        return orm
 
     existing = session.query(HostORM).filter_by(ip=host.ip).first()
     if not existing and host.mac:

@@ -224,40 +224,6 @@ def register(app: dash.Dash) -> None:
 
     @app.callback(
         Output("upload-status", "children", allow_duplicate=True),
-        Output("import-path-section", "style", allow_duplicate=True),
-        Output("import-path-input", "value", allow_duplicate=True),
-        Input("file-upload", "reject"),
-        prevent_initial_call=True,
-    )
-    def handle_rejected_upload(rejected):
-        """Fires when a file is rejected by dcc.Upload (e.g. exceeds max_size).
-        The rejection happens at the JS level — readAsDataURL is never called,
-        so no OOM risk. We just reveal the path-import section."""
-        if not rejected:
-            return no_update, no_update, no_update
-        # rejected = [{"file": {"name": ..., "size": ...}, "errors": [...]}, ...]
-        try:
-            name = rejected[0]["file"]["name"]
-            size_mb = rejected[0]["file"]["size"] // (1024 * 1024)
-            hint = name
-        except (KeyError, IndexError, TypeError):
-            name, size_mb, hint = "file", 0, ""
-
-        msg = html.Div([
-            html.Div(
-                f"'{name}' is too large for browser upload (~{size_mb} MB).",
-                style={"color": "#E67E22", "fontSize": "12px",
-                       "fontWeight": "bold"},
-            ),
-            html.Div(
-                "Enter the full server path below and click Import.",
-                style={"color": "#aaa", "fontSize": "11px", "marginTop": "2px"},
-            ),
-        ])
-        return msg, {"display": "block", "marginTop": "4px"}, hint
-
-    @app.callback(
-        Output("upload-status", "children", allow_duplicate=True),
         Output("ingest-progress-interval", "disabled", allow_duplicate=True),
         Output("ingest-progress-bar", "style", allow_duplicate=True),
         Output("ingest-progress-bar", "children", allow_duplicate=True),

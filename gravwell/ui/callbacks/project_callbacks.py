@@ -14,10 +14,9 @@ def register(app: dash.Dash) -> None:
         Output("project-dropdown", "options"),
         Output("project-dropdown", "value"),
         Input("refresh-interval", "n_intervals"),
-        Input("project-switch-trigger", "data"),
         prevent_initial_call=False,
     )
-    def populate_projects(_n, _trigger):
+    def populate_projects(_n):
         from flask_login import current_user
         current_path = current_app.config.get("GRAVWELL_DB_PATH")
         projects = list_projects(current_path)

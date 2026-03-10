@@ -8,6 +8,7 @@ import dash
 from dash import Input, Output, State, no_update, dcc
 from flask import current_app
 from flask_login import current_user
+from gravwell.models.enrichment import resolve_vuln_name
 
 
 # ── Query helpers ─────────────────────────────────────────────────────────────
@@ -59,7 +60,9 @@ def _fetch_data(db_path: str):
                         ))
                         .all()
                     )
+                    enrich_map = {}
                     for e in enrichments:
+                        enrich_map[e.cve_id.upper()] = e
                         if e.in_kev:
                             in_kev = True
                             kev_date = e.kev_date_added or ""
@@ -76,7 +79,7 @@ def _fetch_data(db_path: str):
                     "Port":        v.port or "",
                     "Plugin ID":   v.plugin_id or "",
                     "CVE IDs":     "; ".join(cve_ids),
-                    "Name":        v.name or "",
+                    "Name":        resolve_vuln_name(v.name or "", cve_ids, enrich_map, 256),
                     "Severity":    v.severity or "",
                     "CVSS":        v.cvss_score or "",
                     "In KEV":      "Yes" if in_kev else "",

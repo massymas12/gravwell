@@ -263,7 +263,7 @@ def _render_vulns_table(db_path: str):
     from dash import dash_table
     from sqlalchemy import func
     from gravwell.models.orm import VulnerabilityORM, HostORM, CVERefORM, CVEEnrichmentORM
-    from gravwell.models.enrichment import exploit_label
+    from gravwell.models.enrichment import exploit_label, resolve_vuln_name
     sev_colors = {
         "critical": "#3d1a1a", "high": "#3d2a1a",
         "medium": "#2d2a1a",   "low": "#1a2d1a",
@@ -340,7 +340,7 @@ def _render_vulns_table(db_path: str):
                 "severity": v.severity,
                 "cvss":     f"{v.cvss_score:.1f}",
                 "exploit":  exploit_label(cve_map.get(v.id, []), enrich_map),
-                "name":     v.name[:80],
+                "name":     resolve_vuln_name(v.name, cve_map.get(v.id, []), enrich_map, 80),
                 "port":     str(v.port or ""),
                 "cves":     ", ".join(cve_map.get(v.id, [])),
                 "solution": (v.solution or "")[:60],

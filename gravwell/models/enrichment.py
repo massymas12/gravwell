@@ -88,9 +88,12 @@ def enrich_cves(db_path: str, progress_cb=None) -> dict:
             rec.epss_score = float(epss["epss"]) if epss else None
             rec.epss_percentile = float(epss["percentile"]) if epss else None
 
-            nvd_score = nvd_map.get(cve_id.upper())
-            if nvd_score is not None:
-                rec.nvd_cvss = nvd_score
+            nvd_entry = nvd_map.get(cve_id.upper())
+            if nvd_entry is not None:
+                if nvd_entry.get("score") is not None:
+                    rec.nvd_cvss = nvd_entry["score"]
+                if nvd_entry.get("description"):
+                    rec.nvd_description = nvd_entry["description"]
 
             rec.fetched_at = now
 
@@ -103,7 +106,7 @@ def enrich_cves(db_path: str, progress_cb=None) -> dict:
 
     kev_count = sum(1 for c in cve_ids if c.upper() in kev_map)
     epss_count = sum(1 for c in cve_ids if c.upper() in epss_map)
-    nvd_count  = len(nvd_map)
+    nvd_count  = sum(1 for v in nvd_map.values() if v.get("score") is not None)
     return {
         "cve_count": len(cve_ids),
         "kev_count": kev_count,
@@ -125,13 +128,14 @@ def _fetch_kev() -> dict:
     return {v["cveID"].upper(): v for v in data.get("vulnerabilities", [])}
 
 
-def _fetch_nvd_cvss(cve_ids: list[str], progress_cb=None) -> dict[str, float]:
-    """Fetch CVSS v3 base scores from the NVD API (one request per CVE).
+def _fetch_nvd_cvss(cve_ids: list[str], progress_cb=None) -> dict[str, dict]:
+    """Fetch CVSS v3 base scores and descriptions from the NVD API (one request per CVE).
 
-    Returns {CVE-ID-UPPER: base_score}.  CVEs not found or errored are omitted.
+    Returns {CVE-ID-UPPER: {"score": float|None, "description": str|None}}.
+    CVEs not found or errored are omitted.
     Rate limit: 5 public requests / 30 s — enforced by _NVD_DELAY between calls.
     """
-    result: dict[str, float] = {}
+    result: dict[str, dict] = {}
     total = len(cve_ids)
 
     for i, cve_id in enumerate(cve_ids):
@@ -144,7 +148,8 @@ def _fetch_nvd_cvss(cve_ids: list[str], progress_cb=None) -> dict[str, float]:
                 data = json.loads(resp.read())
             vulns = data.get("vulnerabilities", [])
             if vulns:
-                metrics = vulns[0].get("cve", {}).get("metrics", {})
+                cve_obj = vulns[0].get("cve", {})
+                metrics = cve_obj.get("metrics", {})
                 # Prefer v3.1, fall back to v3.0, then v2
                 score = None
                 for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
@@ -153,8 +158,17 @@ def _fetch_nvd_cvss(cve_ids: list[str], progress_cb=None) -> dict[str, float]:
                         score = entries[0].get("cvssData", {}).get("baseScore")
                         if score is not None:
                             break
-                if score is not None:
-                    result[cve_id.upper()] = float(score)
+                # First English description
+                description = None
+                for d in cve_obj.get("descriptions", []):
+                    if d.get("lang") == "en":
+                        description = (d.get("value") or "")[:512] or None
+                        break
+                if score is not None or description is not None:
+                    result[cve_id.upper()] = {
+                        "score": float(score) if score is not None else None,
+                        "description": description,
+                    }
         except Exception:
             pass  # network hiccup or CVE not in NVD — skip
 
@@ -179,7 +193,10 @@ def _apply_nvd_cvss_to_vulns(session, nvd_map: dict[str, float]) -> None:
 
     affected_host_ids: set[int] = set()
 
-    for cve_id_upper, nvd_score in nvd_map.items():
+    for cve_id_upper, nvd_entry in nvd_map.items():
+        nvd_score = nvd_entry.get("score") if isinstance(nvd_entry, dict) else nvd_entry
+        if nvd_score is None:
+            continue
         refs = session.query(CVERefORM).filter(
             CVERefORM.cve_id == cve_id_upper
         ).all()
@@ -239,6 +256,51 @@ def _fetch_epss(cve_ids: list[str], progress_cb=None) -> dict:
 
 
 # ── Shared display helper (used by callbacks) ─────────────────────────────────
+
+
+_CVE_PATTERN_PREFIX = "CVE-"
+
+
+def resolve_vuln_name(
+    stored_name: str,
+    cve_ids: list[str],
+    enrich_map: dict,
+    max_len: int = 80,
+) -> str:
+    """Return the best human-readable name for a vulnerability.
+
+    Priority:
+      1. stored_name — if it's not a bare CVE ID, use it as-is.
+      2. kev_name    — short name from CISA KEV catalog.
+      3. nvd_description — first English sentence from NVD.
+      4. stored_name — fallback (the CVE ID itself).
+    """
+    name = stored_name or ""
+    # Bare CVE ID detection: name IS one of the CVE IDs associated with this vuln
+    is_bare_cve = name.upper().startswith(_CVE_PATTERN_PREFIX) and (
+        not cve_ids or name.upper() in {c.upper() for c in cve_ids}
+    )
+    if not is_bare_cve:
+        return name[:max_len]
+
+    # Try enrichment sources
+    for cve_id in cve_ids:
+        rec = enrich_map.get(cve_id.upper())
+        if not rec:
+            continue
+        if rec.kev_name:
+            return rec.kev_name[:max_len]
+        if rec.nvd_description:
+            # Truncate at first sentence boundary for brevity
+            desc = rec.nvd_description
+            for sep in (". ", ".\n"):
+                idx = desc.find(sep)
+                if 0 < idx < max_len:
+                    desc = desc[: idx + 1]
+                    break
+            return desc[:max_len]
+
+    return name[:max_len]
 
 
 def exploit_label(cve_ids: list[str], enrich_map: dict) -> str:

@@ -223,6 +223,7 @@ class CVEEnrichmentORM(Base):
     epss_score = Column(Float)                   # 0.0–1.0 probability of exploitation
     epss_percentile = Column(Float)              # 0.0–1.0 relative rank
     nvd_cvss = Column(Float)                     # CVSS v3 base score from NVD (0.0–10.0)
+    nvd_description = Column(String(512))        # first English description from NVD
     fetched_at = Column(DateTime)
 
 

@@ -13,7 +13,7 @@ from gravwell.graph.builder import build_graph, get_cytoscape_elements, _node_ro
 from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, \
     CustomEdgeORM, HiddenEdgeORM, SubnetLabelORM, HostRoleOverrideORM, \
     CVEEnrichmentORM, NodePositionORM
-from gravwell.models.enrichment import exploit_label
+from gravwell.models.enrichment import exploit_label, resolve_vuln_name
 
 
 def register(app: dash.Dash) -> None:
@@ -420,7 +420,7 @@ def register(app: dash.Dash) -> None:
                     "cvss": f"{v.cvss_score:.1f}",
                     "exploit": exploit_label([r.cve_id for r in v.cve_refs],
                                              enrich_map),
-                    "name": v.name[:70],
+                    "name": resolve_vuln_name(v.name, [r.cve_id for r in v.cve_refs], enrich_map, 70),
                     "port": str(v.port or ""),
                     "cves": ", ".join(r.cve_id for r in v.cve_refs)[:40],
                 }

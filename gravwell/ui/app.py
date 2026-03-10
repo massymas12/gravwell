@@ -672,35 +672,33 @@ def create_app(db_path: str) -> dash.Dash:
             var cy = window._gravwell_cy;
             if (!cy) return window.dash_clientside.no_update;
             try {
-                // Save viewport so we can restore it after export
-                var savedPan  = cy.pan();
-                var savedZoom = cy.zoom();
-                // Fit entire graph into viewport (no animation = synchronous)
-                cy.fit(undefined, 30);
-                // Export at 2× the fitted viewport — bounded by screen size,
-                // so canvas limits are never hit, and text stays sharp.
-                cy.png({output: 'blob-promise', scale: 2, bg: '#121212'})
-                  .then(function(blob) {
-                    // Restore original viewport immediately
-                    cy.viewport({pan: savedPan, zoom: savedZoom});
-                    if (!blob || blob.size === 0) {
-                        console.error('PNG export: empty blob');
-                        return;
-                    }
-                    var blobUrl = URL.createObjectURL(blob);
-                    var a = document.createElement('a');
-                    a.href = blobUrl;
-                    var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
-                    a.download = 'network-map_' + ts + '.png';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
-                  })
-                  .catch(function(e) {
-                    cy.viewport({pan: savedPan, zoom: savedZoom});
-                    console.error('PNG export promise failed:', e);
-                  });
+                // Export full graph at natural scale so text is sharp.
+                // Cap scale so canvas stays under ~200 MP (Chrome limit ~268 MP).
+                var bb = cy.elements().boundingBox();
+                var area = (bb.w || 1) * (bb.h || 1);
+                var scale = Math.min(1, Math.sqrt(200 * 1024 * 1024 / area));
+                function doExport(s) {
+                    cy.png({output: 'blob-promise', scale: s, full: true, bg: '#121212'})
+                      .then(function(blob) {
+                        if (!blob || blob.size === 0) {
+                            // Canvas too large even at this scale — halve and retry once
+                            if (s > 0.1) { doExport(s / 2); }
+                            else { console.error('PNG export: canvas too large to export'); }
+                            return;
+                        }
+                        var blobUrl = URL.createObjectURL(blob);
+                        var a = document.createElement('a');
+                        a.href = blobUrl;
+                        var ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
+                        a.download = 'network-map_' + ts + '.png';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        setTimeout(function(){ URL.revokeObjectURL(blobUrl); }, 2000);
+                      })
+                      .catch(function(e) { console.error('PNG export failed:', e); });
+                }
+                doExport(scale);
             } catch(e) { console.error('PNG export failed:', e); }
             return window.dash_clientside.no_update;
         }""",

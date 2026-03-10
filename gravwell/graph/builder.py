@@ -318,6 +318,9 @@ def _classify_roles(
     return roles
 
 
+_KNOWN_COMPUTE_OS = {"windows", "linux", "macos", "unix", "freebsd", "solaris"}
+
+
 def _node_role(attrs: dict) -> str:
     """Classify a host as 'router', 'gateway', or 'host'."""
     os_family = attrs.get("os_family", "Unknown")
@@ -328,7 +331,10 @@ def _node_role(attrs: dict) -> str:
         return "router"
     if any(v in mac_vendor for v in _NETWORK_VENDORS):
         return "router"
-    if open_ports & _ROUTER_PORTS:
+    # Only use port heuristics when the OS is unknown/unidentified.
+    # A Windows or Linux host with SNMP/Telnet open is still a host, not a router.
+    os_is_known_compute = os_family.lower() in _KNOWN_COMPUTE_OS
+    if not os_is_known_compute and open_ports & _ROUTER_PORTS:
         return "router"
     try:
         last_octet = int(attrs.get("ip", "").split(".")[-1])
@@ -913,8 +919,7 @@ def get_cytoscape_elements(
                     votes[d] = votes.get(d, 0) + 1
         if votes:
             best = max(votes, key=votes.get)  # type: ignore[arg-type]
-            if votes[best] >= max(1, len(ips) * 0.5):
-                subnet_domain[subnet] = best
+            subnet_domain[subnet] = best
 
     domain_subnets: dict[str, list[str]] = {}
     for subnet, domain in subnet_domain.items():

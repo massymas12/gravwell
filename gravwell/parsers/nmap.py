@@ -23,11 +23,24 @@ class NmapParser(BaseParser):
         result = ParseResult(source_file=str(filepath), parser_name=cls.name)
         try:
             tree = ET.parse(filepath)
+            root = tree.getroot()
         except ET.ParseError as e:
-            result.errors.append(f"XML parse error: {e}")
-            return result
+            # File may be incomplete (e.g. scan interrupted before </nmaprun>)
+            try:
+                content = filepath.read_bytes().decode("utf-8", errors="replace")
+                last = content.rfind("</host>")
+                if last == -1:
+                    result.errors.append(f"XML parse error: {e}")
+                    return result
+                truncated = content[: last + len("</host>")] + "\n</nmaprun>"
+                root = ET.fromstring(truncated)
+                result.warnings.append(
+                    "File appears incomplete (scan was interrupted) — partial results imported"
+                )
+            except Exception:
+                result.errors.append(f"XML parse error: {e}")
+                return result
 
-        root = tree.getroot()
         for host_el in root.findall("host"):
             hosts = cls._parse_host(host_el, filepath, result)
             if hosts:

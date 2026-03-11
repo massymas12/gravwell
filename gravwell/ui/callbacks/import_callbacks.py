@@ -78,11 +78,17 @@ def _ingest_thread_path(file_paths: list[tuple[str, str]], db_path: str) -> None
 
             if already:
                 _complete_file(f"{display_name} — already ingested (skipped)", "#888")
+            elif result.errors:
+                _complete_file(
+                    f"{display_name}: parse error — {result.errors[0]}",
+                    "#E74C3C",
+                )
             else:
+                warn = f" ({result.warnings[0]})" if result.warnings else ""
                 _complete_file(
                     f"{display_name} ({result.parser_name}) — "
-                    f"{h_count} hosts, {v_count} vulns",
-                    "#27AE60",
+                    f"{h_count} hosts, {v_count} vulns{warn}",
+                    "#27AE60" if h_count > 0 else "#E67E22",
                 )
         except MemoryError:
             _complete_file(f"{display_name}: file too large to process", "#E74C3C")
@@ -136,11 +142,17 @@ def _ingest_thread(files_data: list[tuple[str, str]], db_path: str) -> None:
                 _complete_file(
                     f"{filename} — already ingested (skipped)", "#888"
                 )
+            elif result.errors:
+                _complete_file(
+                    f"{filename}: parse error — {result.errors[0]}",
+                    "#E74C3C",
+                )
             else:
+                warn = f" ({result.warnings[0]})" if result.warnings else ""
                 _complete_file(
                     f"{filename} ({result.parser_name}) — "
-                    f"{h_count} hosts, {v_count} vulns",
-                    "#27AE60",
+                    f"{h_count} hosts, {v_count} vulns{warn}",
+                    "#27AE60" if h_count > 0 else "#E67E22",
                 )
 
         except MemoryError:

@@ -70,11 +70,15 @@ _NET_PORTS: dict[int, int] = {
     161:   60,   # SNMP
     162:   60,   # SNMP trap
     179:   75,   # BGP              (routers only)
+    515:   68,   # LPD/LPR          (printer spooler — near-exclusive to printers)
     520:   68,   # RIPv1
     521:   68,   # RIPng
     830:   64,   # NETCONF over SSH
     2000:  48,   # Cisco SCCP
     2001:  48,   # Cisco
+    9100:  72,   # JetDirect raw print — very strong printer indicator
+    9101:  68,   # JetDirect alt
+    9102:  68,   # JetDirect alt
 }
 
 # ── Windows service name fingerprints ────────────────────────────────────────
@@ -87,6 +91,7 @@ _WIN_SVCNAMES: frozenset[str] = frozenset({
 _NET_SVCNAMES: frozenset[str] = frozenset({
     "snmp", "bgp", "rip", "telnet", "tftp", "netconf",
     "cisco-sccp", "cisco-fna", "cisco-tna", "cisco-sys",
+    "jetdirect", "lpd", "printer",
 })
 
 # ── Product name hints ────────────────────────────────────────────────────────

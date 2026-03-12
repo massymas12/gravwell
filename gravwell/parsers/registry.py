@@ -12,6 +12,7 @@ from gravwell.parsers.nuclei import NucleiParser
 from gravwell.parsers.paloalto import PaloAltoParser
 from gravwell.parsers.fortinet import FortinetParser
 from gravwell.parsers.juniper import JuniperParser
+from gravwell.parsers.huawei import HuaweiParser
 from gravwell.parsers.crowdstrike import CrowdStrikeParser
 
 # Order matters: most specific signatures first
@@ -26,6 +27,7 @@ _PARSERS: list[type[BaseParser]] = [
     PaloAltoParser,     # XML config or set-format — before Cisco (both use set-format)
     FortinetParser,     # "config system global" block
     JuniperParser,      # "set system host-name" or curly-brace with "ge-0/0/0"
+    HuaweiParser,       # "sysname" + Huawei interface names / "undo" syntax
     CiscoParser,
     MasscanParser,
 ]
@@ -40,6 +42,7 @@ _FORMAT_MAP: dict[str, type[BaseParser]] = {
     "paloalto": PaloAltoParser,
     "fortinet": FortinetParser,
     "juniper": JuniperParser,
+    "huawei": HuaweiParser,
     "cisco": CiscoParser,
     "masscan": MasscanParser,
 }

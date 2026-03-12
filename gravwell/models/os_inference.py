@@ -104,7 +104,7 @@ _NET_SVCNAMES: frozenset[str] = frozenset({
 # Ordered from most-specific to least-specific so the first match wins.
 _PRODUCT_HINTS: list[tuple[list[str], str, int]] = [
     (["Cisco IOS", "Cisco NX-OS", "Cisco IOS-XE", "JunOS", "Junos", "FortiGate",
-      "pfSense", "OpenWRT", "DD-WRT", "MikroTik"], "Network", 72),
+      "pfSense", "OpenWRT", "DD-WRT", "MikroTik", "Huawei VRP", "VRP"], "Network", 72),
     (["Microsoft-IIS", "Microsoft HTTPAPI", "Microsoft FTP", "Exchange",
       "MSSQL", "MS-SQL", "Windows RPC"], "Windows", 68),
     (["OpenSSH for Windows", "WinSSH", "Microsoft SFTP"], "Windows", 65),

@@ -1,7 +1,8 @@
 """Callbacks for attaching network device configs to host nodes.
 
-Supports Cisco IOS/NX-OS, Palo Alto PAN-OS, Fortinet FortiOS, and Juniper JunOS
-configs. The appropriate parser is auto-selected based on the host's OS name.
+Supports Cisco IOS/NX-OS, Palo Alto PAN-OS, Fortinet FortiOS, Juniper JunOS,
+and Huawei VRP configs. The appropriate parser is auto-selected based on the
+host's OS name.
 """
 from __future__ import annotations
 import base64
@@ -16,6 +17,7 @@ from gravwell.parsers.cisco import CiscoParser
 from gravwell.parsers.paloalto import PaloAltoParser
 from gravwell.parsers.fortinet import FortinetParser
 from gravwell.parsers.juniper import JuniperParser
+from gravwell.parsers.huawei import HuaweiParser
 
 
 # ── OS-to-parser mapping ──────────────────────────────────────────────────────
@@ -36,6 +38,11 @@ _VENDOR_PARSERS = [
      ["juniper"],
      JuniperParser,
      "Drop / click to attach JunOS config"),
+
+    (["huawei", "vrp"],
+     ["huawei"],
+     HuaweiParser,
+     "Drop / click to attach Huawei VRP config"),
 
     (["cisco", "ios", "nx-os", "ios-xe", "ios-xr"],
      ["cisco"],

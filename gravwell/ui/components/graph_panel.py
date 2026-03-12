@@ -9,6 +9,7 @@ _LEGEND_SHAPES = [
     ("●", "#7F8C8D", "Host"),
     ("⬡", "#F39C12", "Gateway"),
     ("⬠", "#F39C12", "Router"),
+    ("◆", "#B7950B", "Enterprise IoT"),
     ("★", "#D7BDE2", "Domain Controller"),
     ("▬", "#5DADE2", "Virtual Switch"),
 ]
@@ -17,7 +18,6 @@ _LEGEND_OS = [
     ("#2471A3", "Windows"),
     ("#1E8449", "Linux"),
     ("#1ABC9C", "macOS / iOS"),
-    ("#B7950B", "Network Device"),
     ("#616A6B", "Unknown"),
 ]
 

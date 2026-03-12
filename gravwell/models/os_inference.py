@@ -74,8 +74,14 @@ _NET_PORTS: dict[int, int] = {
     520:   68,   # RIPv1
     521:   68,   # RIPng
     830:   64,   # NETCONF over SSH
+    1883:  72,   # MQTT              (IoT devices / message brokers)
+    1720:  80,   # H.323             (VoIP)
     2000:  48,   # Cisco SCCP
     2001:  48,   # Cisco
+    4840:  68,   # OPC-UA            (industrial IoT / SCADA)
+    5060:  82,   # SIP               (VoIP phones — near-exclusive)
+    5061:  82,   # SIPS/TLS          (VoIP phones — near-exclusive)
+    8883:  68,   # MQTT TLS          (IoT devices)
     9100:  90,   # JetDirect raw print — definitive printer indicator, beats nmap osmatch
     9101:  88,   # JetDirect alt
     9102:  88,   # JetDirect alt

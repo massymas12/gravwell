@@ -434,6 +434,7 @@ def register(app: dash.Dash) -> None:
 
         return html.Div([
             html.Div([
+                html.B("IP: "), hd["ip"], html.Br(),
                 html.B("OS: "),
                 f"{hd['os_name']} ({hd['os_family']})", html.Br(),
                 html.B("MAC: "), f"{hd['mac']} {hd['mac_vendor']}", html.Br(),

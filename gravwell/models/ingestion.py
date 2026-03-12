@@ -8,6 +8,7 @@ from gravwell.models.dataclasses import ParseResult, Host, Service, Vulnerabilit
 from gravwell.models.orm import (
     HostORM, ServiceORM, VulnerabilityORM, CVERefORM, ScanFileORM
 )
+from gravwell.models.os_inference import infer_os
 
 
 def ingest_parse_result(
@@ -140,9 +141,10 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
         # Merge hostnames (union, preserve order)
         merged_hostnames = list(dict.fromkeys(orm.hostnames + host.hostnames))
         orm.hostnames = merged_hostnames
-        # Prefer the higher-confidence OS; fall back to "more specific name wins"
+        # Seed OS with the incoming data if it's better than what we have —
+        # the definitive re-inference happens below after services are upserted.
         incoming_conf = host.os_confidence
-        existing_conf = getattr(orm, "_os_confidence_cache", 0)
+        existing_conf = orm.os_confidence or 0
         if host.os_name and (
             not orm.os_name
             or incoming_conf > existing_conf
@@ -150,7 +152,7 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
         ):
             orm.os_name = host.os_name
             orm.os_family = host.os_family or "Unknown"
-            orm._os_confidence_cache = incoming_conf  # transient, not persisted
+            orm.os_confidence = incoming_conf
         if host.mac and not orm.mac:
             orm.mac = host.mac
             orm.mac_vendor = host.mac_vendor
@@ -171,6 +173,7 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
             ip=host.ip,
             os_name=host.os_name,
             os_family=host.os_family,
+            os_confidence=host.os_confidence,
             mac=host.mac,
             mac_vendor=host.mac_vendor,
             status=host.status,
@@ -190,6 +193,12 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
 
     for svc in host.services:
         _upsert_service(session, orm.id, svc)
+
+    # Re-infer OS from ALL services now in the DB (combines every scan file
+    # imported so far).  Pass the current stored values as the explicit baseline
+    # so high-confidence scanner fingerprints (nmap osmatch ≥ 75) are preserved
+    # while low-confidence inferred guesses get corrected when better signals arrive.
+    _recompute_os(session, orm)
 
     # Pre-load all existing vulns for this host in one query instead of one
     # SELECT per vulnerability (avoids N+1 pattern on large Spotlight imports).
@@ -229,6 +238,45 @@ def _absorb_nip_stubs(
             )
             session.delete(stub)
             session.flush()
+
+
+def _recompute_os(session: Session, orm: HostORM) -> None:
+    """Re-run OS inference over all services currently in the DB for this host.
+
+    Uses the stored os_name/family/confidence as the explicit baseline so that
+    high-confidence scanner fingerprints (nmap osmatch, etc.) are not overridden
+    by inference.  Low-confidence inferred guesses *can* be overridden when a
+    different scan file contributes a stronger signal (e.g. port 9100 = printer).
+    """
+    all_svc_orm = session.query(ServiceORM).filter_by(host_id=orm.id).all()
+    all_svcs = [
+        Service(
+            port=s.port,
+            protocol=s.protocol or "tcp",
+            state=s.state or "open",
+            service_name=s.service_name,
+            product=s.product,
+            version=s.version,
+            banner=s.banner,
+        )
+        for s in all_svc_orm
+    ]
+    new_name, new_family, new_conf = infer_os(
+        all_svcs,
+        [],
+        orm.mac_vendor,
+        explicit_os_name=orm.os_name,
+        explicit_os_family=orm.os_family,
+        explicit_confidence=orm.os_confidence or 0,
+    )
+    if new_conf > (orm.os_confidence or 0) or (
+        new_conf == (orm.os_confidence or 0)
+        and new_name
+        and len(new_name) > len(orm.os_name or "")
+    ):
+        orm.os_name = new_name
+        orm.os_family = new_family or "Unknown"
+        orm.os_confidence = new_conf
 
 
 def _upsert_service(session: Session, host_id: int, svc: Service) -> ServiceORM:

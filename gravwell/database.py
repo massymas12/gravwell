@@ -24,6 +24,7 @@ _COLUMN_MIGRATIONS = [
     "ALTER TABLE subnet_labels ADD COLUMN box_padding INTEGER DEFAULT 30",
     "ALTER TABLE cve_enrichment ADD COLUMN nvd_cvss REAL DEFAULT NULL",
     "ALTER TABLE cve_enrichment ADD COLUMN nvd_description TEXT DEFAULT NULL",
+    "ALTER TABLE hosts ADD COLUMN os_confidence INTEGER DEFAULT 0",
 ]
 
 # MEK for CLI context (set via set_cli_mek; web context uses current_app.config)

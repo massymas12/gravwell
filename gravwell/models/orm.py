@@ -20,6 +20,7 @@ class HostORM(Base):
     _hostnames = Column("hostnames", Text, default="[]")
     os_name = Column(String(256))
     os_family = Column(String(64))
+    os_confidence = Column(Integer, default=0)
     mac = Column(String(17))
     mac_vendor = Column(String(128))
     status = Column(String(16), default="up")

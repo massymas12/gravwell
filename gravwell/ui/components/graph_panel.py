@@ -144,6 +144,14 @@ def create_graph_panel() -> html.Div:
                 boxSelectionEnabled=True,
                 responsive=True,
                 autoRefreshLayout=False,
+                # Performance hints for large maps:
+                # hideEdgesOnViewport — edges are hidden while panning/zooming
+                # and redrawn once the viewport is still (huge win for 500+ nodes).
+                # minZoom/maxZoom — prevents the browser from trying to render
+                # all labels when zoomed out to fit thousands of nodes.
+                hideEdgesOnViewport=True,
+                minZoom=0.05,
+                maxZoom=6,
             ),
             _create_legend(),
         ],

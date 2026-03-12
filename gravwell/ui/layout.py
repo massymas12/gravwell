@@ -406,8 +406,11 @@ def create_layout() -> html.Div:
             _create_add_user_modal(),
             # Manage Users modal (settings)
             _create_manage_users_modal(),
-            # Polling interval: refresh every 60s
-            dcc.Interval(id="refresh-interval", interval=60_000, n_intervals=0),
+            # Polling interval: refresh every 5 min (300 s).
+            # The graph is rebuilt from scratch on every tick, which is expensive
+            # on large maps — imports fire project-switch-trigger immediately so
+            # the longer interval does not delay seeing newly imported data.
+            dcc.Interval(id="refresh-interval", interval=300_000, n_intervals=0),
             # Fast interval used only while a file import is running
             dcc.Interval(id="ingest-progress-interval", interval=250,
                          n_intervals=0, disabled=True),

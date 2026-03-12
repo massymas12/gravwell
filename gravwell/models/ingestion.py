@@ -191,8 +191,13 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
     # vulns/services into this real-IP host and delete the stale nip: row.
     _absorb_nip_stubs(session, orm, host.hostnames)
 
+    # Pre-load existing services in one query to avoid N+1 in _upsert_service.
+    existing_svc_map: dict[tuple, ServiceORM] = {
+        (s.port, s.protocol): s
+        for s in session.query(ServiceORM).filter_by(host_id=orm.id).all()
+    }
     for svc in host.services:
-        _upsert_service(session, orm.id, svc)
+        _upsert_service(session, orm.id, svc, existing_svc_map)
 
     # Re-infer OS from ALL services now in the DB (combines every scan file
     # imported so far).  Pass the current stored values as the explicit baseline
@@ -206,8 +211,14 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
         (v.plugin_id, v.port): v
         for v in session.query(VulnerabilityORM).filter_by(host_id=orm.id).all()
     }
+    # Build service port→id map from what is now in the DB (avoids N+1
+    # _find_service_id calls — one query covers all vulnerabilities for this host).
+    svc_id_map: dict[int | None, int | None] = {
+        s.port: s.id
+        for s in session.query(ServiceORM.port, ServiceORM.id).filter_by(host_id=orm.id).all()
+    }
     for vuln in host.vulnerabilities:
-        svc_id = _find_service_id(session, orm.id, vuln.port)
+        svc_id = svc_id_map.get(vuln.port)
         _upsert_vulnerability(session, orm.id, svc_id, vuln, existing_vuln_map)
 
     _update_host_aggregates(session, orm)
@@ -279,10 +290,19 @@ def _recompute_os(session: Session, orm: HostORM) -> None:
         orm.os_confidence = new_conf
 
 
-def _upsert_service(session: Session, host_id: int, svc: Service) -> ServiceORM:
-    existing = session.query(ServiceORM).filter_by(
-        host_id=host_id, port=svc.port, protocol=svc.protocol
-    ).first()
+def _upsert_service(
+    session: Session,
+    host_id: int,
+    svc: Service,
+    existing_map: dict[tuple, "ServiceORM"] | None = None,
+) -> ServiceORM:
+    key = (svc.port, svc.protocol)
+    if existing_map is not None:
+        existing = existing_map.get(key)
+    else:
+        existing = session.query(ServiceORM).filter_by(
+            host_id=host_id, port=svc.port, protocol=svc.protocol
+        ).first()
     if existing:
         if svc.product and not existing.product:
             existing.product = svc.product
@@ -305,6 +325,8 @@ def _upsert_service(session: Session, host_id: int, svc: Service) -> ServiceORM:
     )
     session.add(orm)
     session.flush()
+    if existing_map is not None:
+        existing_map[key] = orm  # keep map current for within-host dedup
     return orm
 
 

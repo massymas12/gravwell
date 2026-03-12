@@ -197,13 +197,23 @@ def _add_subnet_edges(
 
 
 def _add_shared_service_edges(G: nx.Graph, host_data: list[dict]) -> None:
-    """Connect hosts that share interesting open ports (potential pivot paths)."""
+    """Connect hosts that share interesting open ports (potential pivot paths).
+
+    Skips ports that appear on more than _MAX_SHARED_SERVICE_HOSTS hosts —
+    ubiquitous services (e.g. HTTP/443 on every server) generate O(n²) edges
+    that are not useful for pivot analysis and will freeze the browser on
+    large maps.
+    """
     # Ports that indicate shared service / lateral movement potential
     INTERESTING_PORTS = {
         22, 23, 25, 53, 80, 110, 135, 139, 143, 389, 443, 445,
         465, 587, 636, 993, 995, 1433, 1521, 2049, 3306, 3389,
         5432, 5900, 6379, 8080, 8443, 8888, 9200, 27017,
     }
+    # If more than this many hosts share a port it is too common to be a
+    # useful pivot indicator — skip edge creation to prevent O(n²) explosion.
+    _MAX_SHARED_SERVICE_HOSTS = 12
+
     port_hosts: dict[int, list[str]] = {}
     for hd in host_data:
         for p in hd["open_ports"]:
@@ -211,7 +221,7 @@ def _add_shared_service_edges(G: nx.Graph, host_data: list[dict]) -> None:
                 port_hosts.setdefault(p, []).append(hd["ip"])
 
     for port, ips in port_hosts.items():
-        if len(ips) < 2:
+        if len(ips) < 2 or len(ips) > _MAX_SHARED_SERVICE_HOSTS:
             continue
         for i in range(len(ips)):
             for j in range(i + 1, len(ips)):

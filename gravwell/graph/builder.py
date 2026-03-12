@@ -20,6 +20,7 @@ _SUBNET_PALETTE = [
 
 # Ports that strongly suggest a network device (router/switch/firewall)
 _ROUTER_PORTS = {23, 69, 161, 162, 179, 520, 521, 830, 2000, 2001}
+_PRINTER_PORTS = {515, 9100, 9101, 9102}  # LPD/LPR, JetDirect
 
 # Ports that strongly indicate a Windows Domain Controller
 _DC_PORTS = {
@@ -328,6 +329,9 @@ def _node_role(attrs: dict) -> str:
     mac_vendor = (attrs.get("mac_vendor") or "").lower()
 
     if os_family == "Network":
+        # Printers are Network devices but should render as hosts, not router hubs
+        if open_ports & _PRINTER_PORTS:
+            return "host"
         return "router"
     if any(v in mac_vendor for v in _NETWORK_VENDORS):
         return "router"

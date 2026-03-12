@@ -49,14 +49,35 @@ _SCHEME_DEFAULTS: dict[str, tuple[int, str]] = {
 }
 
 
+_PLAIN_RE = None  # compiled lazily
+
+
+def _get_plain_re():
+    global _PLAIN_RE
+    if _PLAIN_RE is None:
+        import re
+        _PLAIN_RE = re.compile(
+            r'^\[(?P<template>[^\]]+)\]\s+'
+            r'\[(?P<protocol>[^\]]+)\]\s+'
+            r'\[(?P<severity>[^\]]+)\]\s+'
+            r'(?P<host>\S+)'
+            r'(?:\s+\[(?P<extracted>.*)\])?'
+        )
+    return _PLAIN_RE
+
+
 class NucleiParser(BaseParser):
     name = "nuclei"
 
     @classmethod
     def can_parse(cls, filepath: Path) -> bool:
         head = cls._read_head(filepath, 512)
-        # Nuclei JSONL/JSON always contains these keys in each result entry
-        return '"template-id"' in head and '"info"' in head and '"severity"' in head
+        # JSON/JSONL format
+        if '"template-id"' in head and '"info"' in head and '"severity"' in head:
+            return True
+        # Plain-text format: lines starting with [template-id] [protocol] [severity]
+        import re
+        return bool(re.search(r'^\[[^\]]+\]\s+\[[^\]]+\]\s+\[(?:critical|high|medium|low|info)\]', head, re.MULTILINE | re.IGNORECASE))
 
     @classmethod
     def parse(cls, filepath: Path) -> ParseResult:
@@ -69,7 +90,11 @@ class NucleiParser(BaseParser):
             result.errors.append(f"Read error: {e}")
             return result
 
-        records = _load_records(content, result)
+        # Detect plain-text vs JSON
+        if content.startswith("[") and not content.startswith('["') and '"template-id"' not in content[:256]:
+            records = _load_plain_records(content, result)
+        else:
+            records = _load_records(content, result)
         if not records:
             return result
 
@@ -162,6 +187,60 @@ def _load_records(content: str, result: ParseResult) -> list[dict]:
     except json.JSONDecodeError as e:
         result.errors.append(f"JSON parse error: {e}")
     return []
+
+
+def _load_plain_records(content: str, result: ParseResult) -> list[dict]:
+    """Parse Nuclei plain-text CLI output into pseudo-JSON-record dicts.
+
+    Line format:
+        [template-id] [protocol] [severity] host[:port] ["extracted"]
+    """
+    rx = _get_plain_re()
+    records: list[dict] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = rx.match(line)
+        if not m:
+            continue
+        template = m.group("template")   # may be "id:matcher" like "smtp-commands-enum:ehlo"
+        protocol = m.group("protocol")
+        severity = m.group("severity").lower()
+        host_raw = m.group("host")
+        extracted = m.group("extracted")  # may be None
+
+        # template-id is the part before the colon; matcher is the part after
+        if ":" in template:
+            template_id, matcher_name = template.split(":", 1)
+        else:
+            template_id, matcher_name = template, None
+
+        # Build a synthetic record matching what _build_vulnerability expects
+        record: dict = {
+            "template-id": template_id,
+            "host": host_raw,
+            "info": {
+                "name": template_id.replace("-", " ").title(),
+                "severity": severity,
+                "classification": {},
+            },
+        }
+        if matcher_name:
+            record["matcher-name"] = matcher_name
+        if extracted:
+            record["extracted-results"] = [extracted.strip('"')]
+
+        # For network-layer protocols (tcp/ssl/javascript) the host is ip:port
+        # For http/https the host is a full URL
+        if "://" not in host_raw:
+            record["matched-at"] = f"{protocol}://{host_raw}"
+        else:
+            record["matched-at"] = host_raw
+
+        records.append(record)
+
+    return records
 
 
 def _is_valid_ip(s: str) -> bool:

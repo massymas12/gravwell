@@ -246,15 +246,18 @@ def normalize_os_family(raw: str) -> str:
     r = (raw or "").lower()
     if any(x in r for x in ("windows", "microsoft", "winnt", "win32", "win2k")):
         return "Windows"
+    # Network check runs before macOS so "Cisco IOS" does not match the "ios"
+    # Apple keyword — "ios" is a substring of both "Cisco IOS" and "iOS".
+    if any(x in r for x in ("cisco", "junos", "network", "router", "switch",
+                              "firewall", "printer", "appliance", "nx-os",
+                              "ios-xe", "iosxe", "fortios", "panos", "vrp",
+                              "huawei")):
+        return "Network"
+    if any(x in r for x in ("linux", "unix", "bsd", "solaris", "aix", "hpux", "irix")):
+        return "Linux"
     if any(x in r for x in ("macos", "mac os", "darwin", "ios", "ipados",
                               "tvos", "watchos")):
         return "macOS"
-    if any(x in r for x in ("linux", "unix", "bsd", "solaris", "aix", "hpux", "irix")):
-        return "Linux"
-    if any(x in r for x in ("cisco", "junos", "network", "router", "switch",
-                              "firewall", "printer", "appliance", "nx-os",
-                              "iosxe", "fortios", "panos")):
-        return "Network"
     return "Unknown"
 
 

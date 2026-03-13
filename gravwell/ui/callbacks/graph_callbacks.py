@@ -536,6 +536,8 @@ def register(app: dash.Dash) -> None:
                 try {
                     var node = cy.getElementById(ip);
                     if (node && node.length > 0) {
+                        cy.elements().unselect();
+                        node.select();
                         cy.animate({ center: { eles: node }, zoom: 1.8 },
                                    { duration: 250 });
                         return [nu, nu];

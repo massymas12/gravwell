@@ -119,13 +119,15 @@ def register(app: dash.Dash) -> None:
         Output("selected-node-store", "data", allow_duplicate=True),
         Input("services-table", "active_cell"),
         State("services-table", "derived_virtual_data"),
+        State("services-table", "data"),
         prevent_initial_call=True,
     )
-    def focus_from_services_table(active_cell, virtual_data):
-        if not active_cell or not virtual_data:
+    def focus_from_services_table(active_cell, virtual_data, raw_data):
+        if not active_cell:
             return no_update, no_update
+        rows = virtual_data if virtual_data is not None else (raw_data or [])
         row = active_cell.get("row", -1)
-        ip  = virtual_data[row].get("ip") if 0 <= row < len(virtual_data) else None
+        ip  = rows[row].get("ip") if 0 <= row < len(rows) else None
         return ({"ip": ip}, {"ip": ip}) if ip else (no_update, no_update)
 
     @app.callback(
@@ -133,13 +135,15 @@ def register(app: dash.Dash) -> None:
         Output("selected-node-store", "data", allow_duplicate=True),
         Input("vulns-table", "active_cell"),
         State("vulns-table", "derived_virtual_data"),
+        State("vulns-table", "data"),
         prevent_initial_call=True,
     )
-    def focus_from_vulns_table(active_cell, virtual_data):
-        if not active_cell or not virtual_data:
+    def focus_from_vulns_table(active_cell, virtual_data, raw_data):
+        if not active_cell:
             return no_update, no_update
+        rows = virtual_data if virtual_data is not None else (raw_data or [])
         row = active_cell.get("row", -1)
-        ip  = virtual_data[row].get("ip") if 0 <= row < len(virtual_data) else None
+        ip  = rows[row].get("ip") if 0 <= row < len(rows) else None
         return ({"ip": ip}, {"ip": ip}) if ip else (no_update, no_update)
 
 

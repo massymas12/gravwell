@@ -15,11 +15,12 @@ def register(app: dash.Dash) -> None:
         Output("filter-os", "value"),
         Output("filter-severity", "value"),
         Output("filter-port-service", "value"),
+        Output("filter-no-crowdstrike", "value"),
         Input("reset-filters-btn", "n_clicks"),
         prevent_initial_call=True,
     )
     def reset_filters(_):
-        return None, None, None, None, None
+        return None, None, None, None, None, []
 
     @app.callback(
         Output("topbar-stats", "children"),

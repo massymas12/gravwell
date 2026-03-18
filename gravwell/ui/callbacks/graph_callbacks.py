@@ -31,11 +31,12 @@ def register(app: dash.Dash) -> None:
         State("filter-os", "value"),
         State("filter-severity", "value"),
         State("filter-port-service", "value"),
+        State("filter-no-crowdstrike", "value"),
         State("graph-data-store", "data"),
         prevent_initial_call=False,
     )
     def update_graph(n_intervals, n_clicks, _trigger, hostname, subnet,
-                     os_families, severity, port_service,
+                     os_families, severity, port_service, no_crowdstrike,
                      current_graph_data):
         import logging as _log
         db_path = current_app.config["GRAVWELL_DB_PATH"]
@@ -178,6 +179,18 @@ def register(app: dash.Dash) -> None:
                     if not match:
                         nodes_to_remove.append(node_id)
                         continue
+
+            # ── No CrowdStrike sensor filter ───────────────────────────────
+            # Keep: hosts with no "crowdstrike" tag (not in CS at all = assumed
+            # no sensor) OR hosts that have "crowdstrike" + "no-sensor".
+            # Remove: hosts that have "crowdstrike" WITHOUT "no-sensor" (sensor present).
+            if no_crowdstrike and "no_cs" in no_crowdstrike:
+                node_tags = attrs.get("tags") or []
+                has_cs_tag = "crowdstrike" in node_tags
+                has_sensor = has_cs_tag and "no-sensor" not in node_tags
+                if has_sensor:
+                    nodes_to_remove.append(node_id)
+                    continue
 
         G.remove_nodes_from(nodes_to_remove)
 
@@ -505,16 +518,20 @@ def register(app: dash.Dash) -> None:
         Output("node-focus-store", "data"),
         Input("hosts-table", "active_cell"),
         State("hosts-table", "derived_virtual_data"),
+        State("hosts-table", "data"),
         prevent_initial_call=True,
     )
-    def focus_host_from_table(active_cell, virtual_data):
+    def focus_host_from_table(active_cell, virtual_data, raw_data):
         """Clicking a row in the Hosts table selects that host and pans to it."""
-        if not active_cell or not virtual_data:
+        if not active_cell:
             return no_update, no_update
+        # derived_virtual_data is None until the table has been filtered/sorted;
+        # fall back to the full data in that case.
+        rows = virtual_data if virtual_data is not None else (raw_data or [])
         row = active_cell.get("row", -1)
-        if row < 0 or row >= len(virtual_data):
+        if row < 0 or row >= len(rows):
             return no_update, no_update
-        ip = virtual_data[row].get("ip")
+        ip = rows[row].get("ip")
         if not ip:
             return no_update, no_update
         return {"ip": ip}, {"ip": ip}
@@ -571,6 +588,32 @@ def register(app: dash.Dash) -> None:
         Output("network-graph", "pan",   allow_duplicate=True),
         Input("node-focus-store", "data"),
         State("graph-data-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    # Clientside auto-fit: whenever the graph loads new nodes, fit the viewport
+    # so users don't see a blank canvas.  Uses retry logic because _gravwell_cy
+    # is initialised by a 1500 ms setInterval and may not be ready immediately.
+    dash.clientside_callback(
+        """
+        function(hostCount) {
+            var nu = window.dash_clientside.no_update;
+            if (!hostCount || parseInt(hostCount) === 0) return [nu, nu];
+            function tryFit(attempts) {
+                var cy = window._gravwell_cy;
+                if (cy && (!cy.destroyed || !cy.destroyed())) {
+                    cy.fit(undefined, 60);
+                } else if (attempts > 0) {
+                    setTimeout(function() { tryFit(attempts - 1); }, 400);
+                }
+            }
+            tryFit(8);
+            return [nu, nu];
+        }
+        """,
+        Output("network-graph", "zoom", allow_duplicate=True),
+        Output("network-graph", "pan",  allow_duplicate=True),
+        Input("graph-host-count", "children"),
         prevent_initial_call=True,
     )
 

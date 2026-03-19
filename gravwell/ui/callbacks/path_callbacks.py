@@ -197,10 +197,10 @@ def _render_hosts_table(db_path: str, scope: dict | None = None):
             except ValueError:
                 pass
         elif scope.get("domain"):
-            tag_key = f"domain:{scope['domain'].upper()}"
+            tag_key = f"domain:{scope['domain']}".lower()
             results = [
                 (h, c) for h, c in results
-                if any(t.upper() == tag_key for t in (h.tags or []))
+                if any(t.lower() == tag_key for t in (h.tags or []))
             ]
             banner_text = f"Domain: {scope['domain']}"
 

@@ -17,23 +17,26 @@ def register(app: dash.Dash) -> None:
         Input("apply-filters-btn", "n_clicks"),
         Input("data-refresh-trigger", "data"),
         Input("project-switch-trigger", "data"),
+        Input("selected-subnet-store", "data"),
         prevent_initial_call=False,
     )
-    def update_bottom_tab(tab, _filters, _refresh, _project):
+    def update_bottom_tab(tab, _filters, _refresh, _project, subnet_sel):
         from dash import ctx
         triggered = ctx.triggered_id
 
-        # Never re-render the paths tab on filter/refresh/project signals —
+        # Never re-render the paths tab on these signals —
         # it would wipe any analysis results the user just ran.
         if tab == "tab-paths" and triggered in (
-            "data-refresh-trigger", "apply-filters-btn", "project-switch-trigger"
+            "data-refresh-trigger", "apply-filters-btn",
+            "project-switch-trigger", "selected-subnet-store",
         ):
             return no_update
 
         db_path = current_app.config["GRAVWELL_DB_PATH"]
+        scope = subnet_sel or {}
 
         if tab == "tab-hosts":
-            return _render_hosts_table(db_path)
+            return _render_hosts_table(db_path, scope)
         elif tab == "tab-services":
             return _render_services_table(db_path)
         elif tab == "tab-vulns":
@@ -149,10 +152,18 @@ def register(app: dash.Dash) -> None:
 
 # ── Bottom-tab renderers ──────────────────────────────────────────────────────
 
-def _render_hosts_table(db_path: str):
+def _render_hosts_table(db_path: str, scope: dict | None = None):
+    import ipaddress as _ipmod
     from dash import dash_table
     from sqlalchemy import func
     from gravwell.models.orm import HostORM, ServiceORM
+
+    def _in_net(ip: str, net) -> bool:
+        try:
+            return _ipmod.ip_address(ip) in net
+        except ValueError:
+            return False
+
     with get_session(db_path) as session:
         # Single GROUP BY subquery replaces N per-host count queries
         port_subq = (
@@ -175,6 +186,24 @@ def _render_hosts_table(db_path: str):
                 return "no sensor" if "no-sensor" in tags else ""
             return "not in cs"
 
+        # Apply subnet / domain scope filter
+        scope = scope or {}
+        banner_text = None
+        if scope.get("cidr"):
+            try:
+                net = _ipmod.ip_network(scope["cidr"], strict=False)
+                results = [(h, c) for h, c in results if _in_net(h.ip, net)]
+                banner_text = f"Subnet: {scope['cidr']}"
+            except ValueError:
+                pass
+        elif scope.get("domain"):
+            tag_key = f"domain:{scope['domain'].upper()}"
+            results = [
+                (h, c) for h, c in results
+                if any(t.upper() == tag_key for t in (h.tags or []))
+            ]
+            banner_text = f"Domain: {scope['domain']}"
+
         rows = [
             {
                 "ip":         h.ip,
@@ -191,7 +220,8 @@ def _render_hosts_table(db_path: str):
             }
             for h, open_count in results
         ]
-    return dash_table.DataTable(
+
+    table = dash_table.DataTable(
         id="hosts-table",
         data=rows,
         columns=[
@@ -222,6 +252,16 @@ def _render_hosts_table(db_path: str):
              "color": "#E74C3C"},
         ],
     )
+    if banner_text:
+        return html.Div([
+            html.Div(
+                f"\u25d0 {banner_text} — {len(rows)} host(s)  \u00b7  click a host or edge to clear",
+                style={"fontSize": "11px", "color": "#5DADE2",
+                       "padding": "3px 0 4px", "fontStyle": "italic"},
+            ),
+            table,
+        ])
+    return table
 
 
 def _render_services_table(db_path: str):

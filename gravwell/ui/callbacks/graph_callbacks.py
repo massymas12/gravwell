@@ -329,10 +329,11 @@ def register(app: dash.Dash) -> None:
             return no_update, no_update
         node_type = node_data.get("node_type")
         if node_type == "host":
-            # Clear subnet panel when switching to a host
             return {"ip": node_data.get("ip"), "db_id": node_data.get("id")}, {}
         if node_type == "subnet_group":
             return no_update, {"cidr": node_data.get("subnet_cidr", "")}
+        if node_type == "domain_group":
+            return no_update, {"domain": node_data.get("label", "")}
         return no_update, no_update
 
     @app.callback(

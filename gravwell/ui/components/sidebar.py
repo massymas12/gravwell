@@ -185,13 +185,6 @@ def create_sidebar() -> html.Div:
                 debounce=True,
                 className="filter-input",
             ),
-            dcc.Checklist(
-                id="filter-no-crowdstrike",
-                options=[{"label": " No CrowdStrike Sensor", "value": "no_cs"}],
-                value=[],
-                style={"marginTop": "8px", "fontSize": "12px"},
-                labelStyle={"color": "#E74C3C", "cursor": "pointer"},
-            ),
             html.Div([
                 html.Button("Apply", id="apply-filters-btn",
                             className="btn btn-primary"),

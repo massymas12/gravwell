@@ -31,12 +31,11 @@ def register(app: dash.Dash) -> None:
         State("filter-os", "value"),
         State("filter-severity", "value"),
         State("filter-port-service", "value"),
-        State("filter-no-crowdstrike", "value"),
         State("graph-data-store", "data"),
         prevent_initial_call=False,
     )
     def update_graph(n_intervals, n_clicks, _trigger, hostname, subnet,
-                     os_families, severity, port_service, no_crowdstrike,
+                     os_families, severity, port_service,
                      current_graph_data):
         import logging as _log
         db_path = current_app.config["GRAVWELL_DB_PATH"]
@@ -179,18 +178,6 @@ def register(app: dash.Dash) -> None:
                     if not match:
                         nodes_to_remove.append(node_id)
                         continue
-
-            # ── No CrowdStrike sensor filter ───────────────────────────────
-            # Keep: hosts with no "crowdstrike" tag (not in CS at all = assumed
-            # no sensor) OR hosts that have "crowdstrike" + "no-sensor".
-            # Remove: hosts that have "crowdstrike" WITHOUT "no-sensor" (sensor present).
-            if no_crowdstrike and "no_cs" in no_crowdstrike:
-                node_tags = attrs.get("tags") or []
-                has_cs_tag = "crowdstrike" in node_tags
-                has_sensor = has_cs_tag and "no-sensor" not in node_tags
-                if has_sensor:
-                    nodes_to_remove.append(node_id)
-                    continue
 
         G.remove_nodes_from(nodes_to_remove)
 

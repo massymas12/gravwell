@@ -170,6 +170,11 @@ def _render_hosts_table(db_path: str):
             .order_by(HostORM.max_cvss.desc())
             .all()
         )
+        def _cs_status(tags):
+            if "crowdstrike" in tags:
+                return "no sensor" if "no-sensor" in tags else ""
+            return "not in cs"
+
         rows = [
             {
                 "ip":         h.ip,
@@ -181,6 +186,7 @@ def _render_hosts_table(db_path: str):
                 "high":       str(h.vuln_count_high),
                 "medium":     str(h.vuln_count_medium),
                 "sources":    ", ".join(h.source_files),
+                "cs":         _cs_status(h.tags or []),
                 "note":       "\u2713" if h.notes else "",
             }
             for h, open_count in results
@@ -198,6 +204,7 @@ def _render_hosts_table(db_path: str):
             {"name": "High",       "id": "high"},
             {"name": "Med",        "id": "medium"},
             {"name": "Sources",    "id": "sources"},
+            {"name": "CS",         "id": "cs"},
             {"name": "Note",       "id": "note"},
         ],
         filter_action="native", sort_action="native", sort_mode="multi",
@@ -211,6 +218,8 @@ def _render_hosts_table(db_path: str):
         style_data_conditional=[
             {"if": {"filter_query": '{critical} > "0"'},
              "backgroundColor": "#3d1a1a"},
+            {"if": {"filter_query": '{cs} = "no sensor" || {cs} = "not in cs"'},
+             "color": "#E74C3C"},
         ],
     )
 

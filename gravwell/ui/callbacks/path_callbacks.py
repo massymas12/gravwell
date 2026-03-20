@@ -316,6 +316,30 @@ def _render_services_table(db_path: str):
 _VULN_LIMIT = 2000
 
 
+def _cve_nvd_links(cves: list[str]) -> str:
+    """Format a list of CVE IDs as markdown NVD links for the table cell."""
+    if not cves:
+        return ""
+    return " ".join(
+        f"[{cve}](https://nvd.nist.gov/vuln/detail/{cve})"
+        for cve in cves
+    )
+
+
+def _cve_ref_links(cves: list[str]) -> str:
+    """One-line markdown with ExploitDB and GitHub POC search links per CVE."""
+    if not cves:
+        return ""
+    # Use the primary CVE for the exploit search links
+    primary = cves[0]
+    # ExploitDB search expects the numeric portion after "CVE-"
+    edb_id = primary[4:]  # strips "CVE-"
+    return (
+        f"[EDB](https://www.exploit-db.com/search?cve={edb_id}) "
+        f"[POC](https://github.com/search?q={primary}+exploit&type=repositories)"
+    )
+
+
 def _render_vulns_table(db_path: str):
     from dash import dash_table
     from sqlalchemy import func
@@ -399,7 +423,8 @@ def _render_vulns_table(db_path: str):
                 "exploit":  exploit_label(cve_map.get(v.id, []), enrich_map),
                 "name":     resolve_vuln_name(v.name, cve_map.get(v.id, []), enrich_map, 80),
                 "port":     str(v.port or ""),
-                "cves":     ", ".join(cve_map.get(v.id, [])),
+                "cves":     _cve_nvd_links(cve_map.get(v.id, [])),
+                "refs":     _cve_ref_links(cve_map.get(v.id, [])),
                 "solution": (v.solution or "")[:60],
             }
             for v, ip in vuln_rows
@@ -436,9 +461,11 @@ def _render_vulns_table(db_path: str):
                 {"name": "Exploit",  "id": "exploit"},
                 {"name": "Name",     "id": "name"},
                 {"name": "Port",     "id": "port"},
-                {"name": "CVEs",     "id": "cves"},
+                {"name": "CVEs",     "id": "cves",  "presentation": "markdown"},
+                {"name": "Refs",     "id": "refs",  "presentation": "markdown"},
                 {"name": "Solution", "id": "solution"},
             ],
+            markdown_options={"link_target": "_blank"},
             filter_action="native", sort_action="native", page_size=25,
             style_table={"overflowX": "auto"},
             style_cell={"fontSize": "12px", "padding": "3px 6px",

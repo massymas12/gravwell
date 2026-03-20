@@ -32,11 +32,12 @@ def register(app: dash.Dash) -> None:
         State("filter-severity", "value"),
         State("filter-port-service", "value"),
         State("graph-data-store", "data"),
+        State("node-positions-store", "data"),
         prevent_initial_call=False,
     )
     def update_graph(n_intervals, n_clicks, _trigger, hostname, subnet,
                      os_families, severity, port_service,
-                     current_graph_data):
+                     current_graph_data, memory_positions):
         import logging as _log
         db_path = current_app.config["GRAVWELL_DB_PATH"]
         try:
@@ -66,6 +67,12 @@ def register(app: dash.Dash) -> None:
                     r.node_ip: (r.x, r.y)
                     for r in session.query(NodePositionORM).all()
                 }
+                # Merge in-memory positions (more recent than DB — captured
+                # immediately when Apply Filters is clicked, or after each drag).
+                if memory_positions and isinstance(memory_positions, dict):
+                    for ip, pos in memory_positions.items():
+                        if isinstance(pos, dict) and "x" in pos and "y" in pos:
+                            saved_positions[ip] = (pos["x"], pos["y"])
                 subnet_overrides = {
                     h.ip: h.subnet_override
                     for h in session.query(HostORM.ip, HostORM.subnet_override).all()
@@ -579,18 +586,20 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
 
-    # Clientside auto-fit: whenever the graph loads new nodes, fit the viewport
-    # so users don't see a blank canvas.  Uses retry logic because _gravwell_cy
-    # is initialised by a 1500 ms setInterval and may not be ready immediately.
+    # Clientside auto-fit: fit the viewport only on the FIRST load (empty →
+    # non-empty).  Uses _gravwell_graph_fitted flag so subsequent filter
+    # applies and interval ticks do NOT reset zoom/pan.
     dash.clientside_callback(
         """
         function(hostCount) {
             var nu = window.dash_clientside.no_update;
             if (!hostCount || parseInt(hostCount) === 0) return [nu, nu];
+            if (window._gravwell_graph_fitted) return [nu, nu];
             function tryFit(attempts) {
                 var cy = window._gravwell_cy;
                 if (cy && (!cy.destroyed || !cy.destroyed())) {
                     cy.fit(undefined, 60);
+                    window._gravwell_graph_fitted = true;
                 } else if (attempts > 0) {
                     setTimeout(function() { tryFit(attempts - 1); }, 400);
                 }
@@ -626,6 +635,34 @@ def register(app: dash.Dash) -> None:
                 host.notes = note_text or ""
         return "Saved"
 
+
+    # ── Capture positions on Apply Filters so update_graph sees them ────────
+    # Clientside callbacks run synchronously before the server round-trip, so
+    # node-positions-store is updated before update_graph reads it as a State.
+    dash.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) return window.dash_clientside.no_update;
+            var cy = window._gravwell_cy;
+            if (!cy) return window.dash_clientside.no_update;
+            var positions = {};
+            cy.nodes().forEach(function(node) {
+                var data = node.data();
+                if (data.node_type === 'host' && data.ip) {
+                    var pos = node.position();
+                    positions[data.ip] = {
+                        x: Math.round(pos.x * 10) / 10,
+                        y: Math.round(pos.y * 10) / 10
+                    };
+                }
+            });
+            return positions;
+        }
+        """,
+        Output("node-positions-store", "data", allow_duplicate=True),
+        Input("apply-filters-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
 
     # ── Save Layout: clientside reads cy positions → node-positions-store ───
     # Uses window._gravwell_cy which is populated by the inline JS in app.py.

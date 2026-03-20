@@ -183,7 +183,11 @@ def _render_hosts_table(db_path: str, scope: dict | None = None):
         )
         def _cs_status(tags):
             if "crowdstrike" in tags:
-                return "no sensor" if "no-sensor" in tags else ""
+                # cs-agent:VERSION only exists when agent_version was present at
+                # import time.  Absence is more reliable than "no-sensor" which
+                # accumulates and never clears even after a sensor is installed.
+                has_agent = any(t.startswith("cs-agent:") for t in tags)
+                return "" if has_agent else "no agent"
             return "not in cs"
 
         # Apply subnet / domain scope filter

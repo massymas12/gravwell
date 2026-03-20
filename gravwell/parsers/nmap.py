@@ -1,13 +1,25 @@
 from __future__ import annotations
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from gravwell.models.dataclasses import Host, Service, ParseResult
+from gravwell.models.dataclasses import Host, Service, Vulnerability, ParseResult
 from gravwell.parsers.base import BaseParser
 from gravwell.models.os_inference import (
     infer_os, normalize_os_family,
     CONF_EXPLICIT_EXACT, CONF_EXPLICIT_HIGH, CONF_EXPLICIT_MEDIUM,
     CONF_INFERRED_STRONG,
 )
+
+_CVE_RE   = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
+_CVSS_RE  = re.compile(r"\b(\d+\.\d)\b")
+
+
+def _cvss_severity(score: float) -> str:
+    if score >= 9.0: return "critical"
+    if score >= 7.0: return "high"
+    if score >= 4.0: return "medium"
+    if score  > 0.0: return "low"
+    return "info"
 
 
 class NmapParser(BaseParser):
@@ -119,12 +131,23 @@ class NmapParser(BaseParser):
                     os_confidence = CONF_INFERRED_STRONG
 
         services: list[Service] = []
+        vulns: list[Vulnerability] = []
         ports_el = el.find("ports")
         if ports_el is not None:
             for port_el in ports_el.findall("port"):
                 svc = cls._parse_port(port_el)
                 if svc:
                     services.append(svc)
+                port_num = int(port_el.get("portid", "0"))
+                vulns.extend(cls._parse_vuln_scripts(port_el, port_num))
+
+        # Host-level scripts — e.g. smb-vuln-ms17-010 runs against the host
+        hostscript_el = el.find("hostscript")
+        if hostscript_el is not None:
+            vulns.extend(cls._parse_vuln_scripts(hostscript_el, None))
+
+        # Deduplicate by (cve_id, port) so multi-script runs don't double-count
+        vulns = _dedup_vulns(vulns)
 
         # Fill in OS from port/service signals if nmap didn't fingerprint one
         if os_confidence == 0:
@@ -147,6 +170,7 @@ class NmapParser(BaseParser):
             mac_vendor=mac_vendor,
             status="up",
             services=services,
+            vulnerabilities=vulns,
             source_files=[source],
         )
         hosts = [primary]
@@ -201,3 +225,197 @@ class NmapParser(BaseParser):
             version=version,
             banner=banner,
         )
+
+    # ── Vulnerability script parsing ─────────────────────────────────────────
+
+    @classmethod
+    def _parse_vuln_scripts(
+        cls, element: ET.Element, port_num: int | None
+    ) -> list[Vulnerability]:
+        """Parse all <script> children of a <port> or <hostscript> element."""
+        vulns = []
+        for script in element.findall("script"):
+            vulns.extend(cls._parse_script(script, port_num))
+        return vulns
+
+    @classmethod
+    def _parse_script(
+        cls, script: ET.Element, port_num: int | None
+    ) -> list[Vulnerability]:
+        script_id = script.get("id", "")
+        output    = script.get("output", "")
+
+        if script_id == "vulners":
+            return cls._parse_vulners(script, port_num)
+        if script_id == "vulscan":
+            return cls._parse_vulscan(output, script_id, port_num)
+        # Any NSE script in the vuln or exploit category
+        if "vuln" in script_id or "exploit" in script_id:
+            return cls._parse_nse_vuln(script, script_id, output, port_num)
+        return []
+
+    @classmethod
+    def _parse_vulners(
+        cls, script: ET.Element, port_num: int | None
+    ) -> list[Vulnerability]:
+        """Parse the vulners NSE script — structured nested CVE tables.
+
+        The script nests CVE entries either flat or under a version-string key:
+          <table key="OpenSSH 7.4">
+            <table>
+              <elem key="type">CVE</elem>
+              <elem key="id">CVE-2018-15473</elem>
+              <elem key="cvss">5.0</elem>
+            </table>
+          </table>
+        We walk all <table> elements and collect those that have both an
+        "id" elem matching CVE-XXXX-XXXX and a "cvss" elem.
+        """
+        vulns: list[Vulnerability] = []
+        seen: set[str] = set()
+
+        for table in script.iter("table"):
+            elems = {e.get("key"): (e.text or "").strip()
+                     for e in table.findall("elem")}
+            cve_id   = elems.get("id", "")
+            cvss_txt = elems.get("cvss", "")
+            if not cve_id or not _CVE_RE.match(cve_id):
+                continue
+            cve_id = cve_id.upper()
+            if cve_id in seen:
+                continue
+            seen.add(cve_id)
+            try:
+                score = float(cvss_txt)
+            except (ValueError, TypeError):
+                score = 0.0
+            vulns.append(Vulnerability(
+                name=cve_id,
+                severity=_cvss_severity(score),
+                cvss_score=score,
+                cve_ids=[cve_id],
+                port=port_num,
+                description="Identified by vulners NSE script",
+                plugin_id="vulners",
+            ))
+        return vulns
+
+    @classmethod
+    def _parse_nse_vuln(
+        cls, script: ET.Element, script_id: str,
+        output: str, port_num: int | None
+    ) -> list[Vulnerability]:
+        """Parse NSE vuln-category scripts (smb-vuln-*, rdp-vuln-*, etc.).
+
+        These scripts emit a structured table when the target is VULNERABLE:
+          <table key="VULNERABLE">
+            <elem key="title">MS17-010 EternalBlue</elem>
+            <elem key="state">VULNERABLE</elem>
+            <table key="ids">
+              <elem>CVE:CVE-2017-0144</elem>
+            </table>
+            <elem key="cvss">9.3</elem>
+          </table>
+        We also scan plain text output as a fallback for simpler scripts.
+        """
+        # Only emit a finding when the script explicitly reports VULNERABLE
+        state_els = [e for e in script.iter("elem")
+                     if (e.get("key") or "").lower() == "state"]
+        state_texts = [e.text or "" for e in state_els]
+        if not any("VULNERABLE" in t.upper() for t in state_texts):
+            if "VULNERABLE" not in output.upper():
+                return []
+
+        # Collect CVE IDs from every <elem> text and from output
+        cve_ids: list[str] = []
+        seen_cves: set[str] = set()
+        for el in script.iter("elem"):
+            for m in _CVE_RE.finditer(el.text or ""):
+                cve = m.group(0).upper()
+                if cve not in seen_cves:
+                    seen_cves.add(cve)
+                    cve_ids.append(cve)
+        for m in _CVE_RE.finditer(output):
+            cve = m.group(0).upper()
+            if cve not in seen_cves:
+                seen_cves.add(cve)
+                cve_ids.append(cve)
+
+        # CVSS score — try structured elem first, then risk_factor text
+        score = 0.0
+        cvss_els = [e for e in script.iter("elem")
+                    if (e.get("key") or "").lower() == "cvss"]
+        if cvss_els and cvss_els[0].text:
+            try:
+                score = float(cvss_els[0].text)
+            except ValueError:
+                pass
+        if score == 0.0:
+            risk_els = [e for e in script.iter("elem")
+                        if (e.get("key") or "").lower() in ("risk_factor", "risk factor")]
+            if risk_els:
+                risk = (risk_els[0].text or "").strip().lower()
+                score = {"critical": 9.5, "high": 7.5, "medium": 5.0, "low": 2.5}.get(risk, 0.0)
+
+        # Title / description
+        title_els = [e for e in script.iter("elem")
+                     if (e.get("key") or "").lower() == "title"]
+        title = title_els[0].text if title_els else ""
+        desc_els = [e for e in script.iter("elem")
+                    if (e.get("key") or "").lower() == "description"]
+        desc = desc_els[0].text if desc_els else (output[:500] if output else "")
+
+        name = cve_ids[0] if cve_ids else (title or script_id)
+        return [Vulnerability(
+            name=name,
+            severity=_cvss_severity(score),
+            cvss_score=score,
+            cve_ids=cve_ids,
+            port=port_num,
+            description=(desc or title or "").strip(),
+            plugin_id=script_id,
+        )]
+
+    @classmethod
+    def _parse_vulscan(
+        cls, output: str, script_id: str, port_num: int | None
+    ) -> list[Vulnerability]:
+        """Parse vulscan text output — lines typically contain CVE IDs and scores."""
+        vulns: list[Vulnerability] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            m = _CVE_RE.search(line)
+            if not m:
+                continue
+            cve = m.group(0).upper()
+            if cve in seen:
+                continue
+            seen.add(cve)
+            score = 0.0
+            nums = _CVSS_RE.findall(line)
+            if nums:
+                try:
+                    score = float(nums[0])
+                except ValueError:
+                    pass
+            vulns.append(Vulnerability(
+                name=cve,
+                severity=_cvss_severity(score),
+                cvss_score=score,
+                cve_ids=[cve],
+                port=port_num,
+                plugin_id=script_id,
+            ))
+        return vulns
+
+
+def _dedup_vulns(vulns: list[Vulnerability]) -> list[Vulnerability]:
+    """Deduplicate by primary CVE ID + port. When same CVE appears on multiple
+    ports, keep the highest-scoring entry for each (CVE, port) pair."""
+    best: dict[tuple, Vulnerability] = {}
+    for v in vulns:
+        key_cve = v.cve_ids[0] if v.cve_ids else v.name
+        key = (key_cve.upper(), v.port)
+        if key not in best or v.cvss_score > best[key].cvss_score:
+            best[key] = v
+    return list(best.values())

@@ -413,39 +413,72 @@ _CY_GLOBAL_JS = """
   /* ── Delete-node context menu (host node right-click) ── */
   var _delMenu = null;
 
-  function showDeleteMenu(clientX, clientY, ip) {
+  function _fireInput(id, value) {
+    var inp = document.getElementById(id);
+    if (!inp) return;
+    var setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value');
+    if (setter && setter.set) {
+      setter.set.call(inp, value);
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  function showDeleteMenu(clientX, clientY, rightClickedIp) {
     if (!_delMenu) {
       _delMenu = document.createElement('div');
       _delMenu.style.cssText =
         'position:fixed;background:#1e1e1e;border:1px solid #555;border-radius:4px;' +
-        'padding:4px 0;z-index:9999;display:none;min-width:155px;' +
+        'padding:4px 0;z-index:9999;display:none;min-width:175px;' +
         'box-shadow:0 4px 14px rgba(0,0,0,0.6);font-family:Segoe UI,monospace;';
       document.body.appendChild(_delMenu);
     }
-    /* Rebuild the single item with the current IP */
     _delMenu.innerHTML = '';
+
+    /* Collect all selected host IPs — if none are selected just use the
+       right-clicked node.  This means a right-click on an unselected node
+       still works as a single-node delete without forcing a selection first. */
+    var cy = window._gravwell_cy;
+    var selectedIps = [];
+    if (cy) {
+      cy.nodes(':selected').forEach(function(n) {
+        if (n.data('node_type') === 'host' && n.data('ip'))
+          selectedIps.push(n.data('ip'));
+      });
+    }
+    /* If the right-clicked node isn't in the selection (or nothing selected),
+       treat this as a single-node operation on just that IP. */
+    if (selectedIps.indexOf(rightClickedIp) === -1) {
+      selectedIps = [rightClickedIp];
+    }
+
+    var isBulk = selectedIps.length > 1;
+    var label  = isBulk
+      ? 'Delete ' + selectedIps.length + ' selected hosts'
+      : 'Delete ' + rightClickedIp;
+    var confirmMsg = isBulk
+      ? 'Delete ' + selectedIps.length + ' hosts and all their data?\\n\\nThis cannot be undone.'
+      : 'Delete host ' + rightClickedIp + ' and all its data?\\n\\nThis cannot be undone.';
+
     var item = document.createElement('div');
-    item.style.cssText =
-      'padding:7px 14px;font-size:12px;cursor:pointer;color:#E74C3C;';
-    item.textContent = 'Delete ' + ip;
+    item.style.cssText = 'padding:7px 14px;font-size:12px;cursor:pointer;color:#E74C3C;';
+    item.textContent = label;
     item.onmouseover = function() { item.style.background = '#2d2d2d'; };
     item.onmouseout  = function() { item.style.background = ''; };
     item.onclick = function() {
       _delMenu.style.display = 'none';
-      if (!confirm('Delete host ' + ip + ' and all its data?\\n\\nThis cannot be undone.')) return;
-      var inp = document.getElementById('_delete-node-js-trigger');
-      if (inp) {
-        var setter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype, 'value');
-        if (setter && setter.set) {
-          setter.set.call(inp, JSON.stringify({ ip: ip, _t: Date.now() }));
-          inp.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+      if (!confirm(confirmMsg)) return;
+      if (isBulk) {
+        _fireInput('_delete-nodes-bulk-trigger',
+                   JSON.stringify({ ips: selectedIps, _t: Date.now() }));
+      } else {
+        _fireInput('_delete-node-js-trigger',
+                   JSON.stringify({ ip: rightClickedIp, _t: Date.now() }));
       }
     };
     _delMenu.appendChild(item);
     _delMenu.style.display = 'block';
-    var mw = 160, mh = 36;
+    var mw = 180, mh = 36;
     _delMenu.style.left = Math.min(clientX, window.innerWidth  - mw) + 'px';
     _delMenu.style.top  = Math.min(clientY, window.innerHeight - mh) + 'px';
   }

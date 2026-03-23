@@ -194,3 +194,31 @@ def register(app: dash.Dash) -> None:
                 session.query(NodePositionORM).filter_by(node_ip=ip).delete()
                 session.delete(host)
         return None, (graph_trigger or 0) + 1
+
+    # ── Bulk delete via JS right-click on multi-selection ─────────────────
+    @app.callback(
+        Output("selected-node-store", "data", allow_duplicate=True),
+        Output("project-switch-trigger", "data", allow_duplicate=True),
+        Input("_delete-nodes-bulk-trigger", "value"),
+        State("project-switch-trigger", "data"),
+        prevent_initial_call=True,
+    )
+    def delete_nodes_bulk(trigger_value, graph_trigger):
+        if not trigger_value:
+            return no_update, no_update
+        try:
+            ips = json.loads(trigger_value).get("ips", [])
+        except Exception:
+            return no_update, no_update
+        ips = [ip.strip() for ip in ips if isinstance(ip, str) and ip.strip()]
+        if not ips:
+            return no_update, no_update
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        with get_session(db_path) as session:
+            session.query(NodePositionORM).filter(
+                NodePositionORM.node_ip.in_(ips)
+            ).delete(synchronize_session=False)
+            session.query(HostORM).filter(
+                HostORM.ip.in_(ips)
+            ).delete(synchronize_session=False)
+        return None, (graph_trigger or 0) + 1

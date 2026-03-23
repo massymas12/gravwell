@@ -50,14 +50,23 @@ def ping_sweep(
 
 def _ping_one(ip: str, timeout_ms: int) -> bool:
     system = platform.system().lower()
-    if "windows" in system:
+    is_windows = "windows" in system
+    if is_windows:
         cmd = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
+        proc_timeout = timeout_ms / 1000 + 2
     else:
         timeout_s = max(1, timeout_ms // 1000)
         cmd = ["ping", "-c", "1", "-W", str(timeout_s), ip]
+        proc_timeout = timeout_s + 2
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout_s + 2
-                           if "windows" not in system else timeout_ms / 1000 + 2)
-        return r.returncode == 0
+        r = subprocess.run(cmd, capture_output=True, timeout=proc_timeout)
+        if r.returncode != 0:
+            return False
+        if is_windows:
+            # returncode 0 can also mean a router returned "Destination host
+            # unreachable" — verify the reply actually came from the target IP.
+            output = r.stdout.decode("utf-8", errors="replace")
+            return f"Reply from {ip}:" in output
+        return True
     except Exception:
         return False

@@ -58,7 +58,15 @@ GravWell accepts **Discover asset exports** (JSON or CSV) and **Spotlight vulner
 
 > **Tip:** Use **Sensor IP address** (not "IP address history") as the IP column. The sensor IP is the current active address; history IPs are merged in automatically as secondary addresses when both fields are exported.
 
-For Spotlight vulnerability exports include `cve_id`, `severity`, `cvss_base_score`, and `local_ip` (or `hostname`) so findings can be attributed to the correct host.
+For Spotlight vulnerability exports GravWell recognises three export variants automatically:
+
+| Variant | Key fields | Notes |
+|---------|-----------|-------|
+| **Spotlight API** (`/spotlight/entities/vulnerabilities/v2`) | `cve.id`, `host_info.local_ip` | Full CVSS scores included |
+| **Flat vuln export** | `host_id`, `local_ip`, `cve_id` | One row per host+CVE pair |
+| **Spotlight console UI export** | `hostname`, `vulnerability_id`, `exprt_rating` | No IP — hosts matched to existing inventory by hostname |
+
+The console UI export (downloaded directly from the Falcon Spotlight page) contains no IP address. GravWell imports those records keyed by hostname and merges them into matching hosts from your device inventory import. Include at minimum `hostname`, `vulnerability_id`, `severity`, `exprt_rating`, `products`, and `recommended_remediations` for the richest output.
 
 ---
 

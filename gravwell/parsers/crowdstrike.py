@@ -214,7 +214,9 @@ class CrowdStrikeParser(BaseParser):
             '"cve"' in head or "vulnerabilities" in filepath.name.lower()
         )
         is_console_spotlight = (
-            '"asset_criticality"' in head or '"vulnerability_confidence"' in head
+            '"asset_criticality"' in head
+            or '"vulnerability_confidence"' in head
+            or ('"exprt_rating"' in head and '"hostname"' in head)
         ) and '"vulnerability_id"' in head
 
         host_map: dict[str, Host] = {}
@@ -298,7 +300,9 @@ class CrowdStrikeParser(BaseParser):
         first = resources[0] if resources and isinstance(resources[0], dict) else {}
         is_spotlight = "cve" in first or ("aid" in first and "host_info" in first)
         is_console_spotlight = (
-            "asset_criticality" in first or "vulnerability_confidence" in first
+            "asset_criticality" in first
+            or "vulnerability_confidence" in first
+            or ("exprt_rating" in first and "hostname" in first)
         ) and "vulnerability_id" in first
         skipped_no_ip = 0
         skipped_dupe  = 0

@@ -6,7 +6,7 @@ from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 from gravwell.models.dataclasses import ParseResult, Host, Service, Vulnerability
 from gravwell.models.orm import (
-    HostORM, ServiceORM, VulnerabilityORM, CVERefORM, ScanFileORM
+    HostORM, ServiceORM, VulnerabilityORM, CVERefORM, ScanFileORM, SubnetLabelORM
 )
 from gravwell.models.os_inference import infer_os
 
@@ -38,6 +38,8 @@ def ingest_parse_result(
         if (i + 1) % _BATCH == 0:
             session.expunge_all()
     session.flush()
+    if result.subnet_labels:
+        _upsert_subnet_labels(session, result.subnet_labels)
     _record_scan_file(session, result, checksum)
     # hn: → spotlight merges (not new hosts), nip: → device-inventory assets
     # that were imported without a local IP (these ARE real hosts, count them).
@@ -413,6 +415,22 @@ def _compute_checksum(source_file: str) -> str | None:
             return hashlib.sha256(f.read()).hexdigest()
     except OSError:
         return None
+
+
+def _upsert_subnet_labels(session: Session, labels: dict[str, str]) -> None:
+    """Insert or update SubnetLabelORM rows from an IPAM import.
+
+    Existing user-edited labels are preserved; only blank labels are overwritten
+    by the IPAM name.  IPAM names are always written when no label exists yet.
+    """
+    for cidr, label in labels.items():
+        existing = session.query(SubnetLabelORM).filter_by(subnet_cidr=cidr).first()
+        if existing:
+            if label and not existing.label:
+                existing.label = label
+        else:
+            session.add(SubnetLabelORM(subnet_cidr=cidr, label=label))
+    session.flush()
 
 
 def _record_scan_file(

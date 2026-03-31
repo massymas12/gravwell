@@ -32,12 +32,30 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 | **Nuclei** | JSON / JSONL | Template-based vulnerability findings |
 | **enum4linux** | Text / JSON-NG | SMB shares, users, groups, password policy, domain info |
 | **CrowdStrike Falcon** | JSON / CSV export | Asset inventory, Spotlight vulnerability data (see below) |
+| **IPAM** | CSV / Excel (`.xlsx`) | Subnet definitions and names — used as grouping ground truth (see below) |
 | **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
 | **Juniper JunOS** | `show` command output | Interfaces, routes, version |
 | **Fortinet FortiOS** | `show` / `get` output | Interfaces, routing, system info |
 | **Palo Alto PAN-OS** | XML operational output | Interfaces, routing, system info |
 
 All formats are auto-detected. You can also force a specific parser with `--format`.
+
+### IPAM subnet import
+
+Importing subnet definitions from your IPAM gives GravWell authoritative grouping data instead of statistical guessing.  Each imported subnet becomes a named compound group in the graph; any host whose IP falls inside a known subnet is placed there directly using **longest-prefix-match** (most specific subnet wins).  Hosts whose IPs don't match any imported subnet still fall back to the automatic heuristic, so rogue or unregistered machines are never silently dropped.
+
+**Supported formats:** CSV (`.csv`) and Excel (`.xlsx`).
+
+**Minimum required columns** (exact names or common aliases are accepted):
+
+| Column | Accepted names | Example value |
+|--------|---------------|---------------|
+| Subnet CIDR | `Subnet`, `Network`, `CIDR`, `Prefix` | `10.3.10.0/24` |
+| Label / name | `Description`, `Name`, `Label`, `Comment` | `ISM-Services-Prod-DMZ` |
+
+> **phpIPAM users:** the "Available subnets" table exports with exactly `Subnet` and `Description` columns — copy those columns directly into Excel and save as `.xlsx` or CSV.  Leading `>` hierarchy markers in descriptions are stripped automatically.
+
+**Import is non-destructive:** labels you have manually edited in the UI are never overwritten by a re-import.  Only subnets with no existing label are updated.
 
 ### CrowdStrike Falcon export guide
 

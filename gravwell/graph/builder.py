@@ -4,7 +4,7 @@ import math
 import networkx as nx
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, CVERefORM, CVEEnrichmentORM
+from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, CVERefORM, CVEEnrichmentORM, SubnetLabelORM
 
 # (bg_color, border_color) pairs — one per subnet, cycling
 _SUBNET_PALETTE = [
@@ -148,7 +148,10 @@ def build_graph(session: Session) -> nx.Graph:
     for hd in host_data:
         all_ips.append(hd["ip"])
         all_ips.extend(hd.get("additional_ips", []))
-    ip_to_subnet = _infer_subnets(all_ips)
+    ipam_cidrs = [
+        row[0] for row in session.query(SubnetLabelORM.subnet_cidr).all()
+    ]
+    ip_to_subnet = _infer_subnets(all_ips, known_subnets=ipam_cidrs or None)
     G.graph["ip_to_subnet"] = ip_to_subnet
 
     # Add edges: same /24 subnet (reuse precomputed map)
@@ -230,17 +233,61 @@ def _add_shared_service_edges(G: nx.Graph, host_data: list[dict]) -> None:
                                edge_type="shared_service", port=port)
 
 
-def _infer_subnets(ips: list[str]) -> dict[str, str]:
-    """
-    Map each IP to its best subnet CIDR.
+def _infer_subnets(
+    ips: list[str],
+    known_subnets: list[str] | None = None,
+) -> dict[str, str]:
+    """Map each IP to its best subnet CIDR.
 
-    Strategy:
-    - A /24 with 2+ hosts is a *real* subnet — always kept at /24.
+    When *known_subnets* (IPAM-sourced CIDRs) are provided, each IP is matched
+    to the most-specific containing subnet via longest-prefix-match.  IPs that
+    fall outside every known subnet fall back to the statistical heuristic so
+    that rogue or unregistered hosts still get grouped sensibly.
+
+    Heuristic (fallback when no IPAM data, or for unmatched IPs):
+    - A /24 with 2+ hosts is a real subnet — always kept at /24.
     - If a /16 contains at least one real /24, every host in that /16 uses /24.
     - Singleton hosts (alone in their /24) are grouped at /16 only when their
       /16 spans 2+ distinct /24s AND contains no real /24s (flat /16 topology).
     - All other singletons stay at /24.
     """
+    # Pre-parse IPAM networks sorted most-specific first (longest prefix wins).
+    ipam_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    if known_subnets:
+        for cidr in known_subnets:
+            try:
+                ipam_networks.append(ipaddress.ip_network(cidr, strict=False))
+            except ValueError:
+                pass
+        ipam_networks.sort(key=lambda n: n.prefixlen, reverse=True)
+
+    result: dict[str, str] = {}
+    heuristic_ips: list[str] = []
+
+    for ip in ips:
+        if ipam_networks:
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                result[ip] = "unknown"
+                continue
+            for net in ipam_networks:
+                if addr in net:
+                    result[ip] = str(net)
+                    break
+            else:
+                heuristic_ips.append(ip)
+        else:
+            heuristic_ips.append(ip)
+
+    if heuristic_ips:
+        result.update(_heuristic_subnets(heuristic_ips))
+
+    return result
+
+
+def _heuristic_subnets(ips: list[str]) -> dict[str, str]:
+    """Population-density heuristic subnet grouping (used when no IPAM data)."""
     ip_to: dict[str, dict] = {}
     by_24: dict[str, list[str]] = {}
     sixteen_24s: dict[str, set[str]] = {}
@@ -256,23 +303,20 @@ def _infer_subnets(ips: list[str]) -> dict[str, str]:
         by_24.setdefault(n24, []).append(ip)
         sixteen_24s.setdefault(n16, set()).add(n24)
 
-    # /24s with 2+ hosts are real subnets — never collapsed into a /16
     real_24s: set[str] = {n24 for n24, grp in by_24.items() if len(grp) >= 2}
-
-    # Promote singletons to /16 only when the /16 has no real /24s and spans 2+
     promote_to_16: set[str] = {
         n16
         for n16, n24s in sixteen_24s.items()
         if len(n24s) >= 2 and not any(n24 in real_24s for n24 in n24s)
     }
 
-    result: dict[str, str] = {}
+    out: dict[str, str] = {}
     for ip in ips:
         nets = ip_to.get(ip, {})
         n16 = nets.get("16", "unknown")
         n24 = nets.get("24", "unknown")
-        result[ip] = n16 if n16 in promote_to_16 else n24
-    return result
+        out[ip] = n16 if n16 in promote_to_16 else n24
+    return out
 
 
 _EOL_SUBSTRINGS = (

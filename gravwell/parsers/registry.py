@@ -14,9 +14,12 @@ from gravwell.parsers.fortinet import FortinetParser
 from gravwell.parsers.juniper import JuniperParser
 from gravwell.parsers.huawei import HuaweiParser
 from gravwell.parsers.crowdstrike import CrowdStrikeParser
+from gravwell.parsers.ipam import IPAMParser
 
 # Order matters: most specific signatures first
 _PARSERS: list[type[BaseParser]] = [
+    IPAMParser,       # before everything — .xlsx extension is unambiguous;
+                      # CSV detection requires both a CIDR column + valid CIDR data
     NessusParser,
     OpenVASParser,
     NmapParser,
@@ -33,6 +36,7 @@ _PARSERS: list[type[BaseParser]] = [
 ]
 
 _FORMAT_MAP: dict[str, type[BaseParser]] = {
+    "ipam": IPAMParser,
     "nessus": NessusParser,
     "openvas": OpenVASParser,
     "nmap": NmapParser,

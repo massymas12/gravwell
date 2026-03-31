@@ -252,11 +252,18 @@ def _infer_subnets(
     - All other singletons stay at /24.
     """
     # Pre-parse IPAM networks sorted most-specific first (longest prefix wins).
+    # Skip subnets broader than /16 — those are organisational hierarchy entries
+    # (e.g. 10.0.0.0/8 "Tenants private networks"), not real network segments.
+    # Mapping thousands of hosts into a single /8 compound box makes the graph
+    # unreadable; let those hosts fall back to the heuristic /24 grouping instead.
+    _MIN_IPAM_PREFIX = 16
     ipam_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     if known_subnets:
         for cidr in known_subnets:
             try:
-                ipam_networks.append(ipaddress.ip_network(cidr, strict=False))
+                net = ipaddress.ip_network(cidr, strict=False)
+                if net.prefixlen >= _MIN_IPAM_PREFIX:
+                    ipam_networks.append(net)
             except ValueError:
                 pass
         ipam_networks.sort(key=lambda n: n.prefixlen, reverse=True)
@@ -741,8 +748,18 @@ def _compute_preset_positions(
                 if ip != hub_id and ip in saved_positions
             ]
             if len(saved_spokes) >= max(1, len(ips) // 2):
-                cx = sum(p[0] for p in saved_spokes) / len(saved_spokes)
-                cy = sum(p[1] for p in saved_spokes) / len(saved_spokes)
+                cx_cand = sum(p[0] for p in saved_spokes) / len(saved_spokes)
+                cy_cand = sum(p[1] for p in saved_spokes) / len(saved_spokes)
+                # Reject centroids from widely-scattered positions — high spread
+                # means these positions are from an old heuristic subnet grouping
+                # (before IPAM import) and no longer correspond to this subnet.
+                # Threshold: 500 px ≈ roughly two large subnet boxes side-by-side.
+                spread = max(
+                    max(p[0] for p in saved_spokes) - min(p[0] for p in saved_spokes),
+                    max(p[1] for p in saved_spokes) - min(p[1] for p in saved_spokes),
+                )
+                if spread <= 500:
+                    cx, cy = cx_cand, cy_cand
 
         sz = _node_sz(len(ips))
         non_hub = [ip for ip in ips if ip != hub_id]

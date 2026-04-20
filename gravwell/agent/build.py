@@ -24,15 +24,19 @@ AGENT = HERE / "collect.py"
 
 # ── Script customisation ──────────────────────────────────────────────────────
 
-def generate_script(server: str = "", token: str = "", local_only: bool = False) -> str:
-    """Return a customised collect.py with embedded server/token defaults."""
+def generate_script(server: str = "", token: str = "") -> str:
+    """Return collect.py with server/token defaults pre-filled.
+
+    The generated script still accepts --server / --key at runtime;
+    these are just convenience defaults so the user doesn't have to
+    type them every time.
+    """
     source = AGENT.read_text(encoding="utf-8")
 
     config_block = (
         "\n# ── Embedded configuration (pre-configured by GravWell server) ──────────────\n"
         f"_EMBEDDED_SERVER: str = {repr(server)}\n"
         f"_EMBEDDED_KEY: str    = {repr(token)}\n"
-        f"_LOCAL_ONLY: bool     = {repr(local_only)}\n"
         "# ─────────────────────────────────────────────────────────────────────────────\n"
     )
     source = source.replace('VERSION = "1.0"', 'VERSION = "1.0"' + config_block, 1)
@@ -45,12 +49,6 @@ def generate_script(server: str = "", token: str = "", local_only: bool = False)
         'parser.add_argument("--key", "-k", default="", help="API key for server upload")',
         'parser.add_argument("--key", "-k", default=_EMBEDDED_KEY, help="API key for server upload")',
     )
-
-    if local_only:
-        source = source.replace(
-            "    # 7. Upload if requested\n    if args.server:",
-            "    # 7. Upload if requested\n    if args.server and not _LOCAL_ONLY:",
-        )
 
     return source
 DIST = Path.cwd() / "dist"

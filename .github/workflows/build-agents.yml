@@ -3,18 +3,6 @@ name: Build Collection Agents
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Build mode"
-        required: true
-        default: "local"
-        type: choice
-        options:
-          - local
-          - configured
-      server_url:
-        description: "Server URL (required for 'configured' mode)"
-        required: false
-        default: ""
       upload_to_server:
         description: "Upload binaries to gravwell server after build"
         required: true
@@ -45,48 +33,24 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install PyInstaller
         run: pip install pyinstaller
-
-      - name: Generate configured script
-        if: ${{ inputs.mode == 'configured' }}
-        shell: python
-        run: |
-          import sys, pathlib
-          sys.path.insert(0, ".")
-          from gravwell.agent.build import generate_script
-          server = "${{ inputs.server_url }}"
-          token  = "${{ secrets.AGENT_TOKEN }}"
-          src = generate_script(server=server, token=token, local_only=False)
-          pathlib.Path("agent_build.py").write_text(src, encoding="utf-8")
-
-      - name: Generate local-only script
-        if: ${{ inputs.mode == 'local' }}
-        shell: python
-        run: |
-          import sys, pathlib
-          sys.path.insert(0, ".")
-          from gravwell.agent.build import generate_script
-          src = generate_script(local_only=True)
-          pathlib.Path("agent_build.py").write_text(src, encoding="utf-8")
 
       - name: Build with PyInstaller
         shell: bash
         run: |
-          MODE="${{ inputs.mode }}"
-          NAME="gravwell-collect-${MODE}"
           pyinstaller --onefile --clean --noconfirm \
-            --name "$NAME" \
+            --name gravwell-collect \
             --hidden-import xml.etree.ElementTree \
             --hidden-import ssl \
             --hidden-import urllib.request \
-            agent_build.py
+            gravwell/agent/collect.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gravwell-collect-${{ matrix.platform }}-${{ inputs.mode }}
-          path: dist/gravwell-collect-*
+          name: gravwell-collect-${{ matrix.platform }}
+          path: dist/gravwell-collect*
           retention-days: 30
 
       - name: Push to gravwell server
@@ -101,19 +65,16 @@ jobs:
           server = os.environ.get("GRAVWELL_SERVER_URL", "").rstrip("/")
           token  = os.environ.get("GRAVWELL_ADMIN_TOKEN", "")
           if not server or not token:
-              print("GRAVWELL_SERVER_URL or GRAVWELL_ADMIN_TOKEN secret not set — skipping upload.")
+              print("GRAVWELL_SERVER_URL or GRAVWELL_ADMIN_TOKEN not set — skipping upload.")
               sys.exit(0)
 
           platform = "${{ matrix.platform }}"
-          mode     = "${{ inputs.mode }}"
           suffix   = ".exe" if platform == "windows" else ""
-          name     = f"gravwell-collect-{mode}{suffix}"
+          name     = f"gravwell-collect{suffix}"
 
-          dist = pathlib.Path("dist")
-          candidates = list(dist.glob("gravwell-collect-*"))
-          binary_path = next((p for p in candidates if p.is_file()), None)
-          if not binary_path:
-              print(f"No binary found in dist/: {candidates}")
+          binary_path = pathlib.Path("dist") / name
+          if not binary_path.exists():
+              print(f"Binary not found: {binary_path}")
               sys.exit(1)
 
           data = binary_path.read_bytes()
@@ -125,7 +86,7 @@ jobs:
               f"Content-Type: application/octet-stream\r\n\r\n"
           ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
 
-          url = f"{server}/api/agent/upload?platform={platform}&mode={mode}"
+          url = f"{server}/api/agent/upload?platform={platform}"
           req = urllib.request.Request(
               url, data=body, method="POST",
               headers={
@@ -146,8 +107,6 @@ jobs:
   commit-binaries:
     needs: build
     runs-on: ubuntu-latest
-    env:
-      BUILD_MODE: ${{ github.event.inputs.mode || 'local' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -160,13 +119,10 @@ jobs:
       - name: Move binaries into package
         shell: python
         run: |
-          import pathlib, shutil, os, stat
-
-          mode = os.environ["BUILD_MODE"]
-          artifacts = pathlib.Path("artifacts")
+          import pathlib, shutil, stat
 
           for platform in ("windows", "linux", "macos"):
-              art_dir = artifacts / f"gravwell-collect-{platform}-{mode}"
+              art_dir = pathlib.Path("artifacts") / f"gravwell-collect-{platform}"
               if not art_dir.exists():
                   print(f"No artifact for {platform}, skipping")
                   continue
@@ -186,5 +142,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add gravwell/agent/binaries/
           git diff --staged --quiet && echo "No changes to commit" && exit 0
-          git commit -m "chore: update pre-built agent binaries ($BUILD_MODE) [skip ci]"
+          git commit -m "chore: update pre-built agent binaries [skip ci]"
           git push

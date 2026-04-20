@@ -172,52 +172,44 @@ def _current_platform() -> str:
     return {"win32": "windows", "darwin": "macos"}.get(_sys.platform, "linux")
 
 
-def _cache_path(platform: str, local_only: bool) -> pathlib.Path:
-    """Return the user cache file path for a given platform + mode."""
-    name = "gravwell-collect-local" if local_only else "gravwell-collect"
+def _cache_path(platform: str) -> pathlib.Path:
+    """Return the user cache file path for a given platform."""
     suffix = _PLATFORM_SUFFIX.get(platform, "")
-    return _BUILDS_DIR / platform / (name + suffix)
+    return _BUILDS_DIR / platform / ("gravwell-collect" + suffix)
 
 
-def _bundled_path(platform: str, local_only: bool) -> pathlib.Path:
-    """Return the package-bundled binary path for a given platform + mode."""
-    name = "gravwell-collect-local" if local_only else "gravwell-collect"
+def _bundled_path(platform: str) -> pathlib.Path:
+    """Return the package-bundled binary path for a given platform."""
     suffix = _PLATFORM_SUFFIX.get(platform, "")
-    return _BUNDLED_DIR / platform / (name + suffix)
+    return _BUNDLED_DIR / platform / ("gravwell-collect" + suffix)
 
 
-def _resolve_binary(platform: str, local_only: bool) -> pathlib.Path | None:
-    """Return the best available binary path: user cache beats bundled."""
-    p = _cache_path(platform, local_only)
+def _resolve_binary(platform: str) -> pathlib.Path | None:
+    """Return the best available binary: user cache beats bundled."""
+    p = _cache_path(platform)
     if p.exists():
         return p
-    p = _bundled_path(platform, local_only)
+    p = _bundled_path(platform)
     if p.exists():
         return p
     return None
 
 
-def _save_to_cache(platform: str, local_only: bool, data: bytes) -> None:
-    path = _cache_path(platform, local_only)
+def _save_to_cache(platform: str, data: bytes) -> None:
+    path = _cache_path(platform)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
 
 
 def cached_builds() -> dict:
-    """Return {platform: {mode: bool}} indicating what's available (cache or bundled)."""
-    result = {}
-    for plat in _ALL_PLATFORMS:
-        result[plat] = {
-            "configured": _resolve_binary(plat, False) is not None,
-            "local":      _resolve_binary(plat, True)  is not None,
-        }
-    return result
+    """Return {platform: bool} indicating what's available (cache or bundled)."""
+    return {plat: _resolve_binary(plat) is not None for plat in _ALL_PLATFORMS}
 
 
-def _generate_script(server: str = "", token: str = "", local_only: bool = False) -> str:
-    """Return a customized collect.py source with embedded defaults baked in."""
+def _generate_script(server: str = "", token: str = "") -> str:
+    """Return a collect.py with server/token defaults pre-filled."""
     from gravwell.agent.build import generate_script
-    return generate_script(server=server, token=token, local_only=local_only)
+    return generate_script(server=server, token=token)
 
 
 @api_bp.route("/api/agent/download/py", methods=["GET"])
@@ -229,7 +221,9 @@ def download_agent_py():
     Query params (all optional):
       ?server=URL    Pre-fill the GravWell server URL
       ?token=TOKEN   Pre-fill the API token
-      ?mode=local    Build a local-only variant (never uploads; saves JSON only)
+
+    Without params, returns the plain unmodified script.  The agent always
+    accepts --server / --key at runtime regardless.
     """
     if not current_user.is_authenticated:
         return jsonify(error="Authentication required"), 401
@@ -239,23 +233,20 @@ def download_agent_py():
 
     server = request.args.get("server", "").strip()
     token  = request.args.get("token",  "").strip()
-    local_only = request.args.get("mode", "") == "local"
 
-    if server or token or local_only:
-        source = _generate_script(server=server, token=token, local_only=local_only)
+    if server or token:
+        source = _generate_script(server=server, token=token)
         buf = __import__("io").BytesIO(source.encode())
-        name = "gravwell-collect-local.py" if local_only else "gravwell-collect.py"
-        return send_file(buf, as_attachment=True, download_name=name,
+        return send_file(buf, as_attachment=True, download_name="gravwell-collect.py",
                          mimetype="text/x-python")
 
-    # Plain unmodified script
     return send_file(_AGENT_PY, as_attachment=True,
                      download_name="gravwell-collect.py", mimetype="text/x-python")
 
 
 @api_bp.route("/api/agent/builds", methods=["GET"])
 def list_builds():
-    """Return which platform binaries are cached and available for download.
+    """Return which platform binaries are available for download.
 
     Requires an authenticated browser session.
     """
@@ -266,29 +257,26 @@ def list_builds():
 
 @api_bp.route("/api/agent/download/binary", methods=["GET"])
 def download_binary():
-    """Download a cached pre-built binary.
+    """Download a pre-built binary for the requested platform.
 
     Requires an authenticated browser session.
 
     Query params:
       ?platform=windows|linux|macos   (required)
-      ?mode=local                     (optional; default: configured)
     """
     if not current_user.is_authenticated:
         return jsonify(error="Authentication required"), 401
 
-    platform   = request.args.get("platform", "").strip().lower()
-    local_only = request.args.get("mode", "") == "local"
+    platform = request.args.get("platform", "").strip().lower()
 
     if platform not in _ALL_PLATFORMS:
         return jsonify(error=f"Unknown platform '{platform}'. Use: {', '.join(_ALL_PLATFORMS)}"), 400
 
-    binary = _resolve_binary(platform, local_only)
+    binary = _resolve_binary(platform)
     if not binary:
-        mode_label = "local-only" if local_only else "configured"
         return jsonify(
-            error=f"No binary available for {platform} ({mode_label}). "
-                  f"Build it on a {platform} machine and upload it here."
+            error=f"No binary available for {platform}. "
+                  f"Trigger the GitHub Actions build workflow to generate one."
         ), 404
 
     import io
@@ -339,8 +327,7 @@ def upload_binary():
     if not _is_admin_request():
         return jsonify(error="Admin access required"), 403
 
-    platform   = request.args.get("platform", "").strip().lower()
-    local_only = request.args.get("mode", "") == "local"
+    platform = request.args.get("platform", "").strip().lower()
 
     if platform not in _ALL_PLATFORMS:
         return jsonify(error=f"Unknown platform '{platform}'. Use: {', '.join(_ALL_PLATFORMS)}"), 400
@@ -353,23 +340,19 @@ def upload_binary():
     if not data:
         return jsonify(error="Uploaded file is empty"), 400
 
-    _save_to_cache(platform, local_only, data)
-    mode_label = "local-only" if local_only else "configured"
-    logger.info("Agent binary uploaded: platform=%s mode=%s size=%d by %s",
-                platform, mode_label, len(data), current_user.username)
-    return jsonify(status="stored", platform=platform, mode=mode_label,
-                   size=len(data)), 201
+    _save_to_cache(platform, data)
+    logger.info("Agent binary uploaded: platform=%s size=%d by %s",
+                platform, len(data), current_user.username)
+    return jsonify(status="stored", platform=platform, size=len(data)), 201
 
 
 @api_bp.route("/api/agent/build", methods=["POST"])
 def build_agent():
     """Build a standalone binary for the current server platform using PyInstaller.
 
-    Admin only. This is a blocking call — building takes ~30-60 seconds.
+    Admin only. Blocking — takes ~30-60 seconds.
     The result is cached in ~/.gravwell/agent-builds/ for future downloads.
-
-    JSON body (all optional):
-      {"server": "URL", "token": "TOKEN", "mode": "local"}
+    The binary always accepts --server / --key at runtime for remote reporting.
 
     Returns the binary as a file download.
     """
@@ -384,21 +367,14 @@ def build_agent():
     if not _AGENT_PY.exists():
         return jsonify(error="Agent script not found on server"), 404
 
-    body = request.get_json(silent=True) or {}
-    server     = (body.get("server") or "").strip()
-    token      = (body.get("token")  or "").strip()
-    local_only = (body.get("mode",  "") == "local")
-
-    source = _generate_script(server=server, token=token, local_only=local_only)
     platform = _current_platform()
+    suffix   = _PLATFORM_SUFFIX[platform]
+    exe_name = "gravwell-collect"
 
     try:
         with tempfile.TemporaryDirectory(prefix="gravwell_build_") as tmp:
             tmp_path = pathlib.Path(tmp)
-            src_file = tmp_path / "collect.py"
-            src_file.write_text(source, encoding="utf-8")
-
-            exe_name = "gravwell-collect-local" if local_only else "gravwell-collect"
+            # Build from the unmodified collect.py — users pass --server/--key at runtime
             cmd = [
                 sys.executable, "-m", "PyInstaller",
                 "--onefile", "--clean", "--noconfirm",
@@ -409,7 +385,7 @@ def build_agent():
                 "--hidden-import", "xml.etree.ElementTree",
                 "--hidden-import", "ssl",
                 "--hidden-import", "urllib.request",
-                str(src_file),
+                str(_AGENT_PY),
             ]
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300,
@@ -422,15 +398,13 @@ def build_agent():
                     detail=result.stderr[-500:],
                 ), 500
 
-            suffix = _PLATFORM_SUFFIX[platform]
             out_binary = tmp_path / "dist" / (exe_name + suffix)
             if not out_binary.exists():
                 return jsonify(error="Build produced no output file"), 500
 
             binary_bytes = out_binary.read_bytes()
 
-        # Cache for future downloads
-        _save_to_cache(platform, local_only, binary_bytes)
+        _save_to_cache(platform, binary_bytes)
 
         download_name = exe_name + suffix
         logger.info("Agent build complete: %s (%d bytes) by %s",

@@ -90,10 +90,19 @@ jobs:
           retention-days: 30
 
       - name: Push to gravwell server
-        if: ${{ inputs.upload_to_server && secrets.GRAVWELL_SERVER_URL != '' && secrets.GRAVWELL_ADMIN_TOKEN != '' }}
+        if: ${{ inputs.upload_to_server }}
+        env:
+          GRAVWELL_SERVER_URL: ${{ secrets.GRAVWELL_SERVER_URL }}
+          GRAVWELL_ADMIN_TOKEN: ${{ secrets.GRAVWELL_ADMIN_TOKEN }}
         shell: python
         run: |
-          import pathlib, urllib.request, urllib.error, sys, ssl
+          import os, pathlib, urllib.request, urllib.error, sys, ssl
+
+          server = os.environ.get("GRAVWELL_SERVER_URL", "").rstrip("/")
+          token  = os.environ.get("GRAVWELL_ADMIN_TOKEN", "")
+          if not server or not token:
+              print("GRAVWELL_SERVER_URL or GRAVWELL_ADMIN_TOKEN secret not set — skipping upload.")
+              sys.exit(0)
 
           platform = "${{ matrix.platform }}"
           mode     = "${{ inputs.mode }}"
@@ -116,10 +125,7 @@ jobs:
               f"Content-Type: application/octet-stream\r\n\r\n"
           ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
 
-          server = "${{ secrets.GRAVWELL_SERVER_URL }}".rstrip("/")
-          token  = "${{ secrets.GRAVWELL_ADMIN_TOKEN }}"
-          url    = f"{server}/api/agent/upload?platform={platform}&mode={mode}"
-
+          url = f"{server}/api/agent/upload?platform={platform}&mode={mode}"
           req = urllib.request.Request(
               url, data=body, method="POST",
               headers={

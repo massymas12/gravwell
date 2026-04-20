@@ -114,6 +114,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: master
 
       - uses: actions/setup-python@v5
         with:
@@ -151,5 +153,4 @@ jobs:
           git add gravwell/agent/binaries/
           git diff --staged --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore: update pre-built agent binaries [skip ci]"
-          git pull --rebase origin master
           git push

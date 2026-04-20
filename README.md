@@ -9,6 +9,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 ## Features
 
 - **Wide format support** — nmap, Nessus, Masscan, OpenVAS, Nuclei, enum4linux, CrowdStrike Falcon, Cisco IOS, Juniper JunOS, Fortinet FortiOS, Palo Alto PAN-OS (all auto-detected)
+- **Collection agent** — deploy a lightweight Python script (or compiled `.exe`) to a client machine; it discovers neighbours via ARP + ping sweep, port-scans them, and uploads the results directly to GravWell or saves a JSON file for manual import
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
 - **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
@@ -33,12 +34,60 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 | **enum4linux** | Text / JSON-NG | SMB shares, users, groups, password policy, domain info |
 | **CrowdStrike Falcon** | JSON / CSV export | Asset inventory, Spotlight vulnerability data (see below) |
 | **IPAM** | CSV / Excel (`.xlsx`) | Subnet definitions and names — used as grouping ground truth (see below) |
+| **GravWell Agent** | JSON (`.json`) | Output from `collect.py` — own machine, ARP neighbours, port scan (see below) |
 | **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
 | **Juniper JunOS** | `show` command output | Interfaces, routes, version |
 | **Fortinet FortiOS** | `show` / `get` output | Interfaces, routing, system info |
 | **Palo Alto PAN-OS** | XML operational output | Interfaces, routing, system info |
 
 All formats are auto-detected. You can also force a specific parser with `--format`.
+
+### GravWell Collection Agent
+
+The collection agent (`gravwell/agent/collect.py`) is a zero-dependency Python script you send to a client machine. It gathers:
+
+| Stage | What it does |
+|-------|-------------|
+| **System info** | Hostname, OS, all interface IPs and MACs |
+| **ARP table** | Passive read of the OS neighbour cache — no packets sent |
+| **Ping sweep** | Active ICMP to all hosts on local /24 networks |
+| **Port scan** | TCP connect on 31 common ports; uses nmap XML output when nmap is on PATH, otherwise raw socket scan |
+
+**Delivery modes:**
+
+| Mode | How |
+|------|-----|
+| **File + manual import** | Agent writes `gravwell_collect_<host>_<ts>.json`; customer shares it back; drag-and-drop onto the web UI like any other scan file |
+| **Direct upload** | Agent POSTs to GravWell with `--server` and `--key`; data appears immediately in the active project |
+
+**Running on the target:**
+
+```bash
+# Passive only (ARP + own info, no scan)
+python collect.py --no-sweep --no-scan
+
+# Full collection, save locally
+python collect.py
+
+# Full collection + upload to GravWell
+python collect.py --server https://gravwell.corp.local --key YOUR_TOKEN
+
+# Skip port scan (faster for large subnets)
+python collect.py --no-scan --server https://gravwell.corp.local --key YOUR_TOKEN
+```
+
+`collect.py` requires Python 3.8+ and nothing else. Copy the single file to the target — no `pip install` needed.
+
+**Building a standalone `.exe` for Windows targets (no Python required):**
+
+```bash
+python gravwell/agent/build.py
+# outputs dist/gravwell-collect.exe
+```
+
+**API token:** On the first server startup after upgrade, GravWell prints a 64-character hex token to the console. This is the value to pass as `--key`. The token is stored in the encrypted database; additional tokens can be viewed at `GET /api/agent/tokens`.
+
+---
 
 ### IPAM subnet import
 

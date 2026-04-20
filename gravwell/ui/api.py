@@ -23,7 +23,7 @@ import logging
 import pathlib
 import tempfile
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 from flask_login import current_user
 
 from gravwell import agent_tokens
@@ -155,3 +155,59 @@ def revoke_token(label: str):
     logger.info("Agent token revoked: label=%r project=%s by %s",
                 label, pathlib.Path(db_path).stem, current_user.username)
     return jsonify(status="revoked", label=label)
+
+
+# ── Agent binary / script download ────────────────────────────────────────────
+
+_AGENT_PY = pathlib.Path(__file__).parent.parent / "agent" / "collect.py"
+
+# Platform-specific pre-built binary locations (built by gravwell/agent/build.py)
+_DIST_DIR = pathlib.Path(__file__).parent.parent.parent / "dist"
+
+
+@api_bp.route("/api/agent/download/<fmt>", methods=["GET"])
+def download_agent(fmt: str):
+    """Download the collection agent.
+
+    Requires an authenticated browser session.
+
+    fmt=py   → collect.py Python script (always available)
+    fmt=exe  → Windows .exe built by PyInstaller (if present in dist/)
+    fmt=bin  → Linux/macOS binary built by PyInstaller (if present in dist/)
+    """
+    if not current_user.is_authenticated:
+        return jsonify(error="Authentication required"), 401
+
+    if fmt == "py":
+        if not _AGENT_PY.exists():
+            return jsonify(error="Agent script not found on server"), 404
+        return send_file(
+            _AGENT_PY,
+            as_attachment=True,
+            download_name="gravwell-collect.py",
+            mimetype="text/x-python",
+        )
+
+    if fmt == "exe":
+        exe = _DIST_DIR / "gravwell-collect.exe"
+        if not exe.exists():
+            return jsonify(error="Windows binary not found — run gravwell/agent/build.py on a Windows host first"), 404
+        return send_file(
+            exe,
+            as_attachment=True,
+            download_name="gravwell-collect.exe",
+            mimetype="application/octet-stream",
+        )
+
+    if fmt == "bin":
+        binary = _DIST_DIR / "gravwell-collect"
+        if not binary.exists():
+            return jsonify(error="Linux/macOS binary not found — run gravwell/agent/build.py on the target platform first"), 404
+        return send_file(
+            binary,
+            as_attachment=True,
+            download_name="gravwell-collect",
+            mimetype="application/octet-stream",
+        )
+
+    return jsonify(error=f"Unknown format '{fmt}'. Use: py, exe, bin"), 400

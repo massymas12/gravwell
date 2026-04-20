@@ -407,14 +407,33 @@ def register(app: dash.Dash) -> None:
         Output("agent-tokens-content", "children"),
         Output("agent-tokens-new-token", "children"),
         Output("agent-tokens-status", "children"),
+        Output("agent-server-url", "children"),
+        Output("agent-deploy-cmd", "children"),
         Input("agent-tokens-menu-item", "n_clicks"),
         prevent_initial_call=True,
     )
     def open_agent_tokens_modal(n_clicks):
         if not current_user.is_authenticated or not current_user.is_admin:
-            return no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
         if not n_clicks:
-            return no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+        from flask import request as flask_request
+        server_url = flask_request.host_url.rstrip("/")
+        url_div = html.Div([
+            html.Span("Server URL: ", style={"color": "#aaa"}),
+            html.Code(server_url, style={"color": "#5DADE2", "userSelect": "all"}),
+        ])
+        cmd_div = html.Div([
+            html.Div("Example usage (Python script):",
+                     style={"color": "#aaa", "marginBottom": "3px"}),
+            html.Code(
+                f"python gravwell-collect.py --server {server_url} --key YOUR_TOKEN",
+                style={"display": "block", "background": "#0d1117",
+                       "color": "#ccc", "padding": "5px 8px",
+                       "borderRadius": "3px", "fontSize": "10px",
+                       "wordBreak": "break-all"},
+            ),
+        ])
         return (
             {"display": "flex"},
             {"display": "none"},
@@ -422,6 +441,8 @@ def register(app: dash.Dash) -> None:
             _render_tokens_table(),
             "",
             "",
+            url_div,
+            cmd_div,
         )
 
     @app.callback(

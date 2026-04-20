@@ -366,7 +366,11 @@ def _create_manage_users_modal() -> html.Div:
 
 
 def _create_agent_tokens_modal() -> html.Div:
-    """Modal for managing agent API tokens (admin only)."""
+    """Modal for managing agent API tokens and downloading the agent (admin only)."""
+    btn = {"background": "#1a2a3a", "border": "1px solid #2980B9",
+           "color": "#5DADE2", "cursor": "pointer", "borderRadius": "3px",
+           "padding": "3px 10px", "fontSize": "11px", "textDecoration": "none",
+           "display": "inline-block"}
     return html.Div(
         id="agent-tokens-modal-overlay",
         style={"display": "none"},
@@ -374,23 +378,24 @@ def _create_agent_tokens_modal() -> html.Div:
         children=[
             html.Div(
                 className="edit-modal",
-                style={"width": "600px", "maxWidth": "95vw"},
+                style={"width": "640px", "maxWidth": "95vw"},
                 children=[
                     html.Div([
-                        html.H3("Agent Tokens",
+                        html.H3("Agent Tokens & Deployment",
                                 style={"margin": 0, "fontSize": "15px",
                                        "color": "#5DADE2"}),
                         html.Button("×", id="agent-tokens-modal-close",
                                     className="modal-close-btn"),
                     ], className="modal-header"),
                     html.Div([
+                        # ── Token table ──────────────────────────────
                         html.Div(id="agent-tokens-content",
-                                 style={"marginBottom": "12px"}),
-                        html.Hr(style={"borderColor": "#333", "margin": "8px 0"}),
+                                 style={"marginBottom": "10px"}),
+                        # ── Generate new token ───────────────────────
                         html.Div([
                             html.Span("Label:",
                                       style={"fontSize": "12px", "color": "#aaa",
-                                             "marginRight": "6px"}),
+                                             "marginRight": "6px", "whiteSpace": "nowrap"}),
                             dcc.Input(
                                 id="new-token-label-input",
                                 type="text",
@@ -405,16 +410,41 @@ def _create_agent_tokens_modal() -> html.Div:
                             html.Button("Generate Token", id="generate-token-btn",
                                         n_clicks=0,
                                         className="btn btn-primary btn-sm",
-                                        style={"marginLeft": "6px"}),
-                        ], style={"display": "flex", "alignItems": "center",
-                                  "gap": "4px"}),
-                        html.Div(id="agent-tokens-new-token",
-                                 style={"marginTop": "8px"}),
+                                        style={"marginLeft": "6px", "whiteSpace": "nowrap"}),
+                        ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
+                        html.Div(id="agent-tokens-new-token", style={"marginTop": "8px"}),
                         html.Div(id="agent-tokens-status",
                                  style={"fontSize": "11px", "color": "#5DADE2",
                                         "marginTop": "4px"}),
+                        # ── Deploy section ───────────────────────────
+                        html.Hr(style={"borderColor": "#333", "margin": "12px 0 10px"}),
+                        html.Div("Download Agent", style={"fontSize": "12px",
+                                                           "color": "#5DADE2",
+                                                           "fontWeight": "600",
+                                                           "marginBottom": "6px"}),
+                        html.Div(id="agent-server-url",
+                                 style={"fontSize": "11px", "color": "#888",
+                                        "marginBottom": "8px"}),
+                        html.Div([
+                            html.A("↓ Python script (.py)",
+                                   href="/api/agent/download/py",
+                                   target="_blank",
+                                   style=btn),
+                            html.A("↓ Windows (.exe)",
+                                   href="/api/agent/download/exe",
+                                   target="_blank",
+                                   style=btn),
+                            html.A("↓ Linux/macOS (binary)",
+                                   href="/api/agent/download/bin",
+                                   target="_blank",
+                                   style=btn),
+                        ], style={"display": "flex", "gap": "8px",
+                                  "flexWrap": "wrap", "marginBottom": "8px"}),
+                        html.Div(id="agent-deploy-cmd",
+                                 style={"fontSize": "11px", "color": "#888"}),
                     ], className="modal-body",
-                       style={"padding": "12px 16px"}),
+                       style={"padding": "12px 16px", "overflowY": "auto",
+                              "maxHeight": "70vh"}),
                     html.Div([
                         html.Button("Close", id="agent-tokens-close-btn",
                                     className="btn btn-secondary btn-sm"),

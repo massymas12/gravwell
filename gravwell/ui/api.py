@@ -161,6 +161,7 @@ def revoke_token(label: str):
 
 _AGENT_PY    = pathlib.Path(__file__).parent.parent / "agent" / "collect.py"
 _BUILDS_DIR  = pathlib.Path.home() / ".gravwell" / "agent-builds"
+_BUNDLED_DIR = pathlib.Path(__file__).parent.parent / "agent" / "binaries"
 
 _PLATFORM_SUFFIX = {"windows": ".exe", "linux": "", "macos": ""}
 _ALL_PLATFORMS   = list(_PLATFORM_SUFFIX)
@@ -172,10 +173,28 @@ def _current_platform() -> str:
 
 
 def _cache_path(platform: str, local_only: bool) -> pathlib.Path:
-    """Return the cache file path for a given platform + mode."""
+    """Return the user cache file path for a given platform + mode."""
     name = "gravwell-collect-local" if local_only else "gravwell-collect"
     suffix = _PLATFORM_SUFFIX.get(platform, "")
     return _BUILDS_DIR / platform / (name + suffix)
+
+
+def _bundled_path(platform: str, local_only: bool) -> pathlib.Path:
+    """Return the package-bundled binary path for a given platform + mode."""
+    name = "gravwell-collect-local" if local_only else "gravwell-collect"
+    suffix = _PLATFORM_SUFFIX.get(platform, "")
+    return _BUNDLED_DIR / platform / (name + suffix)
+
+
+def _resolve_binary(platform: str, local_only: bool) -> pathlib.Path | None:
+    """Return the best available binary path: user cache beats bundled."""
+    p = _cache_path(platform, local_only)
+    if p.exists():
+        return p
+    p = _bundled_path(platform, local_only)
+    if p.exists():
+        return p
+    return None
 
 
 def _save_to_cache(platform: str, local_only: bool, data: bytes) -> None:
@@ -185,12 +204,12 @@ def _save_to_cache(platform: str, local_only: bool, data: bytes) -> None:
 
 
 def cached_builds() -> dict:
-    """Return {platform: {mode: bool}} indicating what's cached."""
+    """Return {platform: {mode: bool}} indicating what's available (cache or bundled)."""
     result = {}
     for plat in _ALL_PLATFORMS:
         result[plat] = {
-            "configured": _cache_path(plat, False).exists(),
-            "local":      _cache_path(plat, True).exists(),
+            "configured": _resolve_binary(plat, False) is not None,
+            "local":      _resolve_binary(plat, True)  is not None,
         }
     return result
 
@@ -291,19 +310,19 @@ def download_binary():
     if platform not in _ALL_PLATFORMS:
         return jsonify(error=f"Unknown platform '{platform}'. Use: {', '.join(_ALL_PLATFORMS)}"), 400
 
-    cached = _cache_path(platform, local_only)
-    if not cached.exists():
+    binary = _resolve_binary(platform, local_only)
+    if not binary:
         mode_label = "local-only" if local_only else "configured"
         return jsonify(
-            error=f"No cached {mode_label} binary for {platform}. "
+            error=f"No binary available for {platform} ({mode_label}). "
                   f"Build it on a {platform} machine and upload it here."
         ), 404
 
     import io
     return send_file(
-        io.BytesIO(cached.read_bytes()),
+        io.BytesIO(binary.read_bytes()),
         as_attachment=True,
-        download_name=cached.name,
+        download_name=binary.name,
         mimetype="application/octet-stream",
     )
 

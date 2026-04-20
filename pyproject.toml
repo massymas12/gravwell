@@ -40,3 +40,6 @@ gravwell = "gravwell.cli.commands:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gravwell*"]
+
+[tool.setuptools.package-data]
+"gravwell" = ["agent/binaries/**/*", "agent/binaries/*"]

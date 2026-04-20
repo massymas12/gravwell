@@ -5,6 +5,7 @@ import json
 import dash
 from dash import Input, Output, State, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import get_session
 from gravwell.models.orm import HostORM, NodePositionORM, ServiceORM, VulnerabilityORM
 
@@ -64,6 +65,8 @@ def register(app: dash.Dash) -> None:
     )
     def save_new_node(n_clicks, ip_raw, hostnames_raw, os_family, status,
                       subnet_raw, pos, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update, no_update
         if not n_clicks:
             return no_update, no_update, no_update
 
@@ -156,6 +159,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def confirm_delete_node(n_clicks, node_store, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         if not n_clicks or not node_store:
             return no_update, no_update
         ip = node_store.get("ip")
@@ -179,6 +184,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def delete_node_from_js(trigger_value, graph_trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         if not trigger_value:
             return no_update, no_update
         try:
@@ -204,6 +211,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def delete_nodes_bulk(trigger_value, graph_trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         if not trigger_value:
             return no_update, no_update
         try:

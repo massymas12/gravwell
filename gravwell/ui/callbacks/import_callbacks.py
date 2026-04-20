@@ -9,6 +9,7 @@ from pathlib import Path
 import dash
 from dash import Input, Output, State, html, no_update
 from flask import current_app
+from flask_login import current_user
 
 from gravwell.database import get_session
 from gravwell.parsers.registry import ParserRegistry
@@ -246,6 +247,8 @@ def register(app: dash.Dash) -> None:
     )
     def handle_path_import(n_clicks, filepath):
         """Import a file directly from a server-side path (no base64 overhead)."""
+        if not current_user.is_authenticated or not current_user.can("import"):
+            return no_update, no_update, no_update, no_update, no_update
         if not n_clicks or not filepath:
             return no_update, no_update, no_update, no_update, no_update
 
@@ -295,6 +298,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def handle_upload(contents_list, filenames):
+        if not current_user.is_authenticated or not current_user.can("import"):
+            return no_update, no_update, no_update, no_update, no_update, no_update
         if not contents_list:
             return no_update, no_update, no_update, no_update, no_update, no_update
 
@@ -406,6 +411,8 @@ def register(app: dash.Dash) -> None:
     )
     def delete_scan_file(n_clicks_list):
         from dash import ctx
+        if not current_user.is_authenticated or not current_user.can("import"):
+            return no_update
         if not any(n_clicks_list):
             return no_update
         triggered = ctx.triggered_id

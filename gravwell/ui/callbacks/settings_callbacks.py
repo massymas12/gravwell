@@ -260,6 +260,9 @@ def register(app: dash.Dash) -> None:
 
         _reset = ("", "", [], ["edit", "import"], "all", [])
 
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, "Permission denied.", *([no_update] * 6)
+
         if triggered in ("cancel-add-user-btn", "add-user-modal-close"):
             return {"display": "none"}, "", *_reset
 
@@ -305,6 +308,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def open_manage_users(n_clicks):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update, no_update, no_update
         if not n_clicks:
             return no_update, no_update, no_update, no_update
         content = _render_users_table()
@@ -332,6 +337,8 @@ def register(app: dash.Dash) -> None:
     )
     def delete_user(n_clicks_list):
         from dash import ctx
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update
         if not any(n_clicks_list):
             return no_update, no_update
         triggered = ctx.triggered_id

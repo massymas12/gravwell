@@ -10,6 +10,7 @@ import json
 import dash
 from dash import Input, Output, State, html, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import get_session
 from gravwell.models.orm import HostORM, ServiceORM, HostConfigORM, HostRoleOverrideORM
 from gravwell.models.ingestion import _upsert_service, _update_host_aggregates
@@ -147,6 +148,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def attach_config(contents, filename, node_store, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update, no_update
         if not contents or not node_store:
             return no_update, no_update, no_update
 

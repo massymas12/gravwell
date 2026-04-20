@@ -3,6 +3,7 @@ from __future__ import annotations
 import dash
 from dash import Input, Output, State, html, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import get_session
 from gravwell.models.ingestion import ingest_parse_result
 
@@ -20,6 +21,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def run_discovery(n_clicks, target, methods, community, trigger):
+        if not current_user.is_authenticated or not current_user.can("discover"):
+            return no_update, no_update
         if not target or not target.strip():
             return html.Span("Enter a target CIDR or IP.", style={"color": "#E74C3C"}), no_update
 
@@ -85,6 +88,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def run_passive_listen(n_clicks, interface, duration, target, trigger):
+        if not current_user.is_authenticated or not current_user.can("discover"):
+            return no_update, no_update
         if not interface or not interface.strip():
             return html.Span(
                 "Enter a network interface name.",

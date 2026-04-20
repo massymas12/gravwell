@@ -3,6 +3,7 @@ from __future__ import annotations
 import dash
 from dash import Input, Output, State, html, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import get_session
 from gravwell.models.orm import CustomEdgeORM, HiddenEdgeORM
 
@@ -28,6 +29,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def handle_add_edge(add_clicks, cancel_clicks, tap_node, mode, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         ctx = dash.callback_context
         if not ctx.triggered:
             return no_update, no_update
@@ -142,6 +145,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def delete_edge(n_clicks, edge_data, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         if not n_clicks or not edge_data:
             return no_update, no_update
 
@@ -186,6 +191,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def restore_all_hidden(n_clicks, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         if not n_clicks:
             return no_update, no_update
 

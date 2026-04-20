@@ -3,6 +3,7 @@ import json
 import dash
 from dash import Input, Output, State, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import get_session
 from gravwell.models.orm import HostORM, HostRoleOverrideORM
 from gravwell.models.ingestion import _update_host_aggregates
@@ -140,6 +141,8 @@ def register(app: dash.Dash) -> None:
     def save_node_edits(n_clicks, hostnames_str, os_name, os_family, status,
                         mac, mac_vendor, additional_ips_str, domain_str,
                         tags_str, roles, subnet_override_str, node_store, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update, no_update
         if not n_clicks or not node_store:
             return no_update, no_update, no_update
         ip = node_store.get("ip")

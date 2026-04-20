@@ -3,6 +3,7 @@ from __future__ import annotations
 import dash
 from dash import Input, Output, State, html, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import get_session
 from gravwell.models.orm import SubnetLabelORM
 
@@ -80,6 +81,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def save_subnet_label(n_clicks, label_value, subnet_data, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update, no_update
         if not n_clicks or not subnet_data:
             return no_update, no_update
 
@@ -106,6 +109,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def save_subnet_padding(padding_value, subnet_data, trigger):
+        if not current_user.is_authenticated or not current_user.can("edit"):
+            return no_update
         if padding_value is None or not subnet_data:
             return no_update
 

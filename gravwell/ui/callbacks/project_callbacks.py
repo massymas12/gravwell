@@ -4,6 +4,7 @@ import pathlib
 import dash
 from dash import Input, Output, State, no_update
 from flask import current_app
+from flask_login import current_user
 from gravwell.database import init_db, drop_db, release_engine
 from gravwell.projects import list_projects, get_project_path, _DEFAULT_DB
 
@@ -67,6 +68,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def create_project(n_clicks, n_submit, name, trigger):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update, no_update
         if not (n_clicks or n_submit) or not name or not name.strip():
             return no_update, no_update, no_update
         project_name = name.strip().replace(" ", "-").lower()
@@ -96,6 +99,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def confirm_delete_project(n_clicks, trigger):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update
         if not n_clicks:
             return no_update, no_update
 
@@ -153,6 +158,8 @@ def register(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def confirm_rename_project(n_clicks, n_submit, new_name, trigger):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update, no_update
         if not (n_clicks or n_submit) or not new_name or not new_name.strip():
             return no_update, no_update, no_update
 

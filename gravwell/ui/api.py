@@ -161,53 +161,158 @@ def revoke_token(label: str):
 
 _AGENT_PY = pathlib.Path(__file__).parent.parent / "agent" / "collect.py"
 
-# Platform-specific pre-built binary locations (built by gravwell/agent/build.py)
-_DIST_DIR = pathlib.Path(__file__).parent.parent.parent / "dist"
+
+def _generate_script(server: str = "", token: str = "", local_only: bool = False) -> str:
+    """Return a customized collect.py source with embedded defaults baked in."""
+    source = _AGENT_PY.read_text(encoding="utf-8")
+
+    config_block = (
+        "\n# ── Embedded configuration (pre-configured by GravWell server) ──────────────\n"
+        f"_EMBEDDED_SERVER: str = {repr(server)}\n"
+        f"_EMBEDDED_KEY: str    = {repr(token)}\n"
+        f"_LOCAL_ONLY: bool     = {repr(local_only)}\n"
+        "# ─────────────────────────────────────────────────────────────────────────────\n"
+    )
+    source = source.replace('VERSION = "1.0"', 'VERSION = "1.0"' + config_block, 1)
+
+    # Bake server / key into argparse defaults
+    source = source.replace(
+        'parser.add_argument("--server", "-s", default="", help="GravWell server URL")',
+        'parser.add_argument("--server", "-s", default=_EMBEDDED_SERVER, help="GravWell server URL")',
+    )
+    source = source.replace(
+        'parser.add_argument("--key", "-k", default="", help="API key for server upload")',
+        'parser.add_argument("--key", "-k", default=_EMBEDDED_KEY, help="API key for server upload")',
+    )
+
+    # Local-only: suppress upload even if --server is passed
+    if local_only:
+        source = source.replace(
+            "    # 7. Upload if requested\n    if args.server:",
+            "    # 7. Upload if requested\n    if args.server and not _LOCAL_ONLY:",
+        )
+
+    return source
 
 
-@api_bp.route("/api/agent/download/<fmt>", methods=["GET"])
-def download_agent(fmt: str):
-    """Download the collection agent.
+@api_bp.route("/api/agent/download/py", methods=["GET"])
+def download_agent_py():
+    """Download a (optionally pre-configured) Python collection agent.
 
     Requires an authenticated browser session.
 
-    fmt=py   → collect.py Python script (always available)
-    fmt=exe  → Windows .exe built by PyInstaller (if present in dist/)
-    fmt=bin  → Linux/macOS binary built by PyInstaller (if present in dist/)
+    Query params (all optional):
+      ?server=URL    Pre-fill the GravWell server URL
+      ?token=TOKEN   Pre-fill the API token
+      ?mode=local    Build a local-only variant (never uploads; saves JSON only)
     """
     if not current_user.is_authenticated:
         return jsonify(error="Authentication required"), 401
 
-    if fmt == "py":
-        if not _AGENT_PY.exists():
-            return jsonify(error="Agent script not found on server"), 404
-        return send_file(
-            _AGENT_PY,
-            as_attachment=True,
-            download_name="gravwell-collect.py",
-            mimetype="text/x-python",
-        )
+    if not _AGENT_PY.exists():
+        return jsonify(error="Agent script not found on server"), 404
 
-    if fmt == "exe":
-        exe = _DIST_DIR / "gravwell-collect.exe"
-        if not exe.exists():
-            return jsonify(error="Windows binary not found — run gravwell/agent/build.py on a Windows host first"), 404
+    server = request.args.get("server", "").strip()
+    token  = request.args.get("token",  "").strip()
+    local_only = request.args.get("mode", "") == "local"
+
+    if server or token or local_only:
+        source = _generate_script(server=server, token=token, local_only=local_only)
+        buf = __import__("io").BytesIO(source.encode())
+        name = "gravwell-collect-local.py" if local_only else "gravwell-collect.py"
+        return send_file(buf, as_attachment=True, download_name=name,
+                         mimetype="text/x-python")
+
+    # Plain unmodified script
+    return send_file(_AGENT_PY, as_attachment=True,
+                     download_name="gravwell-collect.py", mimetype="text/x-python")
+
+
+@api_bp.route("/api/agent/build", methods=["POST"])
+def build_agent():
+    """Build a standalone binary for the current server platform using PyInstaller.
+
+    Admin only. This is a blocking call — building takes ~30-60 seconds.
+
+    JSON body (all optional):
+      {"server": "URL", "token": "TOKEN", "mode": "local"}
+
+    Returns the binary as a file download.
+    """
+    if not current_user.is_authenticated or not current_user.is_admin:
+        return jsonify(error="Admin access required"), 403
+
+    import io
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    if not _AGENT_PY.exists():
+        return jsonify(error="Agent script not found on server"), 404
+
+    if not shutil.which("pyinstaller"):
+        return jsonify(
+            error="PyInstaller not installed on this server. "
+                  "Run: pip install pyinstaller  then retry."
+        ), 500
+
+    body = request.get_json(silent=True) or {}
+    server     = (body.get("server") or "").strip()
+    token      = (body.get("token")  or "").strip()
+    local_only = (body.get("mode",  "") == "local")
+
+    source = _generate_script(server=server, token=token, local_only=local_only)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="gravwell_build_") as tmp:
+            tmp_path = pathlib.Path(tmp)
+            src_file = tmp_path / "collect.py"
+            src_file.write_text(source, encoding="utf-8")
+
+            exe_name = "gravwell-collect-local" if local_only else "gravwell-collect"
+            cmd = [
+                sys.executable, "-m", "PyInstaller",
+                "--onefile", "--clean", "--noconfirm",
+                "--name", exe_name,
+                "--distpath", str(tmp_path / "dist"),
+                "--workpath", str(tmp_path / "build"),
+                "--specpath", str(tmp_path),
+                "--hidden-import", "xml.etree.ElementTree",
+                "--hidden-import", "ssl",
+                "--hidden-import", "urllib.request",
+                str(src_file),
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300,
+                cwd=str(tmp_path),
+            )
+            if result.returncode != 0:
+                logger.error("PyInstaller failed:\n%s", result.stderr[-3000:])
+                return jsonify(
+                    error="Build failed — check server logs for details",
+                    detail=result.stderr[-500:],
+                ), 500
+
+            suffix = ".exe" if sys.platform == "win32" else ""
+            out_binary = tmp_path / "dist" / (exe_name + suffix)
+            if not out_binary.exists():
+                return jsonify(error="Build produced no output file"), 500
+
+            download_name = exe_name + suffix
+            binary_bytes = out_binary.read_bytes()
+
+        logger.info("Agent build complete: %s (%d bytes) by %s",
+                    download_name, len(binary_bytes), current_user.username)
         return send_file(
-            exe,
+            io.BytesIO(binary_bytes),
             as_attachment=True,
-            download_name="gravwell-collect.exe",
+            download_name=download_name,
             mimetype="application/octet-stream",
         )
 
-    if fmt == "bin":
-        binary = _DIST_DIR / "gravwell-collect"
-        if not binary.exists():
-            return jsonify(error="Linux/macOS binary not found — run gravwell/agent/build.py on the target platform first"), 404
-        return send_file(
-            binary,
-            as_attachment=True,
-            download_name="gravwell-collect",
-            mimetype="application/octet-stream",
-        )
-
-    return jsonify(error=f"Unknown format '{fmt}'. Use: py, exe, bin"), 400
+    except subprocess.TimeoutExpired:
+        return jsonify(error="Build timed out after 5 minutes"), 500
+    except Exception as exc:
+        logger.exception("Agent build error")
+        return jsonify(error=f"Build error: {exc}"), 500

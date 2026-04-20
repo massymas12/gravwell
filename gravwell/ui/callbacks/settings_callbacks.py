@@ -458,6 +458,10 @@ def register(app: dash.Dash) -> None:
         Output("agent-tokens-content", "children", allow_duplicate=True),
         Output("agent-tokens-new-token", "children", allow_duplicate=True),
         Output("agent-tokens-status", "children", allow_duplicate=True),
+        Output("_build-server-store", "children"),
+        Output("_build-token-store", "children"),
+        Output("build-configured-btn", "style"),
+        Output("build-configured-btn", "children"),
         Input("generate-token-btn", "n_clicks"),
         Input({"type": "revoke-token-btn", "label": dash.ALL}, "n_clicks"),
         State("new-token-label-input", "value"),
@@ -465,20 +469,34 @@ def register(app: dash.Dash) -> None:
     )
     def manage_agent_tokens(gen_clicks, revoke_clicks_list, label_value):
         from dash import ctx
+        _nu8 = (no_update,) * 8
         if not current_user.is_authenticated or not current_user.is_admin:
-            return no_update, no_update, no_update
+            return _nu8
 
         from gravwell import agent_tokens as at
         db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
         if not db_path:
-            return no_update, no_update, "No active project."
+            return no_update, no_update, "No active project.", no_update, no_update, no_update, no_update
 
         triggered = ctx.triggered_id
 
-        # Generate new token
+        # Generate new token — show it once + arm pre-configured download links
         if triggered == "generate-token-btn":
+            from flask import request as flask_request
+            import urllib.parse
             label = (label_value or "default").strip() or "default"
             plain = at.create_token(label, db_path)
+            server_url = flask_request.host_url.rstrip("/")
+
+            py_url = (f"/api/agent/download/py?"
+                      f"server={urllib.parse.quote(server_url)}"
+                      f"&token={urllib.parse.quote(plain)}")
+
+            _abtn = {"background": "#1a2a1a", "border": "1px solid #27AE60",
+                     "color": "#27AE60", "cursor": "pointer", "borderRadius": "3px",
+                     "padding": "3px 10px", "fontSize": "11px",
+                     "textDecoration": "none", "display": "inline-block"}
+
             token_display = html.Div([
                 html.Div("New token — copy it now, it will not be shown again:",
                          style={"fontSize": "11px", "color": "#E67E22",
@@ -489,16 +507,123 @@ def register(app: dash.Dash) -> None:
                     "borderRadius": "3px", "fontSize": "11px",
                     "wordBreak": "break-all", "userSelect": "all",
                 }),
+                html.Div([
+                    html.Span("Pre-configured downloads (token baked in): ",
+                              style={"fontSize": "11px", "color": "#aaa"}),
+                    html.A("↓ Python script", href=py_url, target="_blank",
+                           style=_abtn),
+                ], style={"marginTop": "6px", "display": "flex",
+                          "alignItems": "center", "gap": "8px"}),
             ])
-            return _render_tokens_table(), token_display, f"Token '{label}' created."
+
+            build_btn_style = {
+                "background": "#1a2a1a", "border": "1px solid #27AE60",
+                "color": "#27AE60", "cursor": "pointer", "borderRadius": "3px",
+                "padding": "3px 10px", "fontSize": "11px",
+            }
+            return (_render_tokens_table(), token_display,
+                    f"Token '{label}' created.",
+                    server_url, plain, build_btn_style,
+                    "↓ Build pre-configured binary (this platform)")
 
         # Revoke token
         if isinstance(triggered, dict) and triggered.get("type") == "revoke-token-btn":
             if not any(revoke_clicks_list):
-                return no_update, no_update, no_update
+                return _nu8
             label = triggered.get("label", "")
             if label:
                 at.revoke(label, db_path)
-            return _render_tokens_table(), "", f"Token '{label}' revoked."
+            return (_render_tokens_table(), "", f"Token '{label}' revoked.",
+                    no_update, no_update, no_update, no_update)
 
-        return no_update, no_update, no_update
+        return _nu8
+
+    # ── Build binary buttons (local-only and pre-configured) ──────────────────
+
+    @app.callback(
+        Output("agent-build-status", "children"),
+        Input("build-local-btn", "n_clicks"),
+        Input("build-configured-btn", "n_clicks"),
+        State("_build-server-store", "children"),
+        State("_build-token-store", "children"),
+        prevent_initial_call=True,
+    )
+    def trigger_agent_build(local_clicks, configured_clicks,
+                            stored_server, stored_token):
+        from dash import ctx
+        import base64, json as _json, shutil, subprocess, sys, tempfile
+        import pathlib as _pathlib
+
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return html.Span("Permission denied.", style={"color": "#E74C3C"})
+
+        triggered = ctx.triggered_id
+        if triggered == "build-local-btn" and local_clicks:
+            mode, server, token = "local", "", ""
+        elif triggered == "build-configured-btn" and configured_clicks:
+            mode   = "configured"
+            server = stored_server or ""
+            token  = stored_token  or ""
+        else:
+            return no_update
+
+        if not shutil.which("pyinstaller"):
+            return html.Span(
+                "PyInstaller not installed on this server. "
+                "Run: pip install pyinstaller",
+                style={"color": "#E74C3C"},
+            )
+
+        from gravwell.ui.api import _generate_script, _AGENT_PY
+        local_only = (mode == "local")
+        source = _generate_script(server=server, token=token, local_only=local_only)
+        exe_name = "gravwell-collect-local" if local_only else "gravwell-collect"
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="gravwell_build_") as tmp:
+                tmp_path = _pathlib.Path(tmp)
+                src_file = tmp_path / "collect.py"
+                src_file.write_text(source, encoding="utf-8")
+
+                cmd = [
+                    sys.executable, "-m", "PyInstaller",
+                    "--onefile", "--clean", "--noconfirm",
+                    "--name", exe_name,
+                    "--distpath", str(tmp_path / "dist"),
+                    "--workpath", str(tmp_path / "build"),
+                    "--specpath", str(tmp_path),
+                    "--hidden-import", "xml.etree.ElementTree",
+                    "--hidden-import", "ssl",
+                    "--hidden-import", "urllib.request",
+                    str(src_file),
+                ]
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                    cwd=str(tmp_path),
+                )
+                if result.returncode != 0:
+                    return html.Span(
+                        f"Build failed: {result.stderr[-200:]}",
+                        style={"color": "#E74C3C"},
+                    )
+
+                suffix = ".exe" if sys.platform == "win32" else ""
+                out_file = tmp_path / "dist" / (exe_name + suffix)
+                if not out_file.exists():
+                    return html.Span("Build produced no output.",
+                                     style={"color": "#E74C3C"})
+
+                fname = exe_name + suffix
+                b64 = base64.b64encode(out_file.read_bytes()).decode()
+                data_url = f"data:application/octet-stream;base64,{b64}"
+
+            return html.Div([
+                html.Span("Build complete! ", style={"color": "#27AE60"}),
+                html.A(f"Download {fname}", href=data_url, download=fname,
+                       style={"color": "#5DADE2", "fontSize": "11px"}),
+            ])
+        except subprocess.TimeoutExpired:
+            return html.Span("Build timed out after 5 minutes.",
+                             style={"color": "#E74C3C"})
+        except Exception as exc:
+            return html.Span(f"Build error: {exc}", style={"color": "#E74C3C"})

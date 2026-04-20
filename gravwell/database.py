@@ -166,30 +166,20 @@ def migrate_to_encrypted(db_path: str, mek: bytes) -> None:
 
 
 def ensure_agent_token(db_path: str) -> str | None:
-    """Create a default agent API token if none exists yet.
+    """Create a default agent API token for *db_path* if none exists yet.
 
-    Returns the plain token on first creation (print it to the console) or
-    None when a token already exists (no need to show it again).
+    Tokens are stored in the central registry (~/.gravwell/agent_tokens.json)
+    rather than inside the project DB so that each token is permanently bound
+    to its project and ingestion is not affected by UI project-switching.
+
+    Returns the plain token on first creation so the caller can display it.
+    Returns None when an active token already exists for this project.
     """
-    import secrets as _secrets
-    from gravwell.models.orm import AgentTokenORM
+    from gravwell.agent_tokens import create_token, list_for_project
 
-    engine = _get_engine(db_path)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-    session = factory()
-    try:
-        existing = session.query(AgentTokenORM).filter_by(active=True).first()
-        if existing:
-            return None
-        token = _secrets.token_hex(32)   # 64-character hex string
-        session.add(AgentTokenORM(token=token, label="default"))
-        session.commit()
-        return token
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    if list_for_project(db_path):
+        return None
+    return create_token("default", db_path)
 
 
 def init_db(db_path: str) -> None:

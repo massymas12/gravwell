@@ -798,6 +798,69 @@ def token_revoke(ctx, label, yes):
         console.print(f"[red]No active token with label '{label}' found.[/red]")
 
 
+# ── CI admin token management ─────────────────────────────────────────────────
+
+@cli.group("ci-token")
+def ci_token():
+    """Manage the CI admin token used by GitHub Actions to upload agent binaries."""
+
+
+@ci_token.command("set")
+@click.pass_context
+def ci_token_set(ctx):
+    """Generate and store a new CI admin token.
+
+    Prints the plain token once — add it as GRAVWELL_ADMIN_TOKEN in your
+    GitHub repository secrets.  Only the SHA-256 hash is stored locally.
+    """
+    import hashlib
+    import secrets
+    import gravwell.keystore as ks_mod
+
+    db_path = ctx.obj["db"]
+    plain = secrets.token_hex(32)
+    ks = ks_mod.load(db_path)
+    ks["ci_admin_token_hash"] = hashlib.sha256(plain.encode()).hexdigest()
+    ks_mod.save(db_path, ks)
+    console.print("\n[bold green]CI admin token created.[/bold green]")
+    console.print(f"[bold yellow]  {plain}[/bold yellow]")
+    console.print("[dim]Add this as GRAVWELL_ADMIN_TOKEN in your GitHub repository secrets.[/dim]")
+    console.print("[dim]This token will not be shown again.[/dim]\n")
+
+
+@ci_token.command("revoke")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.pass_context
+def ci_token_revoke(ctx, yes):
+    """Revoke the current CI admin token."""
+    import gravwell.keystore as ks_mod
+
+    db_path = ctx.obj["db"]
+    if not yes:
+        click.confirm("Revoke the CI admin token?", abort=True)
+    ks = ks_mod.load(db_path)
+    if "ci_admin_token_hash" not in ks:
+        console.print("[red]No CI admin token is set.[/red]")
+        return
+    del ks["ci_admin_token_hash"]
+    ks_mod.save(db_path, ks)
+    console.print("[yellow]CI admin token revoked.[/yellow]")
+
+
+@ci_token.command("status")
+@click.pass_context
+def ci_token_status(ctx):
+    """Show whether a CI admin token is currently set."""
+    import gravwell.keystore as ks_mod
+
+    db_path = ctx.obj["db"]
+    ks = ks_mod.load(db_path)
+    if ks.get("ci_admin_token_hash"):
+        console.print("[green]CI admin token: set[/green]")
+    else:
+        console.print("[dim]CI admin token: not set[/dim]")
+
+
 @cli.command()
 @click.option("--yes", is_flag=True, default=False, help="Skip confirmation")
 @click.pass_context

@@ -308,21 +308,43 @@ def download_binary():
     )
 
 
+def _is_admin_request() -> bool:
+    """Return True if the request comes from an authenticated admin.
+
+    Accepts either:
+    - A browser session (Flask-Login current_user.is_admin), or
+    - X-Gravwell-Admin header containing a valid admin API token stored in
+      the keystore under the key "ci_admin_token".  This lets CI pipelines
+      upload pre-built binaries without a browser session.
+    """
+    if current_user.is_authenticated and current_user.is_admin:
+        return True
+    header_token = request.headers.get("X-Gravwell-Admin", "")
+    if header_token:
+        import gravwell.keystore as ks_mod
+        import hashlib
+        db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
+        ks = ks_mod.load(db_path)
+        stored = ks.get("ci_admin_token_hash", "")
+        if stored and hashlib.sha256(header_token.encode()).hexdigest() == stored:
+            return True
+    return False
+
+
 @api_bp.route("/api/agent/upload", methods=["POST"])
 def upload_binary():
     """Upload a pre-built agent binary for a specific platform.
 
-    Admin only. Use this to make binaries available for platforms the
-    server is not running on (e.g. upload a Windows .exe from a Windows
-    build machine to a Linux server).
+    Accepts admin browser sessions OR an X-Gravwell-Admin header token
+    (set via `gravwell ci-token set` for use in CI pipelines).
 
     Query params:
       ?platform=windows|linux|macos   (required)
       ?mode=local                     (optional; default: configured)
 
-    Body: raw binary (multipart file upload as 'file' field).
+    Body: multipart file upload with field name 'file'.
     """
-    if not current_user.is_authenticated or not current_user.is_admin:
+    if not _is_admin_request():
         return jsonify(error="Admin access required"), 403
 
     platform   = request.args.get("platform", "").strip().lower()

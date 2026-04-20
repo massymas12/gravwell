@@ -1,0 +1,141 @@
+name: Build Collection Agents
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Build mode"
+        required: true
+        default: "local"
+        type: choice
+        options:
+          - local
+          - configured
+      server_url:
+        description: "Server URL (required for 'configured' mode)"
+        required: false
+        default: ""
+      upload_to_server:
+        description: "Upload binaries to gravwell server after build"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            binary: gravwell-collect.exe
+            binary_local: gravwell-collect-local.exe
+          - os: ubuntu-latest
+            platform: linux
+            binary: gravwell-collect
+            binary_local: gravwell-collect-local
+          - os: macos-latest
+            platform: macos
+            binary: gravwell-collect
+            binary_local: gravwell-collect-local
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyinstaller
+
+      - name: Generate configured script
+        if: ${{ inputs.mode == 'configured' }}
+        shell: python
+        run: |
+          import sys, pathlib, urllib.parse
+          sys.path.insert(0, ".")
+          from gravwell.ui.api import _generate_script, _AGENT_PY
+          server = "${{ inputs.server_url }}"
+          token  = "${{ secrets.AGENT_TOKEN }}"
+          src = _generate_script(server=server, token=token, local_only=False)
+          pathlib.Path("agent_build.py").write_text(src, encoding="utf-8")
+
+      - name: Generate local-only script
+        if: ${{ inputs.mode == 'local' }}
+        shell: python
+        run: |
+          import sys, pathlib
+          sys.path.insert(0, ".")
+          from gravwell.ui.api import _generate_script
+          src = _generate_script(local_only=True)
+          pathlib.Path("agent_build.py").write_text(src, encoding="utf-8")
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --clean --noconfirm \
+            --name gravwell-collect-${{ inputs.mode == 'local' && 'local' || 'configured' }} \
+            --hidden-import xml.etree.ElementTree \
+            --hidden-import ssl \
+            --hidden-import urllib.request \
+            agent_build.py
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gravwell-collect-${{ matrix.platform }}-${{ inputs.mode }}
+          path: dist/gravwell-collect-*
+          retention-days: 30
+
+      - name: Push to gravwell server
+        if: ${{ inputs.upload_to_server && secrets.GRAVWELL_SERVER_URL != '' && secrets.GRAVWELL_ADMIN_TOKEN != '' }}
+        shell: python
+        run: |
+          import pathlib, urllib.request, urllib.error, json, sys
+
+          platform = "${{ matrix.platform }}"
+          mode     = "${{ inputs.mode }}"
+          suffix   = ".exe" if platform == "windows" else ""
+          name     = f"gravwell-collect-{mode}{suffix}"
+
+          dist = pathlib.Path("dist")
+          candidates = list(dist.glob("gravwell-collect-*"))
+          binary_path = next((p for p in candidates if p.suffix in (".exe", "") and p.is_file()), None)
+          if not binary_path:
+              print(f"No binary found in dist/: {candidates}")
+              sys.exit(1)
+
+          data = binary_path.read_bytes()
+
+          # Multipart form upload
+          boundary = "----GravWellBoundary"
+          body = (
+              f"--{boundary}\r\n"
+              f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+              f"Content-Type: application/octet-stream\r\n\r\n"
+          ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+          server = "${{ secrets.GRAVWELL_SERVER_URL }}".rstrip("/")
+          token  = "${{ secrets.GRAVWELL_ADMIN_TOKEN }}"
+          url    = f"{server}/api/agent/upload?platform={platform}&mode={mode}"
+
+          req = urllib.request.Request(
+              url, data=body, method="POST",
+              headers={
+                  "Content-Type": f"multipart/form-data; boundary={boundary}",
+                  "X-Gravwell-Admin": token,
+              },
+          )
+          import ssl
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode    = ssl.CERT_NONE
+          try:
+              with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                  print(f"Uploaded {name} ({len(data):,} bytes) → {resp.read().decode()}")
+          except urllib.error.HTTPError as exc:
+              print(f"Upload failed HTTP {exc.code}: {exc.read().decode()}")
+              sys.exit(1)

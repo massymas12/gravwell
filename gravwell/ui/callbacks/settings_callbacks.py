@@ -130,10 +130,11 @@ def _render_tokens_table() -> html.Div:
     ])
     rows = []
     for tok in tokens:
-        label = tok["label"]
+        label    = tok["label"]
+        token_id = tok.get("id") or label   # fall back to label for legacy tokens
         revoke_btn = html.Button(
             "Revoke",
-            id={"type": "revoke-token-btn", "label": label},
+            id={"type": "revoke-token-btn", "token_id": token_id},
             n_clicks=0,
             style={"background": "none", "border": "1px solid #555",
                    "color": "#E74C3C", "cursor": "pointer",
@@ -463,7 +464,7 @@ def register(app: dash.Dash) -> None:
         Output("build-configured-btn", "style"),
         Output("build-configured-btn", "children"),
         Input("generate-token-btn", "n_clicks"),
-        Input({"type": "revoke-token-btn", "label": dash.ALL}, "n_clicks"),
+        Input({"type": "revoke-token-btn", "token_id": dash.ALL}, "n_clicks"),
         State("new-token-label-input", "value"),
         prevent_initial_call=True,
     )
@@ -526,14 +527,14 @@ def register(app: dash.Dash) -> None:
                     server_url, plain, build_btn_style,
                     "↓ Build pre-configured binary (this platform)")
 
-        # Revoke token
+        # Revoke token (by unique ID — never revokes more than one)
         if isinstance(triggered, dict) and triggered.get("type") == "revoke-token-btn":
             if not any(revoke_clicks_list):
                 return _nu8
-            label = triggered.get("label", "")
-            if label:
-                at.revoke(label, db_path)
-            return (_render_tokens_table(), "", f"Token '{label}' revoked.",
+            token_id = triggered.get("token_id", "")
+            if token_id:
+                at.revoke_by_id(token_id, db_path)
+            return (_render_tokens_table(), "", f"Token revoked.",
                     no_update, no_update, no_update, no_update)
 
         return _nu8

@@ -58,6 +58,7 @@ def create_token(label: str, db_path: str) -> str:
     token = secrets.token_hex(32)
     entries = _load()
     entries.append({
+        "id": secrets.token_hex(8),   # unique identifier for per-token revocation
         "hash": _hash(token),
         "label": label,
         "db_path": str(db_path),
@@ -80,12 +81,26 @@ def validate_token(token: str) -> Optional[str]:
 
 
 def list_for_project(db_path: str) -> list[dict]:
-    """Return label + created_at for all active tokens belonging to *db_path*."""
+    """Return id + label + created_at for all active tokens belonging to *db_path*."""
     return [
-        {"label": e["label"], "created_at": e["created_at"]}
+        {"id": e.get("id", ""), "label": e["label"], "created_at": e["created_at"]}
         for e in _load()
         if e.get("active") and e.get("db_path") == str(db_path)
     ]
+
+
+def revoke_by_id(token_id: str, db_path: str) -> bool:
+    """Deactivate the single token matching *token_id* + *db_path*."""
+    entries = _load()
+    changed = False
+    for e in entries:
+        if e.get("id") == token_id and e.get("db_path") == str(db_path) and e.get("active"):
+            e["active"] = False
+            changed = True
+            break
+    if changed:
+        _save(entries)
+    return changed
 
 
 def revoke(label: str, db_path: str) -> bool:

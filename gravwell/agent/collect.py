@@ -39,49 +39,185 @@ from typing import Dict, List, Optional, Tuple
 
 VERSION = "1.1"
 
-# ── Top-port list ─────────────────────────────────────────────────────────────
+# ── Port lists ────────────────────────────────────────────────────────────────
+
 _TOP_PORTS: List[Tuple[int, str]] = [
+    # ── Remote access ──────────────────────────────────────────
     (21,    "ftp"),
     (22,    "ssh"),
     (23,    "telnet"),
-    (25,    "smtp"),
-    (53,    "dns"),
-    (80,    "http"),
-    (88,    "kerberos"),
-    (110,   "pop3"),
-    (111,   "rpcbind"),
-    (135,   "msrpc"),
-    (139,   "netbios-ssn"),
-    (143,   "imap"),
-    (389,   "ldap"),
-    (443,   "https"),
-    (445,   "smb"),
-    (636,   "ldaps"),
-    (993,   "imaps"),
-    (995,   "pop3s"),
-    (1433,  "mssql"),
-    (1521,  "oracle-db"),
-    (2049,  "nfs"),
-    (2375,  "docker"),
-    (2376,  "docker-tls"),
-    (3306,  "mysql"),
     (3389,  "rdp"),
-    (5432,  "postgresql"),
     (5900,  "vnc"),
+    (5901,  "vnc-1"),
     (5985,  "winrm"),
     (5986,  "winrm-https"),
-    (6379,  "redis"),
-    (6443,  "kubernetes-api"),
+    # ── Windows / AD ───────────────────────────────────────────
+    (88,    "kerberos"),
+    (135,   "msrpc"),
+    (139,   "netbios-ssn"),
+    (389,   "ldap"),
+    (445,   "smb"),
+    (636,   "ldaps"),
+    (3268,  "ldap-gc"),
+    (3269,  "ldaps-gc"),
+    # ── Web ────────────────────────────────────────────────────
+    (80,    "http"),
+    (443,   "https"),
     (8080,  "http-alt"),
     (8443,  "https-alt"),
     (8888,  "jupyter"),
+    (8000,  "http-dev"),
+    (8008,  "http-alt2"),
+    # ── Mail ───────────────────────────────────────────────────
+    (25,    "smtp"),
+    (110,   "pop3"),
+    (143,   "imap"),
+    (465,   "smtps"),
+    (587,   "smtp-submission"),
+    (993,   "imaps"),
+    (995,   "pop3s"),
+    # ── DNS / NTP / infrastructure ─────────────────────────────
+    (53,    "dns"),
+    (111,   "rpcbind"),
+    # ── Databases ──────────────────────────────────────────────
+    (1433,  "mssql"),
+    (1521,  "oracle-db"),
+    (3306,  "mysql"),
+    (5432,  "postgresql"),
+    (6379,  "redis"),
     (9200,  "elasticsearch"),
-    (10250, "kubelet"),
     (27017, "mongodb"),
+    (5984,  "couchdb"),
+    (7474,  "neo4j"),
+    # ── Linux / Unix ───────────────────────────────────────────
+    (2049,  "nfs"),
+    (512,   "rexec"),
+    (513,   "rlogin"),
+    (514,   "rsh"),
+    # ── macOS ──────────────────────────────────────────────────
+    (548,   "afp"),
+    (3283,  "apple-remote-desktop"),
+    # ── Containers / orchestration ─────────────────────────────
+    (2375,  "docker"),
+    (2376,  "docker-tls"),
+    (2379,  "etcd"),
+    (6443,  "kubernetes-api"),
+    (10250, "kubelet"),
+    # ── VoIP ───────────────────────────────────────────────────
+    (5060,  "sip"),
+    (5061,  "sip-tls"),
+    # ── Printers ───────────────────────────────────────────────
+    (515,   "lpd"),
+    (631,   "ipp"),
+    (9100,  "jetdirect"),
+    # ── Network / management ───────────────────────────────────
+    (179,   "bgp"),
+    (830,   "netconf"),
+    (8291,  "mikrotik-winbox"),
+    # ── Media / cameras ────────────────────────────────────────
+    (554,   "rtsp"),
+    (8554,  "rtsp-alt"),
+    # ── Hypervisors ────────────────────────────────────────────
+    (902,   "vmware-esxi"),
+    (5480,  "vmware-appliance"),
 ]
 
 # Ports where we attempt to read a plain-text banner
-_BANNER_PORTS = {21, 22, 25, 80, 110, 143, 8080}
+_BANNER_PORTS = {21, 22, 25, 80, 110, 143, 514, 8080}
+
+# ── OS / role inference ───────────────────────────────────────────────────────
+# Maps open port sets → (os_family_hint, role_tags).
+# Evaluated in order; first match wins for os_family, all matches accumulate tags.
+
+_ROLE_SIGNATURES: List[Tuple[set, Optional[str], List[str]]] = [
+    # Windows / AD
+    ({445, 135},            "Windows",  ["smb"]),
+    ({445, 88},             "Windows",  ["dc"]),          # Domain Controller
+    ({445, 88, 389},        "Windows",  ["dc"]),
+    ({3389},                "Windows",  ["rdp"]),
+    ({5985},                "Windows",  ["winrm"]),
+    ({139},                 "Windows",  []),
+    # Linux
+    ({22, 111},             "Linux",    []),
+    ({22, 2049},            "Linux",    ["nfs"]),
+    ({22, 514},             "Linux",    []),
+    # macOS
+    ({548},                 "macOS",    []),
+    ({3283},                "macOS",    []),
+    ({548, 5900},           "macOS",    []),
+    # Web servers
+    ({80, 443},             None,       ["web"]),
+    ({80},                  None,       ["web"]),
+    ({443},                 None,       ["web"]),
+    # Databases
+    ({3306},                None,       ["db"]),           # MySQL
+    ({5432},                None,       ["db"]),           # PostgreSQL
+    ({1433},                None,       ["db"]),           # MSSQL
+    ({27017},               None,       ["db"]),           # MongoDB
+    ({6379},                None,       ["db"]),           # Redis
+    ({1521},                None,       ["db"]),           # Oracle
+    # Mail
+    ({25, 143},             None,       ["mail"]),
+    ({25, 993},             None,       ["mail"]),
+    # Printers
+    ({9100},                None,       ["printer"]),
+    ({515},                 None,       ["printer"]),
+    ({631},                 None,       ["printer"]),
+    # VoIP
+    ({5060},                None,       ["voip"]),
+    ({5061},                None,       ["voip"]),
+    # Cameras / media
+    ({554},                 None,       ["camera"]),
+    ({8554},                None,       ["camera"]),
+    # Containers / orchestration
+    ({2375},                None,       ["docker"]),
+    ({2376},                None,       ["docker"]),
+    ({6443},                None,       ["kubernetes"]),
+    ({10250},               None,       ["kubernetes"]),
+    # Hypervisors
+    ({902},                 None,       ["hypervisor"]),
+    ({5480},                None,       ["hypervisor"]),
+    # Network devices (SSH + no SMB/RDP — router/switch heuristic)
+    ({22},                  None,       []),               # too generic alone
+    ({23},                  "Network",  ["legacy-mgmt"]),
+    ({179},                 "Network",  ["router"]),
+    ({830},                 "Network",  ["router"]),
+    ({8291},                "Network",  ["router"]),       # MikroTik
+    # Remote access
+    ({5900},                None,       ["vnc"]),
+    ({3389},                None,       ["rdp"]),
+]
+
+
+def infer_os_and_roles(open_ports: List[int]) -> Tuple[Optional[str], List[str]]:
+    """Return (os_family_hint, role_tags) inferred from a set of open ports."""
+    port_set = set(open_ports)
+    os_hint: Optional[str] = None
+    roles: List[str] = []
+    seen_tags: set = set()
+
+    for sig_ports, sig_os, sig_tags in _ROLE_SIGNATURES:
+        if sig_ports.issubset(port_set):
+            if os_hint is None and sig_os:
+                os_hint = sig_os
+            for tag in sig_tags:
+                if tag not in seen_tags:
+                    roles.append(tag)
+                    seen_tags.add(tag)
+
+    # Network device heuristic: SSH only, no Windows/Linux-specific ports
+    windows_ports = {135, 139, 445, 3389, 5985, 5986, 88, 389}
+    linux_ports   = {111, 2049, 514}
+    web_ports     = {80, 443, 8080, 8443}
+    if (22 in port_set
+            and not port_set & windows_ports
+            and not port_set & linux_ports
+            and not port_set & web_ports
+            and len(port_set) <= 3):
+        if os_hint is None:
+            os_hint = "Network"
+
+    return os_hint, roles
 
 
 # ── Own system information ────────────────────────────────────────────────────
@@ -532,56 +668,166 @@ def _ipv6_neighbors_macos() -> List[dict]:
     return neighbors
 
 
-# ── Ping sweep ────────────────────────────────────────────────────────────────
+# ── Host discovery ────────────────────────────────────────────────────────────
 
-def ping_sweep(
+# Ports probed to determine liveness when ICMP is blocked.
+# One hit on any port = host is alive. Covers all major OS/device types:
+#   Windows:  135, 445, 3389
+#   Linux:    22
+#   macOS:    22, 548
+#   Web:      80, 443, 8080, 8443
+#   Printers: 9100, 631
+#   Network:  23
+#   Cameras:  554
+#   VoIP:     5060
+_PROBE_PORTS = [22, 80, 135, 443, 445, 548, 554, 631, 3389, 5060, 8080, 8443, 9100, 23]
+
+
+def host_discovery(
     networks: List[str],
     timeout_secs: float = 1.0,
     workers: int = 200,
 ) -> List[str]:
-    """Ping all hosts in the given CIDR networks. Returns list of live IPs.
+    """Discover live hosts across the given CIDR networks.
 
-    Tries fping first (much faster); falls back to parallel ping.
-    Networks larger than /24 are chunked into /24 slices.
+    Priority:
+      1. nmap -sn  — multi-probe (ARP + TCP SYN 443 + TCP ACK 80 + ICMP).
+                     Most reliable; used when nmap is available.
+      2. TCP probe — connect to common ports; works even when ICMP is blocked.
+                     Used as primary fallback without nmap.
+      3. ICMP ping — supplement to catch hosts with no open TCP ports
+                     (e.g. routers, printers, embedded devices).
+                     fping used when available, else threaded system ping.
+
+    Returns a deduplicated list of live IPs.
     """
+    targets = _expand_networks(networks)
+    if not targets:
+        return []
+
+    _info(f"Host discovery: {len(targets)} targets across {len(networks)} network(s)…")
+
+    # 1. nmap -sn
+    live = _nmap_host_discovery(targets, timeout_secs)
+    if live is not None:
+        _info(f"Host discovery done (nmap -sn): {len(live)} hosts")
+        return live
+
+    # 2. TCP probe (primary — works through host firewalls that block ICMP)
+    live_set: set = set()
+    tcp_live = _tcp_probe_sweep(targets, timeout_secs, workers)
+    live_set.update(tcp_live)
+    _info(f"  TCP probe: {len(tcp_live)} hosts responded")
+
+    # 3. ICMP ping (supplement — catches ICMP-only devices like routers/printers)
+    icmp_live = _icmp_sweep(targets, timeout_secs, workers)
+    new_icmp = [ip for ip in icmp_live if ip not in live_set]
+    if new_icmp:
+        _info(f"  ICMP ping: {len(new_icmp)} additional hosts")
+    live_set.update(icmp_live)
+
+    _info(f"Host discovery done: {len(live_set)} hosts")
+    return list(live_set)
+
+
+def _expand_networks(networks: List[str]) -> List[str]:
+    """Expand CIDR networks into individual host IPs, chunking large nets at /24."""
     targets: List[str] = []
     for net_str in networks:
         try:
             net = ipaddress.IPv4Network(net_str, strict=False)
             if net.prefixlen < 24:
-                # Chunk into /24 slices to avoid massive target lists
-                slices = list(net.subnets(new_prefix=24))
-                for s in slices:
-                    targets.extend(str(h) for h in s.hosts())
+                for subnet in net.subnets(new_prefix=24):
+                    targets.extend(str(h) for h in subnet.hosts())
             else:
                 targets.extend(str(h) for h in net.hosts())
         except ValueError:
             continue
+    return targets
 
-    if not targets:
-        return []
 
-    _info(f"Ping sweep: {len(targets)} targets across {len(networks)} network(s)…")
+def _nmap_host_discovery(targets: List[str], timeout_secs: float) -> Optional[List[str]]:
+    """Use nmap -sn for multi-probe host discovery. Returns None if nmap unavailable."""
+    import shutil
+    if not shutil.which("nmap"):
+        return None
+    try:
+        timing = "-T4" if timeout_secs <= 1.0 else "-T3"
+        cmd = ["nmap", "-sn", timing, "--open"] + targets
+        _info("  Using nmap -sn for host discovery…")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
-    # Try fping first — orders of magnitude faster
-    responding = _fping_sweep(targets, timeout_secs)
-    if responding is not None:
-        _info(f"Ping sweep done (fping): {len(responding)} hosts responded")
-        return responding
+        import xml.etree.ElementTree as ET
+        # nmap -sn without -oX prints to stdout in text; use -oX -
+        # Re-run with XML output
+        cmd_xml = ["nmap", "-sn", "-oX", "-", timing] + targets
+        r = subprocess.run(cmd_xml, capture_output=True, text=True, timeout=600)
+        xml_out = r.stdout.strip()
+        if not xml_out.startswith("<?xml"):
+            return None
 
-    # Fallback: threaded per-host ping
+        root = ET.fromstring(xml_out)
+        live = []
+        for host_el in root.findall("host"):
+            state = host_el.find("status")
+            if state is None or state.get("state") != "up":
+                continue
+            addr_el = host_el.find('address[@addrtype="ipv4"]')
+            if addr_el is not None:
+                live.append(addr_el.get("addr", ""))
+        return [ip for ip in live if ip]
+    except Exception as exc:
+        _warn(f"nmap -sn failed ({exc}), falling back to TCP+ICMP discovery")
+        return None
+
+
+def _tcp_probe_sweep(targets: List[str], timeout_secs: float,
+                     workers: int) -> List[str]:
+    """TCP connect probe: a host is alive if any probe port accepts a connection."""
+    live: List[str] = []
+    lock = threading.Lock()
+    # Use a shorter timeout for the probe — we just need to know if it's up
+    probe_timeout = min(timeout_secs, 0.5)
+
+    def _probe(ip: str) -> Optional[str]:
+        for port in _PROBE_PORTS:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(probe_timeout)
+                if s.connect_ex((ip, port)) == 0:
+                    s.close()
+                    return ip
+                s.close()
+            except Exception:
+                pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for result in ex.map(_probe, targets):
+            if result:
+                with lock:
+                    live.append(result)
+    return live
+
+
+def _icmp_sweep(targets: List[str], timeout_secs: float,
+                workers: int) -> List[str]:
+    """ICMP ping sweep. Uses fping when available, else threaded system ping."""
+    # Try fping first
+    fping_result = _fping_sweep(targets, timeout_secs)
+    if fping_result is not None:
+        return fping_result
+
     system = platform.system()
-    responding = []
+    live: List[str] = []
     lock = threading.Lock()
 
     def _ping(ip: str) -> Optional[str]:
         if system == "Windows":
             cmd = ["ping", "-n", "1", "-w", str(int(timeout_secs * 1000)), ip]
         elif system == "Darwin":
-            # macOS -W is in milliseconds
             cmd = ["ping", "-c", "1", "-W", str(int(timeout_secs * 1000)), ip]
         else:
-            # Linux -W is in seconds (integer)
             cmd = ["ping", "-c", "1", "-W", str(max(1, int(timeout_secs))), ip]
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=timeout_secs + 2)
@@ -593,10 +839,8 @@ def ping_sweep(
         for result in ex.map(_ping, targets):
             if result:
                 with lock:
-                    responding.append(result)
-
-    _info(f"Ping sweep done: {len(responding)} hosts responded")
-    return responding
+                    live.append(result)
+    return live
 
 
 def _fping_sweep(targets: List[str], timeout_secs: float) -> Optional[List[str]]:
@@ -615,7 +859,7 @@ def _fping_sweep(targets: List[str], timeout_secs: float) -> Optional[List[str]]
         )
         return [line.strip() for line in r.stdout.decode().splitlines() if line.strip()]
     except Exception as exc:
-        _warn(f"fping failed ({exc}), falling back to ping")
+        _warn(f"fping failed ({exc}), falling back to system ping")
         return None
 
 
@@ -662,12 +906,18 @@ def port_scan(
                         port_entry["banner"] = banner
                     results[ip]["open_ports"].append(port_entry)
 
-    # Reverse DNS for each discovered host
+    # Reverse DNS + OS/role inference for each discovered host
     for ip, data in results.items():
         try:
             data["hostname"] = socket.gethostbyaddr(ip)[0]
         except Exception:
             pass
+        open_port_nums = [p["port"] for p in data["open_ports"]]
+        os_hint, roles = infer_os_and_roles(open_port_nums)
+        if os_hint:
+            data["os_hint"] = os_hint
+        if roles:
+            data["role_hints"] = roles
 
     _info(f"Port scan done: {len(results)} host(s) with open ports")
     return list(results.values())
@@ -771,6 +1021,13 @@ def _nmap_scan(ips: List[str], timeout: float) -> Optional[List[dict]]:
                 entry["open_ports"].append(port_entry)
 
             if entry["open_ports"]:
+                open_port_nums = [p["port"] for p in entry["open_ports"]]
+                os_inferred, roles = infer_os_and_roles(open_port_nums)
+                # Only set os_hint from inference if nmap -O didn't already provide one
+                if not entry.get("os_hint") and os_inferred:
+                    entry["os_hint"] = os_inferred
+                if roles:
+                    entry["role_hints"] = roles
                 results.append(entry)
 
         _info(f"nmap done: {len(results)} host(s) with open ports")
@@ -883,7 +1140,7 @@ Examples:
     parser.add_argument("--output", "-o", default="", help="Output file path (default: auto-named)")
     parser.add_argument("--server", "-s", default="", help="GravWell server URL")
     parser.add_argument("--key", "-k", default="", help="API key for server upload")
-    parser.add_argument("--no-sweep", action="store_true", help="Skip ping sweep")
+    parser.add_argument("--no-sweep", action="store_true", help="Skip active host discovery (TCP probe + ping)")
     parser.add_argument("--no-scan", action="store_true", help="Skip port scan")
     parser.add_argument("--routes", action="store_true",
                         help="Also sweep routed (non-directly-attached) subnets")
@@ -944,7 +1201,7 @@ Examples:
             sweep_nets += [n for n in routed_nets if n not in sweep_nets]
 
         if sweep_nets:
-            live = ping_sweep(sweep_nets, timeout_secs=args.timeout, workers=args.workers)
+            live = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers)
             existing = {n["ip"] for n in neighbors}
             for ip in live:
                 if ip not in existing:

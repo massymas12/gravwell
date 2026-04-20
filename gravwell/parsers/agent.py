@@ -122,9 +122,24 @@ class AgentParser(BaseParser):
             # Update MAC from nmap if missing
             if not host.mac and scan.get("mac"):
                 host.mac = scan["mac"]
-            # Apply OS hint from nmap -O
-            if scan.get("os_hint") and not host.os_name:
-                host.os_name = scan["os_hint"]
+            # Apply OS hint (from nmap -O or port-based inference)
+            if scan.get("os_hint"):
+                hint = scan["os_hint"]
+                if not host.os_name:
+                    host.os_name = hint
+                # Map hint to os_family if not already set
+                if not host.os_family:
+                    _family_map = {
+                        "Windows": "Windows",
+                        "Linux":   "Linux",
+                        "macOS":   "Linux",   # closest available family
+                        "Network": "Network",
+                    }
+                    host.os_family = _family_map.get(hint)
+            # Apply role hints as tags
+            for role in (scan.get("role_hints") or []):
+                if role not in host.tags:
+                    host.tags.append(role)
             for port_info in (scan.get("open_ports") or []):
                 port = port_info.get("port")
                 if not port:

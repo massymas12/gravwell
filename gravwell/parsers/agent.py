@@ -72,12 +72,24 @@ class AgentParser(BaseParser):
             if scan.get("hostname"):
                 scan_hostnames[ip] = scan["hostname"]
 
+        # Pre-index os_hint and mac from scan results for merge
+        scan_os_hints: dict[str, str] = {}
+        scan_macs: dict[str, str] = {}
+        for scan in (data.get("port_scan") or []):
+            ip = scan.get("ip")
+            if not ip:
+                continue
+            if scan.get("os_hint"):
+                scan_os_hints[ip] = scan["os_hint"]
+            if scan.get("mac"):
+                scan_macs[ip] = scan["mac"]
+
         # ── 2. Neighbours (ARP / ping sweep) ─────────────────────────────────
         for neighbor in (data.get("neighbors") or []):
             ip = neighbor.get("ip")
             if not ip or ip in host_map:
                 continue
-            mac = neighbor.get("mac") or None
+            mac = neighbor.get("mac") or scan_macs.get(ip) or None
             hn = neighbor.get("hostname") or scan_hostnames.get(ip) or ""
             h = Host(
                 ip=ip,
@@ -98,6 +110,7 @@ class AgentParser(BaseParser):
                 h = Host(
                     ip=ip,
                     hostnames=[hn] if hn else [],
+                    mac=scan.get("mac") or None,
                     tags=["scan-only"],
                 )
                 host_map[ip] = h
@@ -106,6 +119,12 @@ class AgentParser(BaseParser):
             # Update hostname from scan if missing
             if not host.hostnames and scan.get("hostname"):
                 host.hostnames = [scan["hostname"]]
+            # Update MAC from nmap if missing
+            if not host.mac and scan.get("mac"):
+                host.mac = scan["mac"]
+            # Apply OS hint from nmap -O
+            if scan.get("os_hint") and not host.os_name:
+                host.os_name = scan["os_hint"]
             for port_info in (scan.get("open_ports") or []):
                 port = port_info.get("port")
                 if not port:

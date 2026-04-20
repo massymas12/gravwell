@@ -216,35 +216,8 @@ def cached_builds() -> dict:
 
 def _generate_script(server: str = "", token: str = "", local_only: bool = False) -> str:
     """Return a customized collect.py source with embedded defaults baked in."""
-    source = _AGENT_PY.read_text(encoding="utf-8")
-
-    config_block = (
-        "\n# ── Embedded configuration (pre-configured by GravWell server) ──────────────\n"
-        f"_EMBEDDED_SERVER: str = {repr(server)}\n"
-        f"_EMBEDDED_KEY: str    = {repr(token)}\n"
-        f"_LOCAL_ONLY: bool     = {repr(local_only)}\n"
-        "# ─────────────────────────────────────────────────────────────────────────────\n"
-    )
-    source = source.replace('VERSION = "1.0"', 'VERSION = "1.0"' + config_block, 1)
-
-    # Bake server / key into argparse defaults
-    source = source.replace(
-        'parser.add_argument("--server", "-s", default="", help="GravWell server URL")',
-        'parser.add_argument("--server", "-s", default=_EMBEDDED_SERVER, help="GravWell server URL")',
-    )
-    source = source.replace(
-        'parser.add_argument("--key", "-k", default="", help="API key for server upload")',
-        'parser.add_argument("--key", "-k", default=_EMBEDDED_KEY, help="API key for server upload")',
-    )
-
-    # Local-only: suppress upload even if --server is passed
-    if local_only:
-        source = source.replace(
-            "    # 7. Upload if requested\n    if args.server:",
-            "    # 7. Upload if requested\n    if args.server and not _LOCAL_ONLY:",
-        )
-
-    return source
+    from gravwell.agent.build import generate_script
+    return generate_script(server=server, token=token, local_only=local_only)
 
 
 @api_bp.route("/api/agent/download/py", methods=["GET"])

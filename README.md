@@ -13,10 +13,10 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
 - **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
-- **CVE enrichment** — CISA KEV + FIRST.org EPSS exploit probability signals fetched on demand
+- **CVE enrichment** — CISA KEV (is this CVE actively exploited in the wild?), FIRST.org EPSS (0–100% probability of exploitation in the next 30 days), and NIST NVD CVSS v3 base scores — all fetched on demand and overlaid on every vulnerability view and export
 - **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover) and per-project access control; all managed from the web UI
 - **Multi-project** — separate encrypted databases per engagement; create, rename, and delete from the sidebar
-- **Active discovery** — ping sweep, ARP, TCP port scan, UDP probes (DNS/NTP/SNMP), SNMP enumeration with neighbor walk (ARP cache, CDP, LLDP)
+- **Active discovery** — ping sweep, ARP, TCP port scan, UDP probes (DNS/NTP/SNMP — no raw sockets required), SNMP enumeration with neighbour walk (ARP cache, CDP, LLDP); also available as `gravwell discover` CLI command
 - **Passive discovery** — sniff a VPN or network interface to find hosts that won't respond to active probes; tags DNS resolver sources automatically
 - **CLI + Web UI** — full-featured CLI for scripted workflows, browser-based UI for analysis
 
@@ -38,6 +38,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 | **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
 | **Juniper JunOS** | `show` command output | Interfaces, routes, version |
 | **Fortinet FortiOS** | `show` / `get` output | Interfaces, routing, system info |
+| **Huawei VRP** | `display current-configuration` output | Interfaces, routing, system info |
 | **Palo Alto PAN-OS** | XML operational output | Interfaces, routing, system info |
 
 All formats are auto-detected. You can also force a specific parser with `--format`.
@@ -241,9 +242,22 @@ gravwell list hosts [--min-cvss N]            List discovered hosts
 gravwell list hosts [--os Windows]            Filter by OS family
 gravwell list hosts [--subnet 10.0.0.0/24]   Filter by subnet
 gravwell list services [--ip IP] [--port N]   List open services
-gravwell list vulns [--ip IP]                 List vulnerabilities
+gravwell list vulns [--ip IP]                         List vulnerabilities
+gravwell list vulns [--min-cvss N]                    Filter by minimum CVSS score
+gravwell list vulns [--severity critical|high|...]    Filter by severity band
 
 gravwell path <src-ip> <dst-ip>               Show attack path between two hosts
+
+gravwell discover <target-cidr>               Run active discovery (ping/ARP/TCP/UDP/SNMP)
+gravwell discover <target-cidr> \
+  --methods ping,tcp,snmp \                   Select discovery methods (default: all)
+  --community public \                        SNMP community string
+  --snmp-port 161 \                           SNMP port (default: 161)
+  --tcp-ports 22,80,443,445,3389 \           Custom TCP port list (default: common ports)
+  --workers 64 \                              Parallel threads (default: 64)
+  --no-follow-neighbors                       Skip ARP/CDP/LLDP neighbor walk on SNMP devices
+
+gravwell merge-macs [--dry-run]               Merge hosts sharing a MAC address into one node
 
 gravwell serve [--port PORT] [--host HOST]    Start the web server
 gravwell reset                                Wipe all data in the current project
@@ -313,6 +327,22 @@ Every user has a **Role** and a set of **Permissions**, configured at creation t
 
 The graph view visualises every discovered host as a node, grouped into coloured subnet boxes. Edges represent relationships between hosts.
 
+### Layout algorithms
+
+Switch between layouts with the **Layout** dropdown in the graph toolbar:
+
+| Layout | Description |
+|--------|-------------|
+| **preset** | Restores saved node positions from the last manual drag-and-drop arrangement |
+| **cose-bilkent** | Force-directed spring embedder, compound-aware — default after first import |
+| **cose-bilkent (spread)** | Same algorithm with higher repulsion — better separation for dense graphs |
+| **cola** | Constraint-based layout with uniform node spacing |
+| **concentric** | Nodes arranged in concentric rings by betweenness centrality |
+| **breadthfirst** | Hierarchical top-down tree from the most-connected hub |
+| **grid** | Cartesian grid — useful for quick overviews of large flat networks |
+
+Node positions are automatically saved after each drag. The **preset** layout restores them on every subsequent page load so manual arrangement persists across browser refreshes and re-ingestions.
+
 ### Edge types
 
 | Edge | Style | Description |
@@ -360,6 +390,37 @@ Tags from all three sources are merged in the database, so re-ingesting a file o
 
 Hold **Shift** and drag on the empty canvas to draw a box selection over multiple nodes. Then drag any selected node to move the entire group together.
 
+### Graph filters
+
+The **Filters** panel in the sidebar supports:
+
+| Filter | Syntax |
+|--------|--------|
+| Hostname | Plain substring · `"exact match"` · wildcards `*` and `?` |
+| Subnet | CIDR (`10.3.0.0/16`), single IP, or wildcard |
+| OS family | Multi-select dropdown (Windows, Linux, macOS, Network, Unknown) |
+| Min CVSS | Numeric threshold — hides hosts with no CVSSv3 score above the value |
+| Port / service | Port number or service name substring |
+
+### Host editing
+
+Click any node to open the detail panel, then click **Edit** to:
+
+- Set a custom **hostname**, **OS**, **MAC**, **notes**, and **tags**
+- Assign a **manual role** (router, gateway, domain controller, etc.) overriding auto-detection
+- Force a **subnet override** — pin the host to a specific CIDR group regardless of its IP
+- **Hide specific auto-generated edges** (right-click an edge → Hide)
+
+### Data export
+
+**☰ → Export** produces:
+
+| Format | Contents |
+|--------|----------|
+| **CSV** | Two sections in one file: Hosts (IP, hostname, OS, MAC, ports, CVSS counts, tags, notes) and Vulnerabilities (CVE IDs, CVSS, severity, KEV status, EPSS score, EPSS percentile) |
+| **XLSX** | Same data as CSV but split into two labelled sheets |
+| **PNG** | Full-resolution image of the current graph at natural scale |
+
 ---
 
 ## Active & Passive Discovery
@@ -374,7 +435,7 @@ GravWell can discover hosts directly from the **Discover** section of the sideba
 | **ARP** | Reads the local ARP cache (finds hosts on directly connected subnets) |
 | **TCP** | Parallel TCP connect scan on common ports (22, 80, 443, 445, 3389, …) |
 | **UDP** | Application-level probes to DNS (53), NTP (123), and SNMP (161) — works without raw sockets |
-| **SNMP** | SNMP v1/v2c poll for sysDescr, sysName, ifTable; walks the ARP cache, CDP, and LLDP neighbor tables on responsive devices |
+| **SNMP** | SNMP v1/v2c poll for sysDescr, sysName, ifTable; walks the ARP cache, CDP, and LLDP neighbor tables on responsive devices; tries common community strings automatically (`public`, `private`, `community`, `cisco`, etc.) |
 
 Enter a target CIDR or single IP, tick the methods you want, and click **Start Discovery**. Discovered hosts are ingested immediately and appear on the graph.
 
@@ -400,10 +461,16 @@ The **Attack Paths** tab provides several automated analyses:
 | Analysis | Description |
 |----------|-------------|
 | **Shortest Path** | Weighted shortest path between any two hosts using vulnerability severity as edge cost |
-| **Path to HVT** | All attack paths to a designated high-value target |
+| **Path to HVT** | Shortest attack path from any host to the nearest automatically-identified high-value target |
+| **Pivot Candidates** | Hosts ranked by betweenness centrality and reachable-subnet count — the best lateral movement stepping stones |
+| **Critical Exposure** | Hosts combining high CVSS scores with sensitive role classification (DC, credential store, etc.) |
+| **High-Value Targets** | Auto-classifies hosts by role: domain controller, credential store, database, file server, web server, mail server, network device, remote access gateway |
+| **Legacy Systems** | End-of-life OS detection with EOL dates (Windows XP/7/2008/2012, CentOS 6/7/8, Ubuntu LTS, Debian, RHEL) |
 | **Kerberoastable** | Windows hosts with registered SPNs likely vulnerable to Kerberoasting; uses multi-signal confidence scoring (OS, domain tag, open ports) |
-| **SMB Lateral** | Hosts at risk of SMB credential relay or lateral movement |
-| **Admin Interfaces** | Hosts with management interfaces exposed (RDP, SSH, WinRM, IPMI, etc.) |
+| **SMB Lateral** | Hosts at risk of SMB lateral movement, scored by number of SMB-reachable neighbours |
+| **Cleartext Services** | Hosts exposing credentials over unencrypted protocols: FTP (21), Telnet (23), HTTP (80), IMAP (143), POP3 (110), SMTP (25), etc. |
+| **Admin Interfaces** | Hosts with management interfaces exposed (RDP, SSH, WinRM, IPMI, iDRAC, etc.) |
+| **Network Segments** | Disconnected components in the graph — isolated network islands with no visible path to the rest |
 | **AD Enum** | Domain enumeration findings from enum4linux: group names, password policy weaknesses, SMB signing status |
 
 Clicking any IP or hostname in analysis results pans the graph to that node. Clicking a row in the Services or Vulnerabilities sub-tabs does the same.

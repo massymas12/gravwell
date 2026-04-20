@@ -568,13 +568,6 @@ def register(app: dash.Dash) -> None:
         else:
             return no_update
 
-        if not shutil.which("pyinstaller"):
-            return html.Span(
-                "PyInstaller not installed on this server. "
-                "Run: pip install pyinstaller",
-                style={"color": "#E74C3C"},
-            )
-
         from gravwell.ui.api import _generate_script, _AGENT_PY
         local_only = (mode == "local")
         source = _generate_script(server=server, token=token, local_only=local_only)

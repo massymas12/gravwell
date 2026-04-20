@@ -251,12 +251,6 @@ def build_agent():
     if not _AGENT_PY.exists():
         return jsonify(error="Agent script not found on server"), 404
 
-    if not shutil.which("pyinstaller"):
-        return jsonify(
-            error="PyInstaller not installed on this server. "
-                  "Run: pip install pyinstaller  then retry."
-        ), 500
-
     body = request.get_json(silent=True) or {}
     server     = (body.get("server") or "").strip()
     token      = (body.get("token")  or "").strip()

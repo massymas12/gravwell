@@ -110,3 +110,48 @@ def list_tokens():
         return jsonify(tokens=[])
 
     return jsonify(tokens=agent_tokens.list_for_project(db_path))
+
+
+@api_bp.route("/api/agent/tokens", methods=["POST"])
+def create_token():
+    """Create a new agent token for the current project.
+
+    Admin only. The plain token is returned once in the response — it
+    cannot be recovered later (only the hash is stored).
+    """
+    if not current_user.is_authenticated or not current_user.is_admin:
+        return jsonify(error="Admin access required"), 403
+
+    db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
+    if not db_path:
+        return jsonify(error="No active project"), 400
+
+    body = request.get_json(silent=True) or {}
+    label = (body.get("label") or "default").strip() or "default"
+
+    token = agent_tokens.create_token(label, db_path)
+    logger.info("Agent token created: label=%r project=%s by %s",
+                label, pathlib.Path(db_path).stem, current_user.username)
+    return jsonify(token=token, label=label), 201
+
+
+@api_bp.route("/api/agent/tokens/<label>", methods=["DELETE"])
+def revoke_token(label: str):
+    """Revoke all tokens with the given label for the current project.
+
+    Admin only.
+    """
+    if not current_user.is_authenticated or not current_user.is_admin:
+        return jsonify(error="Admin access required"), 403
+
+    db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
+    if not db_path:
+        return jsonify(error="No active project"), 400
+
+    changed = agent_tokens.revoke(label, db_path)
+    if not changed:
+        return jsonify(error=f"No active token with label '{label}'"), 404
+
+    logger.info("Agent token revoked: label=%r project=%s by %s",
+                label, pathlib.Path(db_path).stem, current_user.username)
+    return jsonify(status="revoked", label=label)

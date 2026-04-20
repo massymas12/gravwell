@@ -365,6 +365,66 @@ def _create_manage_users_modal() -> html.Div:
     )
 
 
+def _create_agent_tokens_modal() -> html.Div:
+    """Modal for managing agent API tokens (admin only)."""
+    return html.Div(
+        id="agent-tokens-modal-overlay",
+        style={"display": "none"},
+        className="modal-overlay",
+        children=[
+            html.Div(
+                className="edit-modal",
+                style={"width": "600px", "maxWidth": "95vw"},
+                children=[
+                    html.Div([
+                        html.H3("Agent Tokens",
+                                style={"margin": 0, "fontSize": "15px",
+                                       "color": "#5DADE2"}),
+                        html.Button("×", id="agent-tokens-modal-close",
+                                    className="modal-close-btn"),
+                    ], className="modal-header"),
+                    html.Div([
+                        html.Div(id="agent-tokens-content",
+                                 style={"marginBottom": "12px"}),
+                        html.Hr(style={"borderColor": "#333", "margin": "8px 0"}),
+                        html.Div([
+                            html.Span("Label:",
+                                      style={"fontSize": "12px", "color": "#aaa",
+                                             "marginRight": "6px"}),
+                            dcc.Input(
+                                id="new-token-label-input",
+                                type="text",
+                                placeholder="default",
+                                value="",
+                                debounce=False,
+                                style={"flex": "1", "background": "#1a1a2e",
+                                       "border": "1px solid #444", "color": "#ccc",
+                                       "borderRadius": "3px", "padding": "4px 8px",
+                                       "fontSize": "12px"},
+                            ),
+                            html.Button("Generate Token", id="generate-token-btn",
+                                        n_clicks=0,
+                                        className="btn btn-primary btn-sm",
+                                        style={"marginLeft": "6px"}),
+                        ], style={"display": "flex", "alignItems": "center",
+                                  "gap": "4px"}),
+                        html.Div(id="agent-tokens-new-token",
+                                 style={"marginTop": "8px"}),
+                        html.Div(id="agent-tokens-status",
+                                 style={"fontSize": "11px", "color": "#5DADE2",
+                                        "marginTop": "4px"}),
+                    ], className="modal-body",
+                       style={"padding": "12px 16px"}),
+                    html.Div([
+                        html.Button("Close", id="agent-tokens-close-btn",
+                                    className="btn btn-secondary btn-sm"),
+                    ], className="modal-footer"),
+                ],
+            ),
+        ],
+    )
+
+
 def create_layout() -> html.Div:
     return html.Div(
         id="app-root",
@@ -408,6 +468,8 @@ def create_layout() -> html.Div:
             _create_add_user_modal(),
             # Manage Users modal (settings)
             _create_manage_users_modal(),
+            # Agent Tokens modal (settings)
+            _create_agent_tokens_modal(),
             # Polling interval: refresh every 5 min (300 s).
             # The graph is rebuilt from scratch on every tick, which is expensive
             # on large maps — imports fire project-switch-trigger immediately so
@@ -439,6 +501,10 @@ def create_layout() -> html.Div:
                                          n_clicks=0,
                                          style={"display": "none"}),
                                 html.Div("Manage Users", id="manage-users-menu-item",
+                                         className="hamburger-item",
+                                         n_clicks=0,
+                                         style={"display": "none"}),
+                                html.Div("Agent Tokens", id="agent-tokens-menu-item",
                                          className="hamburger-item",
                                          n_clicks=0,
                                          style={"display": "none"}),

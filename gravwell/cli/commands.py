@@ -740,6 +740,64 @@ def passwd(ctx, username):
     console.print(f"[green]Password updated for '{username}'.[/green]")
 
 
+# ── Agent token management ────────────────────────────────────────────────────
+
+@cli.group()
+def token():
+    """Manage agent API tokens for the current project."""
+
+
+@token.command("list")
+@click.pass_context
+def token_list(ctx):
+    """List active agent tokens for the current project."""
+    from gravwell import agent_tokens
+    db_path = ctx.obj["db"]
+    tokens = agent_tokens.list_for_project(db_path)
+    if not tokens:
+        console.print("[dim]No active tokens for this project.[/dim]")
+        return
+    t = Table(show_header=True, header_style="bold cyan")
+    t.add_column("Label")
+    t.add_column("Created")
+    for tok in tokens:
+        t.add_row(tok["label"], str(tok["created_at"])[:16])
+    console.print(t)
+
+
+@token.command("create")
+@click.argument("label", default="default")
+@click.pass_context
+def token_create(ctx, label):
+    """Generate a new agent token bound to the current project.
+
+    The plain token is printed once — store it securely.
+    """
+    from gravwell import agent_tokens
+    db_path = ctx.obj["db"]
+    plain = agent_tokens.create_token(label, db_path)
+    console.print(f"\n[bold green]Agent token created (label: {label})[/bold green]")
+    console.print(f"[bold yellow]  {plain}[/bold yellow]")
+    console.print("[dim]This token will not be shown again.[/dim]\n")
+
+
+@token.command("revoke")
+@click.argument("label")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.pass_context
+def token_revoke(ctx, label, yes):
+    """Revoke all tokens with the given label for the current project."""
+    from gravwell import agent_tokens
+    db_path = ctx.obj["db"]
+    if not yes:
+        click.confirm(f"Revoke token '{label}' for project {db_path}?", abort=True)
+    changed = agent_tokens.revoke(label, db_path)
+    if changed:
+        console.print(f"[yellow]Token '{label}' revoked.[/yellow]")
+    else:
+        console.print(f"[red]No active token with label '{label}' found.[/red]")
+
+
 @cli.command()
 @click.option("--yes", is_flag=True, default=False, help="Skip confirmation")
 @click.pass_context

@@ -112,6 +112,48 @@ def _render_users_table() -> html.Div:
     return html.Div([table, note])
 
 
+def _render_tokens_table() -> html.Div:
+    """Build the agent tokens table for the current project."""
+    from gravwell import agent_tokens as at
+    db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
+    tokens = at.list_for_project(db_path) if db_path else []
+
+    if not tokens:
+        return html.Div("No active tokens for this project.",
+                        style={"color": "#666", "fontSize": "12px"})
+
+    header = html.Tr([
+        html.Th(col, style={"padding": "6px 10px", "fontSize": "11px",
+                             "color": "#5DADE2", "background": "#1a1a2e",
+                             "borderBottom": "1px solid #333"})
+        for col in ("Label", "Created", "")
+    ])
+    rows = []
+    for tok in tokens:
+        label = tok["label"]
+        revoke_btn = html.Button(
+            "Revoke",
+            id={"type": "revoke-token-btn", "label": label},
+            n_clicks=0,
+            style={"background": "none", "border": "1px solid #555",
+                   "color": "#E74C3C", "cursor": "pointer",
+                   "borderRadius": "3px", "padding": "1px 8px",
+                   "fontSize": "11px"},
+        )
+        td = {"padding": "6px 10px", "borderBottom": "1px solid #222",
+              "fontSize": "12px"}
+        rows.append(html.Tr([
+            html.Td(label, style={**td, "color": "#ccc", "fontWeight": "500"}),
+            html.Td(str(tok["created_at"])[:16], style={**td, "color": "#666"}),
+            html.Td(revoke_btn, style={**td, "textAlign": "center"}),
+        ]))
+
+    return html.Table(
+        [html.Thead(header), html.Tbody(rows)],
+        style={"width": "100%", "borderCollapse": "collapse"},
+    )
+
+
 def register(app: dash.Dash) -> None:
 
     # ── Populate user store on page load ─────────────────────────────────────
@@ -135,6 +177,7 @@ def register(app: dash.Dash) -> None:
         Output("hamburger-username", "children"),
         Output("add-user-menu-item", "style"),
         Output("manage-users-menu-item", "style"),
+        Output("agent-tokens-menu-item", "style"),
         Output("export-csv-menu-item", "style"),
         Output("export-xlsx-menu-item", "style"),
         Output("export-png-menu-item", "style"),
@@ -148,7 +191,7 @@ def register(app: dash.Dash) -> None:
         label = f"Signed in as {username}" if username else ""
         admin_style  = {"display": "block"} if is_admin else {"display": "none"}
         export_style = {"display": "block"} if (is_admin or "export" in perms) else {"display": "none"}
-        return label, admin_style, admin_style, export_style, export_style, export_style
+        return label, admin_style, admin_style, admin_style, export_style, export_style, export_style
 
     # ── Hamburger toggle (open / close) + backdrop ────────────────────────────
 
@@ -354,3 +397,87 @@ def register(app: dash.Dash) -> None:
         except Exception as exc:
             return no_update, f"Error: {exc}"
         return _render_users_table(), f"User '{username}' deleted."
+
+    # ── Agent Tokens: open modal ──────────────────────────────────────────────
+
+    @app.callback(
+        Output("agent-tokens-modal-overlay", "style"),
+        Output("hamburger-menu", "style", allow_duplicate=True),
+        Output("hamburger-backdrop", "style", allow_duplicate=True),
+        Output("agent-tokens-content", "children"),
+        Output("agent-tokens-new-token", "children"),
+        Output("agent-tokens-status", "children"),
+        Input("agent-tokens-menu-item", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_agent_tokens_modal(n_clicks):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update, no_update, no_update, no_update, no_update
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update, no_update, no_update
+        return (
+            {"display": "flex"},
+            {"display": "none"},
+            {"display": "none"},
+            _render_tokens_table(),
+            "",
+            "",
+        )
+
+    @app.callback(
+        Output("agent-tokens-modal-overlay", "style", allow_duplicate=True),
+        Input("agent-tokens-modal-close", "n_clicks"),
+        Input("agent-tokens-close-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def close_agent_tokens_modal(_close, _btn):
+        return {"display": "none"}
+
+    @app.callback(
+        Output("agent-tokens-content", "children", allow_duplicate=True),
+        Output("agent-tokens-new-token", "children", allow_duplicate=True),
+        Output("agent-tokens-status", "children", allow_duplicate=True),
+        Input("generate-token-btn", "n_clicks"),
+        Input({"type": "revoke-token-btn", "label": dash.ALL}, "n_clicks"),
+        State("new-token-label-input", "value"),
+        prevent_initial_call=True,
+    )
+    def manage_agent_tokens(gen_clicks, revoke_clicks_list, label_value):
+        from dash import ctx
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return no_update, no_update, no_update
+
+        from gravwell import agent_tokens as at
+        db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
+        if not db_path:
+            return no_update, no_update, "No active project."
+
+        triggered = ctx.triggered_id
+
+        # Generate new token
+        if triggered == "generate-token-btn":
+            label = (label_value or "default").strip() or "default"
+            plain = at.create_token(label, db_path)
+            token_display = html.Div([
+                html.Div("New token — copy it now, it will not be shown again:",
+                         style={"fontSize": "11px", "color": "#E67E22",
+                                "marginBottom": "4px"}),
+                html.Code(plain, style={
+                    "display": "block", "background": "#0d1117",
+                    "color": "#27AE60", "padding": "6px 8px",
+                    "borderRadius": "3px", "fontSize": "11px",
+                    "wordBreak": "break-all", "userSelect": "all",
+                }),
+            ])
+            return _render_tokens_table(), token_display, f"Token '{label}' created."
+
+        # Revoke token
+        if isinstance(triggered, dict) and triggered.get("type") == "revoke-token-btn":
+            if not any(revoke_clicks_list):
+                return no_update, no_update, no_update
+            label = triggered.get("label", "")
+            if label:
+                at.revoke(label, db_path)
+            return _render_tokens_table(), "", f"Token '{label}' revoked."
+
+        return no_update, no_update, no_update

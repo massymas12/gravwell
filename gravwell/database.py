@@ -165,6 +165,33 @@ def migrate_to_encrypted(db_path: str, mek: bytes) -> None:
     os.replace(tmp_path, db_path)
 
 
+def ensure_agent_token(db_path: str) -> str | None:
+    """Create a default agent API token if none exists yet.
+
+    Returns the plain token on first creation (print it to the console) or
+    None when a token already exists (no need to show it again).
+    """
+    import secrets as _secrets
+    from gravwell.models.orm import AgentTokenORM
+
+    engine = _get_engine(db_path)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    session = factory()
+    try:
+        existing = session.query(AgentTokenORM).filter_by(active=True).first()
+        if existing:
+            return None
+        token = _secrets.token_hex(32)   # 64-character hex string
+        session.add(AgentTokenORM(token=token, label="default"))
+        session.commit()
+        return token
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def init_db(db_path: str) -> None:
     # Auto-migrate any existing plain SQLite project DB to SQLCipher on first access
     mek = _get_mek()

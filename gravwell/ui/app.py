@@ -660,6 +660,20 @@ def create_app(db_path: str) -> dash.Dash:
     from gravwell.auth import init_auth
     init_auth(app.server, db_path)
 
+    # Register agent API routes
+    from gravwell.ui.api import api_bp
+    app.server.register_blueprint(api_bp)
+
+    # Generate agent API token on first run and print it to the console
+    from gravwell.database import ensure_agent_token
+    new_token = ensure_agent_token(db_path)
+    if new_token:
+        print("\n" + "=" * 60)
+        print("  GravWell Agent API Token (shown once — store it safely)")
+        print(f"  {new_token}")
+        print("  Use with: python collect.py --server <URL> --key <TOKEN>")
+        print("=" * 60 + "\n")
+
     # Allow large scan file uploads (Nessus/CrowdStrike exports can be 100MB+).
     # dcc.Upload base64-encodes files in the browser (~33% overhead), so a
     # 750 MB original file becomes ~1 GB on the wire.

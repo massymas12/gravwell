@@ -254,3 +254,20 @@ class NodePositionORM(Base):
     x = Column(Float, nullable=False)
     y = Column(Float, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AgentTokenORM(Base):
+    """API tokens that authorise collection agents to submit data to this server.
+
+    Tokens are generated server-side (see gravwell.database.ensure_agent_token)
+    and distributed out-of-band to the operator who deploys collect.py.
+    The plain token value is shown once in the server console on creation; after
+    that only the label and creation date are exposed via the API.
+    """
+    __tablename__ = "agent_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token = Column(String(64), nullable=False, unique=True)
+    label = Column(String(128), default="default")
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -438,22 +438,14 @@ def _create_agent_tokens_modal() -> html.Div:
                                                  id="build-configured-btn", n_clicks=0,
                                                  style={"display": "none"}),
                                  ]),
-                        # Local-only (always available)
+                        # Platform availability table (populated by callback)
+                        html.Div(id="agent-platform-table",
+                                 style={"marginBottom": "8px"}),
+                        # Local-only Python script (always available)
                         html.Div([
-                            html.Div("Local-only (no upload — IT admin sends JSON back):",
-                                     style={"fontSize": "11px", "color": "#aaa",
-                                            "marginBottom": "4px"}),
-                            html.Div([
-                                html.A("↓ Python script",
-                                       href="/api/agent/download/py?mode=local",
-                                       target="_blank", style=btn),
-                                html.Button("↓ Build binary (this platform)",
-                                            id="build-local-btn", n_clicks=0,
-                                            style={**btn, "cursor": "pointer",
-                                                   "border": "1px solid #555",
-                                                   "color": "#aaa"}),
-                            ], style={"display": "flex", "gap": "8px",
-                                      "flexWrap": "wrap"}),
+                            html.A("↓ Local-only Python script (no upload)",
+                                   href="/api/agent/download/py?mode=local",
+                                   target="_blank", style=btn),
                         ], style={"marginBottom": "8px"}),
                         html.Div(id="agent-build-status",
                                  style={"fontSize": "11px", "marginTop": "4px"}),

@@ -159,7 +159,40 @@ def revoke_token(label: str):
 
 # ── Agent binary / script download ────────────────────────────────────────────
 
-_AGENT_PY = pathlib.Path(__file__).parent.parent / "agent" / "collect.py"
+_AGENT_PY    = pathlib.Path(__file__).parent.parent / "agent" / "collect.py"
+_BUILDS_DIR  = pathlib.Path.home() / ".gravwell" / "agent-builds"
+
+_PLATFORM_SUFFIX = {"windows": ".exe", "linux": "", "macos": ""}
+_ALL_PLATFORMS   = list(_PLATFORM_SUFFIX)
+
+
+def _current_platform() -> str:
+    import sys as _sys
+    return {"win32": "windows", "darwin": "macos"}.get(_sys.platform, "linux")
+
+
+def _cache_path(platform: str, local_only: bool) -> pathlib.Path:
+    """Return the cache file path for a given platform + mode."""
+    name = "gravwell-collect-local" if local_only else "gravwell-collect"
+    suffix = _PLATFORM_SUFFIX.get(platform, "")
+    return _BUILDS_DIR / platform / (name + suffix)
+
+
+def _save_to_cache(platform: str, local_only: bool, data: bytes) -> None:
+    path = _cache_path(platform, local_only)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def cached_builds() -> dict:
+    """Return {platform: {mode: bool}} indicating what's cached."""
+    result = {}
+    for plat in _ALL_PLATFORMS:
+        result[plat] = {
+            "configured": _cache_path(plat, False).exists(),
+            "local":      _cache_path(plat, True).exists(),
+        }
+    return result
 
 
 def _generate_script(server: str = "", token: str = "", local_only: bool = False) -> str:
@@ -228,11 +261,98 @@ def download_agent_py():
                      download_name="gravwell-collect.py", mimetype="text/x-python")
 
 
+@api_bp.route("/api/agent/builds", methods=["GET"])
+def list_builds():
+    """Return which platform binaries are cached and available for download.
+
+    Requires an authenticated browser session.
+    """
+    if not current_user.is_authenticated:
+        return jsonify(error="Authentication required"), 401
+    return jsonify(builds=cached_builds(), server_platform=_current_platform())
+
+
+@api_bp.route("/api/agent/download/binary", methods=["GET"])
+def download_binary():
+    """Download a cached pre-built binary.
+
+    Requires an authenticated browser session.
+
+    Query params:
+      ?platform=windows|linux|macos   (required)
+      ?mode=local                     (optional; default: configured)
+    """
+    if not current_user.is_authenticated:
+        return jsonify(error="Authentication required"), 401
+
+    platform   = request.args.get("platform", "").strip().lower()
+    local_only = request.args.get("mode", "") == "local"
+
+    if platform not in _ALL_PLATFORMS:
+        return jsonify(error=f"Unknown platform '{platform}'. Use: {', '.join(_ALL_PLATFORMS)}"), 400
+
+    cached = _cache_path(platform, local_only)
+    if not cached.exists():
+        mode_label = "local-only" if local_only else "configured"
+        return jsonify(
+            error=f"No cached {mode_label} binary for {platform}. "
+                  f"Build it on a {platform} machine and upload it here."
+        ), 404
+
+    import io
+    return send_file(
+        io.BytesIO(cached.read_bytes()),
+        as_attachment=True,
+        download_name=cached.name,
+        mimetype="application/octet-stream",
+    )
+
+
+@api_bp.route("/api/agent/upload", methods=["POST"])
+def upload_binary():
+    """Upload a pre-built agent binary for a specific platform.
+
+    Admin only. Use this to make binaries available for platforms the
+    server is not running on (e.g. upload a Windows .exe from a Windows
+    build machine to a Linux server).
+
+    Query params:
+      ?platform=windows|linux|macos   (required)
+      ?mode=local                     (optional; default: configured)
+
+    Body: raw binary (multipart file upload as 'file' field).
+    """
+    if not current_user.is_authenticated or not current_user.is_admin:
+        return jsonify(error="Admin access required"), 403
+
+    platform   = request.args.get("platform", "").strip().lower()
+    local_only = request.args.get("mode", "") == "local"
+
+    if platform not in _ALL_PLATFORMS:
+        return jsonify(error=f"Unknown platform '{platform}'. Use: {', '.join(_ALL_PLATFORMS)}"), 400
+
+    if "file" not in request.files:
+        return jsonify(error="No file field in request"), 400
+
+    f = request.files["file"]
+    data = f.read()
+    if not data:
+        return jsonify(error="Uploaded file is empty"), 400
+
+    _save_to_cache(platform, local_only, data)
+    mode_label = "local-only" if local_only else "configured"
+    logger.info("Agent binary uploaded: platform=%s mode=%s size=%d by %s",
+                platform, mode_label, len(data), current_user.username)
+    return jsonify(status="stored", platform=platform, mode=mode_label,
+                   size=len(data)), 201
+
+
 @api_bp.route("/api/agent/build", methods=["POST"])
 def build_agent():
     """Build a standalone binary for the current server platform using PyInstaller.
 
     Admin only. This is a blocking call — building takes ~30-60 seconds.
+    The result is cached in ~/.gravwell/agent-builds/ for future downloads.
 
     JSON body (all optional):
       {"server": "URL", "token": "TOKEN", "mode": "local"}
@@ -243,7 +363,6 @@ def build_agent():
         return jsonify(error="Admin access required"), 403
 
     import io
-    import shutil
     import subprocess
     import sys
     import tempfile
@@ -257,6 +376,7 @@ def build_agent():
     local_only = (body.get("mode",  "") == "local")
 
     source = _generate_script(server=server, token=token, local_only=local_only)
+    platform = _current_platform()
 
     try:
         with tempfile.TemporaryDirectory(prefix="gravwell_build_") as tmp:
@@ -288,14 +408,17 @@ def build_agent():
                     detail=result.stderr[-500:],
                 ), 500
 
-            suffix = ".exe" if sys.platform == "win32" else ""
+            suffix = _PLATFORM_SUFFIX[platform]
             out_binary = tmp_path / "dist" / (exe_name + suffix)
             if not out_binary.exists():
                 return jsonify(error="Build produced no output file"), 500
 
-            download_name = exe_name + suffix
             binary_bytes = out_binary.read_bytes()
 
+        # Cache for future downloads
+        _save_to_cache(platform, local_only, binary_bytes)
+
+        download_name = exe_name + suffix
         logger.info("Agent build complete: %s (%d bytes) by %s",
                     download_name, len(binary_bytes), current_user.username)
         return send_file(

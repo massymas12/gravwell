@@ -155,6 +155,89 @@ def _render_tokens_table() -> html.Div:
     )
 
 
+def _render_platform_table() -> html.Div:
+    """Build the platform availability table for the deploy section."""
+    from gravwell.ui.api import cached_builds, _current_platform, _ALL_PLATFORMS
+    from dash import dcc as _dcc
+
+    builds   = cached_builds()
+    cur_plat = _current_platform()
+
+    _btn_dl = {"background": "#1a2a1a", "border": "1px solid #27AE60",
+               "color": "#27AE60", "cursor": "pointer", "borderRadius": "3px",
+               "padding": "2px 8px", "fontSize": "10px",
+               "textDecoration": "none", "display": "inline-block",
+               "marginRight": "4px"}
+    _btn_build = {**_btn_dl, "border": "1px solid #2980B9", "color": "#5DADE2"}
+    _btn_upload = {"background": "none", "border": "1px solid #555",
+                   "color": "#aaa", "cursor": "pointer", "borderRadius": "3px",
+                   "padding": "2px 8px", "fontSize": "10px", "marginRight": "4px"}
+
+    label_map = {"windows": "Windows (.exe)", "linux": "Linux", "macos": "macOS"}
+    rows = []
+    header = html.Tr([
+        html.Th(c, style={"padding": "4px 8px", "fontSize": "10px",
+                           "color": "#5DADE2", "background": "#1a1a2e",
+                           "borderBottom": "1px solid #333"})
+        for c in ("Platform", "Configured", "Local-only")
+    ])
+
+    for plat in _ALL_PLATFORMS:
+        cells = [html.Td(
+            html.Div([
+                label_map[plat],
+                html.Span(" ★" if plat == cur_plat else "",
+                          style={"color": "#E67E22", "fontSize": "9px"}),
+            ], style={"fontSize": "11px", "color": "#ccc"}),
+            style={"padding": "4px 8px", "borderBottom": "1px solid #222"},
+        )]
+
+        for local_only in (False, True):
+            mode_qs = "local" if local_only else "configured"
+            available = builds[plat]["local" if local_only else "configured"]
+
+            if available:
+                cell_content = html.Div([
+                    html.A("↓ Download",
+                           href=f"/api/agent/download/binary?platform={plat}&mode={mode_qs}",
+                           target="_blank", style=_btn_dl),
+                ])
+            elif plat == cur_plat:
+                cell_content = html.Div([
+                    html.Button(
+                        "Build",
+                        id=f"build-{plat}-{'local' if local_only else 'cfg'}-btn",
+                        n_clicks=0,
+                        style=_btn_build,
+                    ),
+                ])
+            else:
+                cell_content = html.Div([
+                    html.Span("—  ", style={"color": "#555", "fontSize": "10px"}),
+                    _dcc.Upload(
+                        id={"type": "upload-binary", "platform": plat,
+                            "mode": "local" if local_only else "configured"},
+                        children=html.Span("Upload", style=_btn_upload),
+                        multiple=False,
+                    ),
+                ], style={"display": "flex", "alignItems": "center"})
+
+            cells.append(html.Td(cell_content,
+                                  style={"padding": "4px 8px",
+                                         "borderBottom": "1px solid #222"}))
+        rows.append(html.Tr(cells))
+
+    note = html.Div(
+        "★ = this server's platform.  Upload pre-built binaries for other platforms.",
+        style={"fontSize": "10px", "color": "#555", "marginTop": "4px"},
+    )
+    return html.Div([
+        html.Table([html.Thead(header), html.Tbody(rows)],
+                   style={"width": "100%", "borderCollapse": "collapse"}),
+        note,
+    ])
+
+
 def register(app: dash.Dash) -> None:
 
     # ── Populate user store on page load ─────────────────────────────────────
@@ -409,15 +492,16 @@ def register(app: dash.Dash) -> None:
         Output("agent-tokens-new-token", "children"),
         Output("agent-tokens-status", "children"),
         Output("agent-server-url", "children"),
+        Output("agent-platform-table", "children"),
         Output("agent-deploy-cmd", "children"),
         Input("agent-tokens-menu-item", "n_clicks"),
         prevent_initial_call=True,
     )
     def open_agent_tokens_modal(n_clicks):
         if not current_user.is_authenticated or not current_user.is_admin:
-            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            return (no_update,) * 9
         if not n_clicks:
-            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            return (no_update,) * 9
         from flask import request as flask_request
         server_url = flask_request.host_url.rstrip("/")
         url_div = html.Div([
@@ -440,9 +524,9 @@ def register(app: dash.Dash) -> None:
             {"display": "none"},
             {"display": "none"},
             _render_tokens_table(),
-            "",
-            "",
+            "", "",
             url_div,
+            _render_platform_table(),
             cmd_div,
         )
 
@@ -621,3 +705,137 @@ def register(app: dash.Dash) -> None:
                              style={"color": "#E74C3C"})
         except Exception as exc:
             return html.Span(f"Build error: {exc}", style={"color": "#E74C3C"})
+
+    # ── Per-platform build buttons (current platform, from the table) ──────────
+
+    _cur = __import__("sys").platform
+    _cur_plat = {"win32": "windows", "darwin": "macos"}.get(_cur, "linux")
+
+    for _plat, _local in ((_cur_plat, False), (_cur_plat, True)):
+        _btn_id = f"build-{_plat}-{'local' if _local else 'cfg'}-btn"
+        _local_copy = _local  # capture for closure
+
+        @app.callback(
+            Output("agent-build-status", "children", allow_duplicate=True),
+            Output("agent-platform-table", "children", allow_duplicate=True),
+            Input(_btn_id, "n_clicks"),
+            State("_build-server-store", "children"),
+            State("_build-token-store", "children"),
+            prevent_initial_call=True,
+        )
+        def _build_for_platform(n_clicks, stored_server, stored_token,
+                                _lo=_local_copy):
+            if not n_clicks:
+                return no_update, no_update
+            if not current_user.is_authenticated or not current_user.is_admin:
+                return html.Span("Permission denied.", style={"color": "#E74C3C"}), no_update
+
+            server = stored_server or ""
+            token  = stored_token  or ""
+
+            from gravwell.ui.api import (
+                _generate_script, _AGENT_PY, _current_platform,
+                _PLATFORM_SUFFIX, _save_to_cache,
+            )
+            source   = _generate_script(server=server, token=token, local_only=_lo)
+            exe_name = "gravwell-collect-local" if _lo else "gravwell-collect"
+            platform = _current_platform()
+
+            try:
+                with tempfile.TemporaryDirectory(prefix="gravwell_build_") as tmp:
+                    tmp_path = _pathlib.Path(tmp)
+                    src_file = tmp_path / "collect.py"
+                    src_file.write_text(source, encoding="utf-8")
+                    cmd = [
+                        sys.executable, "-m", "PyInstaller",
+                        "--onefile", "--clean", "--noconfirm",
+                        "--name", exe_name,
+                        "--distpath", str(tmp_path / "dist"),
+                        "--workpath", str(tmp_path / "build"),
+                        "--specpath", str(tmp_path),
+                        "--hidden-import", "xml.etree.ElementTree",
+                        "--hidden-import", "ssl",
+                        "--hidden-import", "urllib.request",
+                        str(src_file),
+                    ]
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=300,
+                        cwd=str(tmp_path),
+                    )
+                    if result.returncode != 0:
+                        return (html.Span(f"Build failed: {result.stderr[-200:]}",
+                                          style={"color": "#E74C3C"}),
+                                no_update)
+                    suffix   = _PLATFORM_SUFFIX[platform]
+                    out_file = tmp_path / "dist" / (exe_name + suffix)
+                    if not out_file.exists():
+                        return html.Span("No output file.", style={"color": "#E74C3C"}), no_update
+                    fname  = exe_name + suffix
+                    binary = out_file.read_bytes()
+
+                _save_to_cache(platform, _lo, binary)
+                b64 = base64.b64encode(binary).decode()
+                data_url = f"data:application/octet-stream;base64,{b64}"
+                status = html.Div([
+                    html.Span("Build complete! ", style={"color": "#27AE60"}),
+                    html.A(f"Download {fname}", href=data_url, download=fname,
+                           style={"color": "#5DADE2", "fontSize": "11px"}),
+                ])
+                return status, _render_platform_table()
+
+            except subprocess.TimeoutExpired:
+                return (html.Span("Build timed out.", style={"color": "#E74C3C"}),
+                        no_update)
+            except Exception as exc:
+                return (html.Span(f"Build error: {exc}", style={"color": "#E74C3C"}),
+                        no_update)
+
+    # ── Binary upload callback ─────────────────────────────────────────────────
+
+    @app.callback(
+        Output("agent-build-status", "children", allow_duplicate=True),
+        Output("agent-platform-table", "children", allow_duplicate=True),
+        Input({"type": "upload-binary", "platform": dash.ALL,
+               "mode": dash.ALL}, "contents"),
+        State({"type": "upload-binary", "platform": dash.ALL,
+               "mode": dash.ALL}, "filename"),
+        prevent_initial_call=True,
+    )
+    def handle_binary_upload(contents_list, filenames_list):
+        from dash import ctx
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return html.Span("Permission denied.", style={"color": "#E74C3C"}), no_update
+        if not any(c for c in (contents_list or [])):
+            return no_update, no_update
+
+        from gravwell.ui.api import _save_to_cache
+        triggered = ctx.triggered_id
+        if not triggered:
+            return no_update, no_update
+
+        platform   = triggered.get("platform", "")
+        local_only = triggered.get("mode", "") == "local"
+
+        # Find the uploaded content
+        content = None
+        for c in (contents_list or []):
+            if c:
+                content = c
+                break
+        if not content:
+            return no_update, no_update
+
+        try:
+            import base64 as _b64
+            _header, encoded = content.split(",", 1)
+            binary = _b64.b64decode(encoded)
+        except Exception as exc:
+            return html.Span(f"Decode error: {exc}", style={"color": "#E74C3C"}), no_update
+
+        _save_to_cache(platform, local_only, binary)
+        mode_label = "local-only" if local_only else "configured"
+        return (
+            html.Span(f"Binary uploaded for {platform} ({mode_label}).",
+                      style={"color": "#27AE60"}),
+            _render_platform_table(),
+        )

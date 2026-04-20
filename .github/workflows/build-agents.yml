@@ -6,7 +6,7 @@ on:
       upload_to_server:
         description: "Upload binaries to gravwell server after build"
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -15,6 +15,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false   # keep building other platforms even if one fails
       matrix:
         include:
           - os: windows-latest
@@ -111,6 +112,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -143,4 +148,5 @@ jobs:
           git add gravwell/agent/binaries/
           git diff --staged --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore: update pre-built agent binaries [skip ci]"
+          git pull --rebase origin master
           git push

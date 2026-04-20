@@ -416,42 +416,6 @@ def _create_agent_tokens_modal() -> html.Div:
                         html.Div(id="agent-tokens-status",
                                  style={"fontSize": "11px", "color": "#5DADE2",
                                         "marginTop": "4px"}),
-                        # ── Deploy section ───────────────────────────
-                        html.Hr(style={"borderColor": "#333", "margin": "12px 0 10px"}),
-                        html.Div("Deploy Agent", style={"fontSize": "12px",
-                                                         "color": "#5DADE2",
-                                                         "fontWeight": "600",
-                                                         "marginBottom": "6px"}),
-                        html.Div(id="agent-server-url",
-                                 style={"fontSize": "11px", "color": "#888",
-                                        "marginBottom": "8px"}),
-                        # Pre-configured links — populated after token generation
-                        html.Div(id="agent-configured-links",
-                                 style={"marginBottom": "8px"},
-                                 children=[
-                                     # Hidden scaffolding — content set by callback
-                                     html.Div("", id="_build-server-store",
-                                              style={"display": "none"}),
-                                     html.Div("", id="_build-token-store",
-                                              style={"display": "none"}),
-                                     html.Button("↓ Build pre-configured binary",
-                                                 id="build-configured-btn", n_clicks=0,
-                                                 style={"display": "none"}),
-                                 ]),
-                        # Platform availability table (populated by callback)
-                        html.Div(id="agent-platform-table",
-                                 style={"marginBottom": "8px"}),
-                        # Local-only Python script (always available)
-                        html.Div([
-                            html.A("↓ Local-only Python script (no upload)",
-                                   href="/api/agent/download/py?mode=local",
-                                   target="_blank", style=btn),
-                        ], style={"marginBottom": "8px"}),
-                        html.Div(id="agent-build-status",
-                                 style={"fontSize": "11px", "marginTop": "4px"}),
-                        html.Div(id="agent-deploy-cmd",
-                                 style={"fontSize": "11px", "color": "#888",
-                                        "marginTop": "6px"}),
                     ], className="modal-body",
                        style={"padding": "12px 16px", "overflowY": "auto",
                               "maxHeight": "70vh"}),

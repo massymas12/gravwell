@@ -381,9 +381,14 @@ def _create_agent_tokens_modal() -> html.Div:
                 style={"width": "640px", "maxWidth": "95vw"},
                 children=[
                     html.Div([
-                        html.H3("Agent Tokens & Deployment",
-                                style={"margin": 0, "fontSize": "15px",
-                                       "color": "#5DADE2"}),
+                        html.Div([
+                            html.H3("Agent Tokens",
+                                    style={"margin": 0, "fontSize": "15px",
+                                           "color": "#5DADE2"}),
+                            html.Span(id="agent-tokens-project-label",
+                                      style={"fontSize": "11px", "color": "#666",
+                                             "marginLeft": "10px", "alignSelf": "center"}),
+                        ], style={"display": "flex", "alignItems": "baseline"}),
                         html.Button("×", id="agent-tokens-modal-close",
                                     className="modal-close-btn"),
                     ], className="modal-header"),
@@ -399,7 +404,7 @@ def _create_agent_tokens_modal() -> html.Div:
                             dcc.Input(
                                 id="new-token-label-input",
                                 type="text",
-                                placeholder="default",
+                                placeholder="",
                                 value="",
                                 debounce=False,
                                 style={"flex": "1", "background": "#1a1a2e",

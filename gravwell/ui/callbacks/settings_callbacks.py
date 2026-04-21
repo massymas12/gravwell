@@ -409,20 +409,27 @@ def register(app: dash.Dash) -> None:
         Output("agent-tokens-content", "children"),
         Output("agent-tokens-new-token", "children"),
         Output("agent-tokens-status", "children"),
+        Output("agent-tokens-project-label", "children"),
+        Output("new-token-label-input", "value"),
         Input("agent-tokens-menu-item", "n_clicks"),
         prevent_initial_call=True,
     )
     def open_agent_tokens_modal(n_clicks):
         if not current_user.is_authenticated or not current_user.is_admin:
-            return (no_update,) * 6
+            return (no_update,) * 8
         if not n_clicks:
-            return (no_update,) * 6
+            return (no_update,) * 8
+        import pathlib
+        db_path = current_app.config.get("GRAVWELL_DB_PATH", "")
+        project_name = pathlib.Path(db_path).stem if db_path else "unknown"
         return (
             {"display": "flex"},
             {"display": "none"},
             {"display": "none"},
             _render_tokens_table(),
             "", "",
+            f"project: {project_name}",
+            project_name,
         )
 
     @app.callback(
@@ -458,8 +465,9 @@ def register(app: dash.Dash) -> None:
 
         if triggered == "generate-token-btn":
             from flask import request as flask_request
-            import urllib.parse
-            label = (label_value or "default").strip() or "default"
+            import pathlib, urllib.parse
+            default_label = pathlib.Path(db_path).stem or "default"
+            label = (label_value or "").strip() or default_label
             plain = at.create_token(label, db_path)
             server_url = flask_request.host_url.rstrip("/")
 

@@ -22,158 +22,6 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 
 ---
 
-## Supported Ingestion Formats
-
-| Tool | Format | Notes |
-|------|--------|-------|
-| **nmap** | XML (`.xml`) | Hosts, ports, services, OS detection, scripts |
-| **Nessus** | `.nessus` (XML) | Vulnerabilities, CVEs, CVSS scores, plugin output |
-| **Masscan** | JSON / XML | Fast port scan results |
-| **OpenVAS / Greenbone** | XML report | Vulnerabilities, NVT details, CVSS |
-| **Nuclei** | JSON / JSONL | Template-based vulnerability findings |
-| **enum4linux** | Text / JSON-NG | SMB shares, users, groups, password policy, domain info |
-| **CrowdStrike Falcon** | JSON / CSV export | Asset inventory, Spotlight vulnerability data (see below) |
-| **IPAM** | CSV / Excel (`.xlsx`) | Subnet definitions and names — used as grouping ground truth (see below) |
-| **GravWell Agent** | JSON (`.json`) | Output from `collect.py` — own machine, ARP neighbours, port scan (see below) |
-| **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
-| **Juniper JunOS** | `show` command output | Interfaces, routes, version |
-| **Fortinet FortiOS** | `show` / `get` output | Interfaces, routing, system info |
-| **Huawei VRP** | `display current-configuration` output | Interfaces, routing, system info |
-| **Palo Alto PAN-OS** | XML operational output | Interfaces, routing, system info |
-
-All formats are auto-detected. You can also force a specific parser with `--format`.
-
-### GravWell Collection Agent
-
-The collection agent (`collect.py`, v1.2) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
-
-**Discovery pipeline:**
-
-| Stage | Method | What it finds |
-|-------|--------|---------------|
-| **System info** | `platform`, `socket`, OS commands | Hostname, OS, all interface IPs/MACs, default gateway, DNS servers, Windows domain/workgroup |
-| **ARP / neighbour table** | `arp -a` / `ip neigh` / `ndp` | Hosts on directly-connected subnets — IPv4 + IPv6 |
-| **Active connections** | `netstat -an` | Remote IPs from established TCP connections — discovers servers that block *all* inbound probes |
-| **Windows DNS cache** | `ipconfig /displaydns` | Cached A records with hostnames (Windows only) |
-| **SMB browse list** | `net view` | Windows machines visible via SMB browser service (Windows only) |
-| **mDNS multicast** | UDP 224.0.0.251:5353 | Apple, Linux/Avahi, IoT, and printer devices via Bonjour/mDNS |
-| **SSDP multicast** | UDP 239.255.255.250:1900 | UPnP devices — smart TVs, NAS boxes, printers, routers |
-| **TCP probe sweep** | Socket connect to ~14 common ports | Host liveness when ICMP is blocked — primary fallback without nmap |
-| **ICMP ping** | `fping` or system `ping` | Supplement to TCP — catches ICMP-only devices (routers, printers) |
-| **Port scan** | ~50 ports; nmap with `-sV`/`-O` or socket scan | Open services, service versions, banner grabbing |
-| **NetBIOS Node Status** | UDP 137 | Windows machine names for hosts without reverse DNS |
-| **Reverse DNS sweep** | `socket.gethostbyaddr` | PTR records for all discovered IPs — concurrent, 50 threads |
-| **TLS cert extraction** | `ssl` module | CN and SANs from HTTPS/LDAPS/IMAPS certs — reveals internal FQDNs |
-| **HTTP enrichment** | `urllib.request` | `Server:` header + page `<title>` — fingerprints routers, NAS, printers, management UIs |
-| **OS / role inference** | Port signature matching | OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…) |
-
-**mDNS and SSDP run concurrently** with the TCP probe sweep in a background thread to avoid adding to wall-clock time.
-
-**Optional tools** (used automatically if on PATH, not required):
-- `nmap` — richer host discovery (`-sn`), service versions (`-sV`), OS fingerprinting (`-O`)
-- `fping` — faster ICMP sweep on large subnets
-
-**Delivery modes:**
-
-| Mode | How |
-|------|-----|
-| **File + manual import** | Agent writes `gravwell_collect_<host>_<ts>.json`; share it back and drag-and-drop onto the web UI |
-| **Direct upload** | Agent POSTs to GravWell with `--server` and `--key`; data appears immediately in the active project |
-
-**Running on the target:**
-
-```bash
-# Passive only — ARP table + own system info, no active probing
-python gravwell-collect.py --no-sweep --no-scan
-
-# Full collection, save locally
-python gravwell-collect.py
-
-# Full collection + upload to GravWell
-python gravwell-collect.py --server https://gravwell.corp.local --key YOUR_TOKEN
-
-# Also sweep routed (non-directly-attached) subnets — useful on pivot hosts
-python gravwell-collect.py --routes --server https://gravwell.corp.local --key YOUR_TOKEN
-
-# Skip port scan (faster, discovery only)
-python gravwell-collect.py --no-scan
-```
-
-The script requires Python 3.8+ and no third-party packages. Copy the single `.py` file to the target — no `pip install` needed.
-
-**Pre-built binaries** (no Python required on the target):
-
-Pre-built standalone binaries for Windows, Linux, and macOS ship with GravWell and are available for download directly from the web UI:
-
-**☰ → Agent Tokens → Download Agent**
-
-Binaries are built via the GitHub Actions workflow (`.github/workflows/build-agents.yml`) which compiles on real Windows/Linux/macOS runners and commits the results back into the package.
-
-**API tokens:**
-
-Agent tokens are managed from the web UI (**☰ → Agent Tokens**, admin only):
-
-- **Generate** a token — the plain value is shown once; copy it immediately
-- After generation a **pre-configured Python script** is offered for download with the server URL and token baked in as defaults (the user can still override at runtime with `--server` / `--key`)
-- **Revoke** individual tokens by label without affecting others
-
-From the CLI:
-```bash
-gravwell token list
-gravwell token create [LABEL]
-gravwell token revoke LABEL
-```
-
----
-
-### IPAM subnet import
-
-Importing subnet definitions from your IPAM gives GravWell authoritative grouping data instead of statistical guessing.  Each imported subnet becomes a named compound group in the graph; any host whose IP falls inside a known subnet is placed there directly using **longest-prefix-match** (most specific subnet wins).  Hosts whose IPs don't match any imported subnet still fall back to the automatic heuristic, so rogue or unregistered machines are never silently dropped.
-
-**Supported formats:** CSV (`.csv`) and Excel (`.xlsx`).
-
-**Minimum required columns** (exact names or common aliases are accepted):
-
-| Column | Accepted names | Example value |
-|--------|---------------|---------------|
-| Subnet CIDR | `Subnet`, `Network`, `CIDR`, `Prefix` | `10.3.10.0/24` |
-| Label / name | `Description`, `Name`, `Label`, `Comment` | `ISM-Services-Prod-DMZ` |
-
-> **phpIPAM users:** the "Available subnets" table exports with exactly `Subnet` and `Description` columns — copy those columns directly into Excel and save as `.xlsx` or CSV.  Leading `>` hierarchy markers in descriptions are stripped automatically.
-
-**Import is non-destructive:** labels you have manually edited in the UI are never overwritten by a re-import.  Only subnets with no existing label are updated.
-
-### CrowdStrike Falcon export guide
-
-GravWell accepts **Discover asset exports** (JSON or CSV) and **Spotlight vulnerability exports** (JSON or CSV). Auto-detection works on any combination of the fields below — you do not need to include all of them, but the more you include the richer the graph nodes will be.
-
-**Recommended fields to select when exporting from the Falcon console:**
-
-| Field name in Falcon UI | JSON key | What GravWell uses it for |
-|-------------------------|----------|--------------------------|
-| Hostname | `hostname` | Node label |
-| Sensor IP address | `local_ip` | **Primary IP — use this as the IP field** |
-| IP address history | `ip_address_history` | Additional IPs on the same node |
-| OS version | `os_version` | OS family colouring (Windows / Linux / macOS) |
-| System manufacturer | `system_manufacturer` | MAC vendor enrichment |
-| MAC address(es) | `mac_addresses` | MAC-based host deduplication |
-| Device type | `device_type` | `device-type:laptop` / `server` tag |
-| Machine domain | `machine_domain` | `domain:CORP.LOCAL` tag — feeds AD domain grouping |
-
-> **Tip:** Use **Sensor IP address** (not "IP address history") as the IP column. The sensor IP is the current active address; history IPs are merged in automatically as secondary addresses when both fields are exported.
-
-For Spotlight vulnerability exports GravWell recognises three export variants automatically:
-
-| Variant | Key fields | Notes |
-|---------|-----------|-------|
-| **Spotlight API** (`/spotlight/entities/vulnerabilities/v2`) | `cve.id`, `host_info.local_ip` | Full CVSS scores included |
-| **Flat vuln export** | `host_id`, `local_ip`, `cve_id` | One row per host+CVE pair |
-| **Spotlight console UI export** | `hostname`, `vulnerability_id`, `exprt_rating` | No IP — hosts matched to existing inventory by hostname |
-
-The console UI export (downloaded directly from the Falcon Spotlight page) contains no IP address. GravWell imports those records keyed by hostname and merges them into matching hosts from your device inventory import. Include at minimum `hostname`, `vulnerability_id`, `severity`, `exprt_rating`, `products`, and `recommended_remediations` for the richest output.
-
----
-
 ## Requirements
 
 - Python 3.11+
@@ -263,99 +111,186 @@ gravwell ingest results.nessus masscan_output.json
 
 ---
 
-## CLI Reference
+## Collection Agent
 
-```
-gravwell user add <username> [--admin]        Add a user
-gravwell user delete <username>               Remove a user
-gravwell user list                            List all users
-gravwell passwd <username>                    Change a user's password
+The collection agent (`collect.py`, v1.2) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
 
-gravwell ingest <file> [<file>...]            Import scan files (auto-detected format)
-gravwell ingest --format nmap <file>          Import with a forced parser
+### Discovery pipeline
 
-gravwell list hosts [--min-cvss N]            List discovered hosts
-gravwell list hosts [--os Windows]            Filter by OS family
-gravwell list hosts [--subnet 10.0.0.0/24]   Filter by subnet
-gravwell list services [--ip IP] [--port N]   List open services
-gravwell list vulns [--ip IP]                         List vulnerabilities
-gravwell list vulns [--min-cvss N]                    Filter by minimum CVSS score
-gravwell list vulns [--severity critical|high|...]    Filter by severity band
+| Stage | Method | What it finds |
+|-------|--------|---------------|
+| **System info** | `platform`, `socket`, OS commands | Hostname, OS, all interface IPs/MACs, default gateway, DNS servers, Windows domain/workgroup |
+| **ARP / neighbour table** | `arp -a` / `ip neigh` / `ndp` | Hosts on directly-connected subnets — IPv4 + IPv6 |
+| **Active connections** | `netstat -an` | Remote IPs from established TCP connections — discovers servers that block *all* inbound probes |
+| **Windows DNS cache** | `ipconfig /displaydns` | Cached A records with hostnames (Windows only) |
+| **SMB browse list** | `net view` | Windows machines visible via SMB browser service (Windows only) |
+| **mDNS multicast** | UDP 224.0.0.251:5353 | Apple, Linux/Avahi, IoT, and printer devices via Bonjour/mDNS |
+| **SSDP multicast** | UDP 239.255.255.250:1900 | UPnP devices — smart TVs, NAS boxes, printers, routers |
+| **TCP probe sweep** | Socket connect to ~14 common ports | Host liveness when ICMP is blocked — primary fallback without nmap |
+| **ICMP ping** | `fping` or system `ping` | Supplement to TCP — catches ICMP-only devices (routers, printers) |
+| **Port scan** | ~50 ports; nmap with `-sV`/`-O` or socket scan | Open services, service versions, banner grabbing |
+| **NetBIOS Node Status** | UDP 137 | Windows machine names for hosts without reverse DNS |
+| **Reverse DNS sweep** | `socket.gethostbyaddr` | PTR records for all discovered IPs — concurrent, 50 threads |
+| **TLS cert extraction** | `ssl` module | CN and SANs from HTTPS/LDAPS/IMAPS certs — reveals internal FQDNs |
+| **HTTP enrichment** | `urllib.request` | `Server:` header + page `<title>` — fingerprints routers, NAS, printers, management UIs |
+| **OS / role inference** | Port signature matching | OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…) |
 
-gravwell path <src-ip> <dst-ip>               Show attack path between two hosts
+mDNS and SSDP run concurrently with the TCP probe sweep in a background thread to avoid adding to wall-clock time.
 
-gravwell discover <target-cidr>               Run active discovery (ping/ARP/TCP/UDP/SNMP)
-gravwell discover <target-cidr> \
-  --methods ping,tcp,snmp \                   Select discovery methods (default: all)
-  --community public \                        SNMP community string
-  --snmp-port 161 \                           SNMP port (default: 161)
-  --tcp-ports 22,80,443,445,3389 \           Custom TCP port list (default: common ports)
-  --workers 64 \                              Parallel threads (default: 64)
-  --no-follow-neighbors                       Skip ARP/CDP/LLDP neighbor walk on SNMP devices
+**Optional tools** (used automatically if on PATH, not required):
+- `nmap` — richer host discovery (`-sn`), service versions (`-sV`), OS fingerprinting (`-O`)
+- `fping` — faster ICMP sweep on large subnets
 
-gravwell merge-macs [--dry-run]               Merge hosts sharing a MAC address into one node
+### Delivery modes
 
-gravwell serve [--port PORT] [--host HOST]    Start the web server
-gravwell reset                                Wipe all data in the current project
-```
+| Mode | How |
+|------|-----|
+| **File + manual import** | Agent writes `gravwell_collect_<host>_<ts>.json`; share it back and drag-and-drop onto the web UI |
+| **Direct upload** | Agent POSTs to GravWell with `--server` and `--key`; data appears immediately in the correct project |
 
-All data commands prompt for credentials to decrypt the database. Use `--db <path>` or set `GRAVWELL_DB` to target a specific project database:
+### Running on the target
 
 ```bash
-gravwell --db ~/.gravwell/projects/client-acme.db ingest scan.xml
-GRAVWELL_DB=~/.gravwell/projects/client-acme.db gravwell list hosts
+# Passive only — ARP table + own system info, no active probing
+python gravwell-collect.py --no-sweep --no-scan
+
+# Full collection, save locally
+python gravwell-collect.py
+
+# Full collection + upload to GravWell
+python gravwell-collect.py --server https://gravwell.corp.local --key YOUR_TOKEN
+
+# Also sweep routed (non-directly-attached) subnets — useful on pivot hosts
+python gravwell-collect.py --routes --server https://gravwell.corp.local --key YOUR_TOKEN
+
+# Skip port scan (faster, discovery only)
+python gravwell-collect.py --no-scan
+```
+
+The script requires Python 3.8+ and no third-party packages. Copy the single `.py` file to the target — no `pip install` needed.
+
+### Pre-built binaries
+
+Pre-built standalone binaries for Windows, Linux, and macOS ship with GravWell and are available for download directly from the web UI:
+
+**☰ → Agent Tokens → Download Agent**
+
+Binaries are built via the GitHub Actions workflow (`.github/workflows/build-agents.yml`) which compiles on real Windows/Linux/macOS runners and commits the results back into the package.
+
+### API tokens
+
+Agent tokens are managed from the web UI (**☰ → Agent Tokens**, admin only). Each token is scoped to a single project — a token created in Project A will always submit data into Project A regardless of which project the UI has open at the time.
+
+- **Generate** a token — the plain value is shown once; copy it immediately. The label defaults to the current project name.
+- After generation a **pre-configured Python script** is offered for download with the server URL and token baked in as defaults (the user can still override at runtime with `--server` / `--key`)
+- **Revoke** individual tokens by label without affecting others
+
+From the CLI:
+```bash
+gravwell token list
+gravwell token create [LABEL]
+gravwell token revoke LABEL
 ```
 
 ---
 
-## Projects
+## Supported Ingestion Formats
 
-Projects are separate encrypted databases — one per engagement is recommended. Manage them from the sidebar in the web UI (New / Rename / Delete) or target them directly via the CLI.
+| Tool | Format | Notes |
+|------|--------|-------|
+| **nmap** | XML (`.xml`) | Hosts, ports, services, OS detection, scripts |
+| **Nessus** | `.nessus` (XML) | Vulnerabilities, CVEs, CVSS scores, plugin output |
+| **Masscan** | JSON / XML | Fast port scan results |
+| **OpenVAS / Greenbone** | XML report | Vulnerabilities, NVT details, CVSS |
+| **Nuclei** | JSON / JSONL | Template-based vulnerability findings |
+| **enum4linux** | Text / JSON-NG | SMB shares, users, groups, password policy, domain info |
+| **CrowdStrike Falcon** | JSON / CSV export | Asset inventory, Spotlight vulnerability data (see below) |
+| **IPAM** | CSV / Excel (`.xlsx`) | Subnet definitions and names — used as grouping ground truth (see below) |
+| **GravWell Agent** | JSON (`.json`) | Output from `collect.py` — own machine, ARP neighbours, port scan |
+| **Cisco IOS** | `show` command output | Interfaces, routing, ARP table, version |
+| **Juniper JunOS** | `show` command output | Interfaces, routes, version |
+| **Fortinet FortiOS** | `show` / `get` output | Interfaces, routing, system info |
+| **Huawei VRP** | `display current-configuration` output | Interfaces, routing, system info |
+| **Palo Alto PAN-OS** | XML operational output | Interfaces, routing, system info |
 
-Default database: `~/.gravwell/gravwell.db`
-Project databases: `~/.gravwell/projects/<name>.db`
+All formats are auto-detected. You can also force a specific parser with `--format`.
+
+### IPAM subnet import
+
+Importing subnet definitions from your IPAM gives GravWell authoritative grouping data instead of statistical guessing. Each imported subnet becomes a named compound group in the graph; any host whose IP falls inside a known subnet is placed there directly using **longest-prefix-match** (most specific subnet wins). Hosts whose IPs don't match any imported subnet still fall back to the automatic heuristic, so rogue or unregistered machines are never silently dropped.
+
+**Supported formats:** CSV (`.csv`) and Excel (`.xlsx`).
+
+**Minimum required columns** (exact names or common aliases are accepted):
+
+| Column | Accepted names | Example value |
+|--------|---------------|---------------|
+| Subnet CIDR | `Subnet`, `Network`, `CIDR`, `Prefix` | `10.3.10.0/24` |
+| Label / name | `Description`, `Name`, `Label`, `Comment` | `ISM-Services-Prod-DMZ` |
+
+> **phpIPAM users:** the "Available subnets" table exports with exactly `Subnet` and `Description` columns — copy those columns directly into Excel and save as `.xlsx` or CSV. Leading `>` hierarchy markers in descriptions are stripped automatically.
+
+**Import is non-destructive:** labels you have manually edited in the UI are never overwritten by a re-import. Only subnets with no existing label are updated.
+
+### CrowdStrike Falcon export guide
+
+GravWell accepts **Discover asset exports** (JSON or CSV) and **Spotlight vulnerability exports** (JSON or CSV). Auto-detection works on any combination of the fields below — you do not need to include all of them, but the more you include the richer the graph nodes will be.
+
+**Recommended fields to select when exporting from the Falcon console:**
+
+| Field name in Falcon UI | JSON key | What GravWell uses it for |
+|-------------------------|----------|--------------------------|
+| Hostname | `hostname` | Node label |
+| Sensor IP address | `local_ip` | **Primary IP — use this as the IP field** |
+| IP address history | `ip_address_history` | Additional IPs on the same node |
+| OS version | `os_version` | OS family colouring (Windows / Linux / macOS) |
+| System manufacturer | `system_manufacturer` | MAC vendor enrichment |
+| MAC address(es) | `mac_addresses` | MAC-based host deduplication |
+| Device type | `device_type` | `device-type:laptop` / `server` tag |
+| Machine domain | `machine_domain` | `domain:CORP.LOCAL` tag — feeds AD domain grouping |
+
+> **Tip:** Use **Sensor IP address** (not "IP address history") as the IP column. The sensor IP is the current active address; history IPs are merged in automatically as secondary addresses when both fields are exported.
+
+For Spotlight vulnerability exports GravWell recognises three export variants automatically:
+
+| Variant | Key fields | Notes |
+|---------|-----------|-------|
+| **Spotlight API** (`/spotlight/entities/vulnerabilities/v2`) | `cve.id`, `host_info.local_ip` | Full CVSS scores included |
+| **Flat vuln export** | `host_id`, `local_ip`, `cve_id` | One row per host+CVE pair |
+| **Spotlight console UI export** | `hostname`, `vulnerability_id`, `exprt_rating` | No IP — hosts matched to existing inventory by hostname |
+
+The console UI export (downloaded directly from the Falcon Spotlight page) contains no IP address. GravWell imports those records keyed by hostname and merges them into matching hosts from your device inventory import. Include at minimum `hostname`, `vulnerability_id`, `severity`, `exprt_rating`, `products`, and `recommended_remediations` for the richest output.
 
 ---
 
-## User Management
+## Active & Passive Discovery
 
-### Adding users
+GravWell can discover hosts directly from the **Discover** section of the sidebar, without needing an external scanner.
 
-Admin users can add new accounts from the web UI via the **☰ menu → Add User**, or from the CLI:
+### Active discovery
 
-```bash
-gravwell user add analyst
-# Prompts for your credentials first, then the new user's password
-```
+| Method | What it does |
+|--------|-------------|
+| **Ping** | ICMP echo sweep across the target CIDR |
+| **ARP** | Reads the local ARP cache (finds hosts on directly connected subnets) |
+| **TCP** | Parallel TCP connect scan on common ports (22, 80, 443, 445, 3389, …) |
+| **UDP** | Application-level probes to DNS (53), NTP (123), and SNMP (161) — works without raw sockets |
+| **SNMP** | SNMP v1/v2c poll for sysDescr, sysName, ifTable; walks the ARP cache, CDP, and LLDP neighbor tables on responsive devices; tries common community strings automatically (`public`, `private`, `community`, `cisco`, etc.) |
 
-Each user holds their own encrypted copy of the database key. All users within a project share the same scan data.
+Enter a target CIDR or single IP, tick the methods you want, and click **Start Discovery**. Discovered hosts are ingested immediately and appear on the graph.
 
-### Role-based access control (RBAC)
+### Passive discovery
 
-Every user has a **Role** and a set of **Permissions**, configured at creation time and editable via **☰ → Manage Users**.
+Passive listen captures live traffic on any network interface (VPN tunnel, LAN adapter, Wi-Fi) to surface hosts that firewalls silently drop active probes for — the host only needs to *send* a single packet to be discovered.
 
-| Role | Description |
-|------|-------------|
-| **Admin** | Full access — can manage users, create/delete projects, and perform all operations |
-| **User** | Access limited to assigned permissions and projects |
+**Requirements:** `pip install "gravwell[discovery]"` (installs scapy). See [Requirements](#requirements) for platform notes.
 
-| Permission | What it allows |
-|------------|----------------|
-| **Edit** | Modify host properties, tags, notes, and node layout |
-| **Import** | Upload and ingest scan files |
-| **Discover** | Run active and passive network discovery (ping, ARP, TCP, UDP, SNMP, passive listen) |
+1. Enter the interface name in the **Passive Listen** section of the sidebar (e.g. `tun0`, `eth0`, `Ethernet 2`).
+2. Set a capture duration (5–300 s; default 30 s).
+3. Optionally enter a target CIDR in the **Discover** field above to filter results to that network.
+4. Click **Start Passive Listen**. GravWell blocks for the capture duration, then ingests all observed unique unicast IPs.
 
-**Project access** can be set to *All projects* (including future ones) or restricted to a named list of specific projects. Non-admin users only see projects they are allowed to access in the sidebar dropdown.
-
-### Manage Users screen
-
-**☰ → Manage Users** (admin only) shows a live RBAC table with:
-
-- **Role** badge (Admin / User)
-- **Permissions** — all four permission types shown as green (granted) or greyed-out (denied) badges
-- **Projects** — "All" badge or individual project names
-- **Last Login** timestamp
-- Per-row **delete** button (disabled for the currently signed-in account)
+Hosts discovered passively are tagged `dns-resolver` if they were observed sending DNS queries to port 53 — a useful pivot for internal DNS enumeration.
 
 ---
 
@@ -459,37 +394,6 @@ Click any node to open the detail panel, then click **Edit** to:
 
 ---
 
-## Active & Passive Discovery
-
-GravWell can discover hosts directly from the **Discover** section of the sidebar, without needing an external scanner.
-
-### Active discovery
-
-| Method | What it does |
-|--------|-------------|
-| **Ping** | ICMP echo sweep across the target CIDR |
-| **ARP** | Reads the local ARP cache (finds hosts on directly connected subnets) |
-| **TCP** | Parallel TCP connect scan on common ports (22, 80, 443, 445, 3389, …) |
-| **UDP** | Application-level probes to DNS (53), NTP (123), and SNMP (161) — works without raw sockets |
-| **SNMP** | SNMP v1/v2c poll for sysDescr, sysName, ifTable; walks the ARP cache, CDP, and LLDP neighbor tables on responsive devices; tries common community strings automatically (`public`, `private`, `community`, `cisco`, etc.) |
-
-Enter a target CIDR or single IP, tick the methods you want, and click **Start Discovery**. Discovered hosts are ingested immediately and appear on the graph.
-
-### Passive discovery
-
-Passive listen captures live traffic on any network interface (VPN tunnel, LAN adapter, Wi-Fi) to surface hosts that firewalls silently drop active probes for — the host only needs to *send* a single packet to be discovered.
-
-**Requirements:** `pip install "gravwell[discovery]"` (installs scapy). See [Requirements](#requirements) for platform notes.
-
-1. Enter the interface name in the **Passive Listen** section of the sidebar (e.g. `tun0`, `eth0`, `Ethernet 2`).
-2. Set a capture duration (5–300 s; default 30 s).
-3. Optionally enter a target CIDR in the **Discover** field above to filter results to that network.
-4. Click **Start Passive Listen**. GravWell blocks for the capture duration, then ingests all observed unique unicast IPs.
-
-Hosts discovered passively are tagged `dns-resolver` if they were observed sending DNS queries to port 53 — a useful pivot for internal DNS enumeration.
-
----
-
 ## Attack Path Analysis
 
 The **Attack Paths** tab provides several automated analyses:
@@ -510,6 +414,102 @@ The **Attack Paths** tab provides several automated analyses:
 | **AD Enum** | Domain enumeration findings from enum4linux: group names, password policy weaknesses, SMB signing status |
 
 Clicking any IP or hostname in analysis results pans the graph to that node. Clicking a row in the Services or Vulnerabilities sub-tabs does the same.
+
+---
+
+## Projects
+
+Projects are separate encrypted databases — one per engagement is recommended. Manage them from the sidebar in the web UI (New / Rename / Delete) or target them directly via the CLI.
+
+Default database: `~/.gravwell/gravwell.db`
+Project databases: `~/.gravwell/projects/<name>.db`
+
+---
+
+## User Management
+
+### Adding users
+
+Admin users can add new accounts from the web UI via the **☰ menu → Add User**, or from the CLI:
+
+```bash
+gravwell user add analyst
+# Prompts for your credentials first, then the new user's password
+```
+
+Each user holds their own encrypted copy of the database key. All users within a project share the same scan data.
+
+### Role-based access control (RBAC)
+
+Every user has a **Role** and a set of **Permissions**, configured at creation time and editable via **☰ → Manage Users**.
+
+| Role | Description |
+|------|-------------|
+| **Admin** | Full access — can manage users, create/delete projects, and perform all operations |
+| **User** | Access limited to assigned permissions and projects |
+
+| Permission | What it allows |
+|------------|----------------|
+| **Edit** | Modify host properties, tags, notes, and node layout |
+| **Import** | Upload and ingest scan files |
+| **Discover** | Run active and passive network discovery (ping, ARP, TCP, UDP, SNMP, passive listen) |
+
+**Project access** can be set to *All projects* (including future ones) or restricted to a named list of specific projects. Non-admin users only see projects they are allowed to access in the sidebar dropdown.
+
+### Manage Users screen
+
+**☰ → Manage Users** (admin only) shows a live RBAC table with:
+
+- **Role** badge (Admin / User)
+- **Permissions** — all four permission types shown as green (granted) or greyed-out (denied) badges
+- **Projects** — "All" badge or individual project names
+- **Last Login** timestamp
+- Per-row **delete** button (disabled for the currently signed-in account)
+
+---
+
+## CLI Reference
+
+```
+gravwell user add <username> [--admin]        Add a user
+gravwell user delete <username>               Remove a user
+gravwell user list                            List all users
+gravwell passwd <username>                    Change a user's password
+
+gravwell ingest <file> [<file>...]            Import scan files (auto-detected format)
+gravwell ingest --format nmap <file>          Import with a forced parser
+
+gravwell list hosts [--min-cvss N]            List discovered hosts
+gravwell list hosts [--os Windows]            Filter by OS family
+gravwell list hosts [--subnet 10.0.0.0/24]   Filter by subnet
+gravwell list services [--ip IP] [--port N]   List open services
+gravwell list vulns [--ip IP]                         List vulnerabilities
+gravwell list vulns [--min-cvss N]                    Filter by minimum CVSS score
+gravwell list vulns [--severity critical|high|...]    Filter by severity band
+
+gravwell path <src-ip> <dst-ip>               Show attack path between two hosts
+
+gravwell discover <target-cidr>               Run active discovery (ping/ARP/TCP/UDP/SNMP)
+gravwell discover <target-cidr> \
+  --methods ping,tcp,snmp \                   Select discovery methods (default: all)
+  --community public \                        SNMP community string
+  --snmp-port 161 \                           SNMP port (default: 161)
+  --tcp-ports 22,80,443,445,3389 \           Custom TCP port list (default: common ports)
+  --workers 64 \                              Parallel threads (default: 64)
+  --no-follow-neighbors                       Skip ARP/CDP/LLDP neighbor walk on SNMP devices
+
+gravwell merge-macs [--dry-run]               Merge hosts sharing a MAC address into one node
+
+gravwell serve [--port PORT] [--host HOST]    Start the web server
+gravwell reset                                Wipe all data in the current project
+```
+
+All data commands prompt for credentials to decrypt the database. Use `--db <path>` or set `GRAVWELL_DB` to target a specific project database:
+
+```bash
+gravwell --db ~/.gravwell/projects/client-acme.db ingest scan.xml
+GRAVWELL_DB=~/.gravwell/projects/client-acme.db gravwell list hosts
+```
 
 ---
 

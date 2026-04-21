@@ -53,7 +53,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.4"
+VERSION = "1.5"
 
 # ── Port lists ────────────────────────────────────────────────────────────────
 
@@ -216,6 +216,112 @@ _ROLE_SIGNATURES: List[Tuple[set, Optional[str], List[str]]] = [
     ({5900},                None,       ["vnc"]),
     ({3389},                None,       ["rdp"]),
 ]
+
+
+# ── Banner / HTTP header → OS fingerprinting ─────────────────────────────────
+
+# SSH banner substrings → (os_family, os_name).  Evaluated top-to-bottom;
+# first match wins.  openssh_for_windows must come before generic openssh.
+_SSH_OS_PATTERNS: List[Tuple[str, str, str]] = [
+    ("openssh_for_windows",  "Windows",  "Windows"),
+    ("ubuntu",               "Linux",    "Ubuntu"),
+    ("debian",               "Linux",    "Debian"),
+    ("raspbian",             "Linux",    "Raspberry Pi OS"),
+    ("centos",               "Linux",    "CentOS"),
+    ("rhel",                 "Linux",    "RHEL"),
+    ("fedora",               "Linux",    "Fedora"),
+    ("amzn",                 "Linux",    "Amazon Linux"),
+    ("amazon",               "Linux",    "Amazon Linux"),
+    ("alpine",               "Linux",    "Alpine Linux"),
+    ("kali",                 "Linux",    "Kali Linux"),
+    ("freebsd",              "FreeBSD",  "FreeBSD"),
+    ("netbsd",               "NetBSD",   "NetBSD"),
+    ("openbsd",              "OpenBSD",  "OpenBSD"),
+    ("dropbear",             "Linux",    "Linux (embedded)"),
+    ("openssh",              "Linux",    ""),                   # generic fallback
+]
+
+_IIS_VERSIONS: Dict[str, str] = {
+    "10.0": "Windows Server 2016+",
+    "8.5":  "Windows Server 2012 R2",
+    "8.0":  "Windows Server 2012",
+    "7.5":  "Windows Server 2008 R2",
+    "7.0":  "Windows Server 2008",
+    "6.0":  "Windows Server 2003",
+}
+
+# Substrings found in Apache/nginx Server headers → (os_family, os_name)
+_HTTP_DISTRO_PATTERNS: List[Tuple[str, str, str]] = [
+    ("ubuntu",    "Linux",    "Ubuntu"),
+    ("debian",    "Linux",    "Debian"),
+    ("centos",    "Linux",    "CentOS"),
+    ("red hat",   "Linux",    "RHEL"),
+    ("fedora",    "Linux",    "Fedora"),
+    ("amzn",      "Linux",    "Amazon Linux"),
+    ("amazon",    "Linux",    "Amazon Linux"),
+    ("alpine",    "Linux",    "Alpine Linux"),
+    ("raspbian",  "Linux",    "Raspberry Pi OS"),
+    ("freebsd",   "FreeBSD",  "FreeBSD"),
+    ("darwin",    "macOS",    "macOS"),
+    ("win",       "Windows",  "Windows"),
+]
+
+
+def _os_from_banner(banner: str, port: int) -> Tuple[Optional[str], Optional[str]]:
+    """Parse a service banner → (os_family, os_name). Both may be None."""
+    if not banner:
+        return None, None
+    b = banner.lower()
+
+    if port == 22:
+        for substr, family, name in _SSH_OS_PATTERNS:
+            if substr in b:
+                return family, (name or None)
+
+    if port == 21:
+        if "microsoft" in b or "iis" in b:
+            return "Windows", "Windows"
+        if any(x in b for x in ("vsftpd", "proftpd", "wu-ftpd", "pure-ftpd")):
+            return "Linux", None
+
+    if port == 25:
+        if "microsoft" in b or "exchange" in b:
+            return "Windows", "Windows"
+        if any(x in b for x in ("postfix", "exim", "sendmail", "dovecot", "qmail")):
+            return "Linux", None
+
+    if port in (110, 143):
+        if "microsoft" in b or "exchange" in b:
+            return "Windows", "Windows"
+        if any(x in b for x in ("dovecot", "courier", "cyrus", "uw-imap")):
+            return "Linux", None
+
+    return None, None
+
+
+def _os_from_http_headers(server: str, powered_by: str = "") -> Tuple[Optional[str], Optional[str]]:
+    """Parse HTTP Server / X-Powered-By headers → (os_family, os_name)."""
+    s = server.lower()
+    p = powered_by.lower()
+
+    # IIS → Windows with version-specific name
+    m = re.search(r"microsoft-iis/(\d+\.\d+)", s)
+    if m:
+        return "Windows", _IIS_VERSIONS.get(m.group(1), "Windows Server")
+    if "microsoft httpapi" in s or "asp.net" in p:
+        return "Windows", None
+
+    # Distro tags embedded in Apache/nginx Server strings
+    for substr, family, name in _HTTP_DISTRO_PATTERNS:
+        if substr in s:
+            return family, (name or None)
+
+    # Generic server software → usually Linux
+    if any(x in s for x in ("apache", "nginx", "lighttpd", "caddy",
+                              "gunicorn", "uvicorn", "aiohttp", "tornado")):
+        return "Linux", None
+
+    return None, None
 
 
 def infer_os_and_roles(open_ports: List[int]) -> Tuple[Optional[str], List[str]]:
@@ -1100,7 +1206,7 @@ def enrich_http(scan_results: List[dict], timeout: float = 3.0, workers: int = 2
     import urllib.request
 
     tasks = [
-        (host["ip"], pe["port"], pe)
+        (host, pe["port"], pe)
         for host in scan_results
         for pe in host.get("open_ports", [])
         if pe.get("port") in _HTTP_PORTS or pe.get("port") in _HTTPS_PORTS
@@ -1109,7 +1215,8 @@ def enrich_http(scan_results: List[dict], timeout: float = 3.0, workers: int = 2
         return
 
     def _fetch(task: Tuple) -> None:
-        ip, port, port_entry = task
+        host_data, port, port_entry = task
+        ip = host_data["ip"]
         is_https = port in _HTTPS_PORTS
         scheme = "https" if is_https else "http"
         url = f"{scheme}://{ip}:{port}/"
@@ -1123,9 +1230,15 @@ def enrich_http(scan_results: List[dict], timeout: float = 3.0, workers: int = 2
             else:
                 resp = urllib.request.urlopen(req, timeout=timeout)
             with resp:
-                server = resp.headers.get("Server", "")
+                server     = resp.headers.get("Server", "")
+                powered_by = resp.headers.get("X-Powered-By", "")
                 if server:
                     port_entry["http_server"] = server[:100]
+                h_family, h_name = _os_from_http_headers(server, powered_by)
+                if h_family and "os_hint" not in host_data:
+                    host_data["os_hint"] = h_family
+                if h_name and "os_name_hint" not in host_data:
+                    host_data["os_name_hint"] = h_name
                 ctype = resp.headers.get("Content-Type", "")
                 if "html" in ctype.lower():
                     body = resp.read(8192).decode("utf-8", errors="replace")
@@ -1645,13 +1758,18 @@ def port_scan(
                     port_entry: dict = {"port": port, "proto": "tcp", "service": svc}
                     if banner:
                         port_entry["banner"] = banner
+                        b_family, b_name = _os_from_banner(banner, port)
+                        if b_family and "os_hint" not in results[ip]:
+                            results[ip]["os_hint"] = b_family
+                        if b_name and "os_name_hint" not in results[ip]:
+                            results[ip]["os_name_hint"] = b_name
                     results[ip]["open_ports"].append(port_entry)
 
-    # OS/role inference for each discovered host
+    # OS/role inference from port signatures — only fills gaps left by banner parsing
     for ip, data in results.items():
         open_port_nums = [p["port"] for p in data["open_ports"]]
         os_hint, roles = infer_os_and_roles(open_port_nums)
-        if os_hint:
+        if os_hint and "os_hint" not in data:
             data["os_hint"] = os_hint
         if roles:
             data["role_hints"] = roles

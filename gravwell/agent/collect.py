@@ -1147,47 +1147,56 @@ def host_discovery(
     networks: List[str],
     timeout_secs: float = 1.0,
     workers: int = 200,
-) -> List[str]:
+) -> Tuple[List[str], Dict[str, List[int]]]:
     """Discover live hosts across the given CIDR networks.
 
     Priority:
       1. nmap -sn  — multi-probe (ARP + TCP SYN 443 + TCP ACK 80 + ICMP).
                      Most reliable; used when nmap is available.
-      2. TCP probe — connect to common ports; works even when ICMP is blocked.
-                     Used as primary fallback without nmap.
-      3. ICMP ping — supplement to catch hosts with no open TCP ports
-                     (e.g. routers, printers, embedded devices).
-                     fping used when available, else threaded system ping.
+      2. TCP probe + ICMP ping run concurrently.
+                     TCP covers ICMP-blocked hosts; ICMP catches devices with
+                     no open TCP ports (routers, printers, embedded devices).
 
-    Returns a deduplicated list of live IPs.
+    Returns (live_ips, known_open) where known_open is {ip: [probe_ports]}
+    from the TCP sweep — passed to port_scan to avoid re-scanning those ports.
     """
     targets = _expand_networks(networks)
     if not targets:
-        return []
+        return [], {}
 
     _info(f"Host discovery: {len(targets)} targets across {len(networks)} network(s)…")
 
     # 1. nmap -sn
-    live = _nmap_host_discovery(targets, timeout_secs)
-    if live is not None:
-        _info(f"Host discovery done (nmap -sn): {len(live)} hosts")
-        return live
+    nmap_live = _nmap_host_discovery(targets, timeout_secs)
+    if nmap_live is not None:
+        _info(f"Host discovery done (nmap -sn): {len(nmap_live)} hosts")
+        return nmap_live, {}
 
-    # 2. TCP probe (primary — works through host firewalls that block ICMP)
-    live_set: set = set()
-    tcp_live = _tcp_probe_sweep(targets, timeout_secs, workers)
-    live_set.update(tcp_live)
-    _info(f"  TCP probe: {len(tcp_live)} hosts responded")
+    # 2. TCP probe + ICMP ping run concurrently
+    tcp_result: List[Tuple[List[str], Dict[str, List[int]]]] = []
+    icmp_live: List[str] = []
 
-    # 3. ICMP ping (supplement — catches ICMP-only devices like routers/printers)
-    icmp_live = _icmp_sweep(targets, timeout_secs, workers)
+    def _run_tcp() -> None:
+        tcp_result.append(_tcp_probe_sweep(targets, timeout_secs, workers))
+
+    def _run_icmp() -> None:
+        icmp_live.extend(_icmp_sweep(targets, timeout_secs, workers))
+
+    t_tcp  = threading.Thread(target=_run_tcp,  daemon=True)
+    t_icmp = threading.Thread(target=_run_icmp, daemon=True)
+    t_tcp.start()
+    t_icmp.start()
+    t_tcp.join()
+    t_icmp.join()
+
+    tcp_live, known_open = tcp_result[0] if tcp_result else ([], {})
+    live_set: set = set(tcp_live)
     new_icmp = [ip for ip in icmp_live if ip not in live_set]
-    if new_icmp:
-        _info(f"  ICMP ping: {len(new_icmp)} additional hosts")
     live_set.update(icmp_live)
+    _info(f"  TCP probe: {len(tcp_live)} hosts  |  ICMP: {len(new_icmp)} additional")
 
     _info(f"Host discovery done: {len(live_set)} hosts")
-    return list(live_set)
+    return list(live_set), known_open
 
 
 def _expand_networks(networks: List[str]) -> List[str]:
@@ -1242,32 +1251,54 @@ def _nmap_host_discovery(targets: List[str], timeout_secs: float) -> Optional[Li
 
 
 def _tcp_probe_sweep(targets: List[str], timeout_secs: float,
-                     workers: int) -> List[str]:
-    """TCP connect probe: a host is alive if any probe port accepts a connection."""
+                     workers: int) -> Tuple[List[str], Dict[str, List[int]]]:
+    """TCP connect probe: a host is alive if any probe port accepts a connection.
+
+    All probe ports are tried in parallel per host (scatter). A dead host
+    costs exactly one timeout (0.5 s) regardless of how many ports are probed,
+    rather than N × timeout for a sequential approach.
+
+    Returns (live_ips, {ip: [open_probe_ports]}) — the open probe ports are
+    passed to port_scan so they don't need to be re-scanned.
+    """
     live: List[str] = []
+    open_probe_ports: Dict[str, List[int]] = {}
     lock = threading.Lock()
-    # Use a shorter timeout for the probe — we just need to know if it's up
     probe_timeout = min(timeout_secs, 0.5)
 
-    def _probe(ip: str) -> Optional[str]:
-        for port in _PROBE_PORTS:
+    def _probe(ip: str) -> Optional[Tuple[str, List[int]]]:
+        open_ports: List[int] = []
+        found = threading.Event()
+
+        def _try_port(port: int) -> None:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(probe_timeout)
                 if s.connect_ex((ip, port)) == 0:
                     s.close()
-                    return ip
+                    with lock:
+                        open_ports.append(port)
+                    found.set()
+                    return
                 s.close()
             except Exception:
                 pass
-        return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(_PROBE_PORTS)) as port_ex:
+            futs = [port_ex.submit(_try_port, p) for p in _PROBE_PORTS]
+            concurrent.futures.wait(futs, timeout=probe_timeout + 0.1)
+            for f in futs:
+                f.cancel()
+
+        return (ip, open_ports) if open_ports else None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for result in ex.map(_probe, targets):
             if result:
-                with lock:
-                    live.append(result)
-    return live
+                ip, ports = result
+                live.append(ip)
+                open_probe_ports[ip] = ports
+    return live, open_probe_ports
 
 
 def _icmp_sweep(targets: List[str], timeout_secs: float,
@@ -1329,14 +1360,43 @@ def port_scan(
     ips: List[str],
     timeout: float = 1.0,
     workers: int = 150,
+    known_open: Optional[Dict[str, List[int]]] = None,
 ) -> List[dict]:
-    """TCP scan of top ports. Uses nmap when available, otherwise socket scan."""
+    """TCP scan of top ports. Uses nmap when available, otherwise socket scan.
+
+    known_open: optional {ip: [port, ...]} of ports already confirmed open
+    during host discovery — those are seeded directly and skipped during scan.
+    """
     nmap = _nmap_scan(ips, timeout)
     if nmap is not None:
         return nmap
 
-    _info(f"Port scan (socket): {len(ips)} host(s), {len(_TOP_PORTS)} ports each…")
+    # Seed results with already-known open ports from the probe sweep
     results: Dict[str, dict] = {}
+    pre_known: Dict[str, set] = {}
+    if known_open:
+        for ip, ports in known_open.items():
+            if ip not in ips:
+                continue
+            port_map = {p: svc for p, svc in _TOP_PORTS}
+            if ip not in results:
+                results[ip] = {"ip": ip, "open_ports": []}
+            pre_known[ip] = set(ports)
+            for p in ports:
+                results[ip]["open_ports"].append({
+                    "port": p, "proto": "tcp",
+                    "service": port_map.get(p, ""),
+                })
+
+    # Build tasks — skip ports already confirmed open
+    tasks = [
+        (ip, port, svc)
+        for ip in ips
+        for port, svc in _TOP_PORTS
+        if port not in pre_known.get(ip, set())
+    ]
+    _info(f"Port scan (socket): {len(ips)} host(s), "
+          f"{len(tasks)} tasks ({len(_TOP_PORTS)} ports - pre-known)…")
     lock = threading.Lock()
 
     def _try(task: Tuple[str, int, str]) -> Optional[Tuple[str, int, str, Optional[str]]]:
@@ -1353,7 +1413,6 @@ def port_scan(
             pass
         return None
 
-    tasks = [(ip, port, svc) for ip in ips for port, svc in _TOP_PORTS]
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for result in ex.map(_try, tasks):
             if result:
@@ -1366,12 +1425,8 @@ def port_scan(
                         port_entry["banner"] = banner
                     results[ip]["open_ports"].append(port_entry)
 
-    # Reverse DNS + OS/role inference for each discovered host
+    # OS/role inference for each discovered host
     for ip, data in results.items():
-        try:
-            data["hostname"] = socket.gethostbyaddr(ip)[0]
-        except Exception:
-            pass
         open_port_nums = [p["port"] for p in data["open_ports"]]
         os_hint, roles = infer_os_and_roles(open_port_nums)
         if os_hint:
@@ -1663,6 +1718,7 @@ Examples:
     _mdns_thread.start()
 
     # 5. Ping sweep
+    known_open: Dict[str, List[int]] = {}
     if not args.no_sweep:
         # Always sweep directly-attached networks; add routed ones with --routes
         sweep_nets = list(direct_nets)
@@ -1687,7 +1743,7 @@ Examples:
             sweep_nets += [n for n in routed_nets if n not in sweep_nets]
 
         if sweep_nets:
-            live = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers)
+            live, known_open = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers)
             for ip in live:
                 if ip not in existing_ips:
                     neighbors.append({"ip": ip, "source": "ping_sweep"})
@@ -1717,21 +1773,42 @@ Examples:
     scan_results: List[dict] = []
     if not args.no_scan and neighbors:
         scan_targets = list({n["ip"] for n in neighbors} | set(self_info.get("ips", [])))
-        scan_results = port_scan(scan_targets, timeout=args.timeout, workers=args.workers)
+        scan_results = port_scan(
+            scan_targets,
+            timeout=args.timeout,
+            workers=args.workers,
+            known_open=known_open,
+        )
 
-    # 7. Post-scan enrichment
-    if scan_results:
-        _info("TLS certificate extraction…")
-        enrich_tls(scan_results, timeout=min(args.timeout + 1, 3.0))
+    # 7. Post-scan enrichment — all four methods are pure I/O; run concurrently
+    _info("Post-scan enrichment (TLS / HTTP / NetBIOS / rDNS — concurrent)…")
+    rdns: Dict[str, str] = {}
 
-        _info("HTTP title/Server enrichment…")
-        enrich_http(scan_results, timeout=min(args.timeout + 2, 4.0))
+    def _do_tls() -> None:
+        if scan_results:
+            enrich_tls(scan_results, timeout=min(args.timeout + 1, 3.0))
 
-    _info("NetBIOS name resolution…")
-    enrich_netbios(neighbors, timeout_secs=min(args.timeout, 1.5))
+    def _do_http() -> None:
+        if scan_results:
+            enrich_http(scan_results, timeout=min(args.timeout + 2, 4.0))
 
-    _info("Reverse DNS sweep…")
-    rdns = reverse_dns_sweep(list(existing_ips))
+    def _do_netbios() -> None:
+        enrich_netbios(neighbors, timeout_secs=min(args.timeout, 1.5))
+
+    def _do_rdns() -> None:
+        rdns.update(reverse_dns_sweep(list(existing_ips)))
+
+    enrich_threads = [
+        threading.Thread(target=_do_tls,     daemon=True),
+        threading.Thread(target=_do_http,    daemon=True),
+        threading.Thread(target=_do_netbios, daemon=True),
+        threading.Thread(target=_do_rdns,    daemon=True),
+    ]
+    for t in enrich_threads:
+        t.start()
+    for t in enrich_threads:
+        t.join()
+
     for n in neighbors:
         if not n.get("hostname") and n["ip"] in rdns:
             n["hostname"] = rdns[n["ip"]]

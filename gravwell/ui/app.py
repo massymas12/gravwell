@@ -660,6 +660,13 @@ def create_app(db_path: str) -> dash.Dash:
     from gravwell.auth import init_auth
     init_auth(app.server, db_path)
 
+    # Pre-load MEK from the server key file so agent submissions work
+    # immediately after a restart, without requiring a browser login first.
+    from gravwell.keystore import load_server_mek
+    _startup_mek = load_server_mek(db_path)
+    if _startup_mek is not None:
+        app.server.config["GRAVWELL_MEK"] = _startup_mek
+
     # Register agent API routes
     from gravwell.ui.api import api_bp
     app.server.register_blueprint(api_bp)

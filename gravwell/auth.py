@@ -90,6 +90,8 @@ def init_auth(flask_app, db_path: str) -> None:
             if mek is not None:
                 # Store MEK in memory — never written to disk
                 flask_app.config["GRAVWELL_MEK"] = mek
+                # Persist auto-unlock copy so agents work after server restarts
+                ks_mod.store_server_mek(db_path, mek)
                 # Open / create tables now that the MEK is available
                 init_db(db_path)
                 ks_mod.touch_last_login(db_path, username)

@@ -172,3 +172,51 @@ def authenticate(db_path: str, username: str, password: str) -> bytes | None:
     if not check_password_hash(user["password_hash"], password):
         return None
     return decrypt_mek(user, password)
+
+
+# ── Server auto-unlock (MEK encrypted with a machine-local key file) ──────────
+
+def _server_key_path(db_path: str) -> Path:
+    return Path(db_path).with_suffix(".server.key")
+
+
+def store_server_mek(db_path: str, mek: bytes) -> None:
+    """Persist an auto-unlock copy of the MEK encrypted with a machine-local key.
+
+    Called on first login so the server can open the DB after a restart
+    without requiring a browser session.  Security boundary: the server.key
+    file — treat it like a private key.
+    """
+    key_path = _server_key_path(db_path)
+    if not key_path.exists():
+        server_key = secrets.token_bytes(32)
+        key_path.write_bytes(server_key)
+        try:
+            os.chmod(key_path, 0o600)
+        except Exception:
+            pass
+    else:
+        server_key = key_path.read_bytes()
+
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(server_key).encrypt(nonce, mek, None)
+
+    ks = load(db_path)
+    ks["server_mek_nonce"] = nonce.hex()
+    ks["server_mek_ct"]    = ct.hex()
+    save(db_path, ks)
+
+
+def load_server_mek(db_path: str) -> bytes | None:
+    """Decrypt and return the server MEK, or None if not set up yet."""
+    key_path = _server_key_path(db_path)
+    if not key_path.exists():
+        return None
+    try:
+        server_key = key_path.read_bytes()
+        ks = load(db_path)
+        nonce = bytes.fromhex(ks["server_mek_nonce"])
+        ct    = bytes.fromhex(ks["server_mek_ct"])
+        return AESGCM(server_key).decrypt(nonce, ct, None)
+    except Exception:
+        return None

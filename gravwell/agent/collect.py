@@ -52,7 +52,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 # ── Port lists ────────────────────────────────────────────────────────────────
 
@@ -1419,18 +1419,34 @@ def _expand_networks(networks: List[str]) -> List[str]:
     return targets
 
 
+def _nmap_write_targets(ips: List[str]) -> str:
+    """Write IPs to a temp file and return its path. Caller must delete it."""
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="nmap_targets_")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(ips))
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 def _nmap_host_discovery(targets: List[str], timeout_secs: float) -> Optional[List[str]]:
     """Use nmap -sn for multi-probe host discovery. Returns None if nmap unavailable."""
     import shutil
     if not shutil.which("nmap"):
         return None
+    tmp = _nmap_write_targets(targets)
     try:
         timing = "-T4" if timeout_secs <= 1.0 else "-T3"
         _info("  Using nmap -sn for host discovery…")
         import xml.etree.ElementTree as ET
-        cmd_xml = ["nmap", "-sn", "-oX", "-", timing, "-iL", "-"]
-        r = subprocess.run(cmd_xml, input="\n".join(targets),
-                           capture_output=True, text=True, timeout=600)
+        cmd_xml = ["nmap", "-sn", "-oX", "-", timing, "-iL", tmp]
+        r = subprocess.run(cmd_xml, capture_output=True, text=True, timeout=600)
         xml_out = r.stdout.strip()
         if not xml_out.startswith("<?xml"):
             return None
@@ -1448,6 +1464,11 @@ def _nmap_host_discovery(targets: List[str], timeout_secs: float) -> Optional[Li
     except Exception as exc:
         _warn(f"nmap -sn failed ({exc}), falling back to TCP+ICMP discovery")
         return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _tcp_probe_sweep(targets: List[str], timeout_secs: float,
@@ -1678,10 +1699,16 @@ def _nmap_scan(ips: List[str], timeout: float) -> Optional[List[dict]]:
         if _is_elevated():
             cmd.append("-O")
 
-        cmd += ["-iL", "-"]
-        _info(f"nmap scan: {len(ips)} host(s)…")
-        r = subprocess.run(cmd, input="\n".join(ips),
-                           capture_output=True, text=True, timeout=600)
+        tmp = _nmap_write_targets(ips)
+        try:
+            cmd += ["-iL", tmp]
+            _info(f"nmap scan: {len(ips)} host(s)…")
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         xml_out = r.stdout.strip()
         if not xml_out.startswith("<?xml"):
             return None

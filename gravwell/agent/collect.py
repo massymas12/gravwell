@@ -714,7 +714,7 @@ def collect_active_connections() -> List[dict]:
             ip = m.group(1)
             try:
                 addr = ipaddress.IPv4Address(ip)
-                if addr.is_loopback or addr.is_unspecified:
+                if not addr.is_private or addr.is_loopback or addr.is_unspecified:
                     continue
             except ValueError:
                 continue

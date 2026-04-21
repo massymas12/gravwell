@@ -181,15 +181,6 @@ def _render_hosts_table(db_path: str, scope: dict | None = None):
             .order_by(HostORM.max_cvss.desc())
             .all()
         )
-        def _cs_status(tags):
-            if "crowdstrike" in tags:
-                # cs-agent:VERSION only exists when agent_version was present at
-                # import time.  Absence is more reliable than "no-sensor" which
-                # accumulates and never clears even after a sensor is installed.
-                has_agent = any(t.startswith("cs-agent:") for t in tags)
-                return "" if has_agent else "no agent"
-            return "not in cs"
-
         # Apply subnet / domain scope filter
         scope = scope or {}
         banner_text = None
@@ -219,7 +210,6 @@ def _render_hosts_table(db_path: str, scope: dict | None = None):
                 "high":       str(h.vuln_count_high),
                 "medium":     str(h.vuln_count_medium),
                 "sources":    ", ".join(h.source_files),
-                "cs":         _cs_status(h.tags or []),
                 "note":       "\u2713" if h.notes else "",
             }
             for h, open_count in results
@@ -238,7 +228,6 @@ def _render_hosts_table(db_path: str, scope: dict | None = None):
             {"name": "High",       "id": "high"},
             {"name": "Med",        "id": "medium"},
             {"name": "Sources",    "id": "sources"},
-            {"name": "CS",         "id": "cs"},
             {"name": "Note",       "id": "note"},
         ],
         filter_action="native", sort_action="native", sort_mode="multi",

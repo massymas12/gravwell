@@ -174,19 +174,71 @@ def authenticate(db_path: str, username: str, password: str) -> bytes | None:
     return decrypt_mek(user, password)
 
 
-# ── Server auto-unlock (MEK encrypted with a machine-local key file) ──────────
+# ── Server auto-unlock ────────────────────────────────────────────────────────
+#
+# Priority:
+#   Windows  → DPAPI (CryptProtectData/CryptUnprotectData via ctypes).
+#              The blob is machine+user bound; stored as hex in the keystore.
+#   macOS    → OS Keychain via the `keyring` package.
+#   Linux    → libsecret (GNOME Keyring / KWallet) via `keyring` + `secretstorage`.
+#   Fallback → AES-256-GCM with a local key file (weakest; last resort only).
+
+_KEYRING_SERVICE = "gravwell"
+
+
+def _keyring_account(db_path: str) -> str:
+    return f"mek:{Path(db_path).stem}"
+
+
+# ── Windows DPAPI ─────────────────────────────────────────────────────────────
+
+def _dpapi_encrypt(data: bytes) -> bytes:
+    import ctypes
+    import ctypes.wintypes
+
+    class _Blob(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf   = ctypes.create_string_buffer(data)
+    in_b  = _Blob(len(data), buf)
+    out_b = _Blob()
+    if not ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(in_b), None, None, None, None, 0x01, ctypes.byref(out_b)
+    ):
+        raise RuntimeError(f"DPAPI CryptProtectData failed ({ctypes.GetLastError()})")
+    result = bytes(ctypes.string_at(out_b.pbData, out_b.cbData))
+    ctypes.windll.kernel32.LocalFree(out_b.pbData)
+    return result
+
+
+def _dpapi_decrypt(data: bytes) -> bytes:
+    import ctypes
+    import ctypes.wintypes
+
+    class _Blob(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf   = ctypes.create_string_buffer(data)
+    in_b  = _Blob(len(data), buf)
+    out_b = _Blob()
+    if not ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(in_b), None, None, None, None, 0x01, ctypes.byref(out_b)
+    ):
+        raise RuntimeError(f"DPAPI CryptUnprotectData failed ({ctypes.GetLastError()})")
+    result = bytes(ctypes.string_at(out_b.pbData, out_b.cbData))
+    ctypes.windll.kernel32.LocalFree(out_b.pbData)
+    return result
+
+
+# ── Key-file fallback ─────────────────────────────────────────────────────────
 
 def _server_key_path(db_path: str) -> Path:
     return Path(db_path).with_suffix(".server.key")
 
 
-def store_server_mek(db_path: str, mek: bytes) -> None:
-    """Persist an auto-unlock copy of the MEK encrypted with a machine-local key.
-
-    Called on first login so the server can open the DB after a restart
-    without requiring a browser session.  Security boundary: the server.key
-    file — treat it like a private key.
-    """
+def _store_keyfile(db_path: str, mek: bytes) -> None:
     key_path = _server_key_path(db_path)
     if not key_path.exists():
         server_key = secrets.token_bytes(32)
@@ -197,18 +249,15 @@ def store_server_mek(db_path: str, mek: bytes) -> None:
             pass
     else:
         server_key = key_path.read_bytes()
-
     nonce = secrets.token_bytes(12)
     ct = AESGCM(server_key).encrypt(nonce, mek, None)
-
     ks = load(db_path)
     ks["server_mek_nonce"] = nonce.hex()
     ks["server_mek_ct"]    = ct.hex()
     save(db_path, ks)
 
 
-def load_server_mek(db_path: str) -> bytes | None:
-    """Decrypt and return the server MEK, or None if not set up yet."""
+def _load_keyfile(db_path: str) -> bytes | None:
     key_path = _server_key_path(db_path)
     if not key_path.exists():
         return None
@@ -220,3 +269,66 @@ def load_server_mek(db_path: str) -> bytes | None:
         return AESGCM(server_key).decrypt(nonce, ct, None)
     except Exception:
         return None
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def store_server_mek(db_path: str, mek: bytes) -> None:
+    """Persist an auto-unlock copy of the MEK in the OS credential store.
+
+    Called on every successful login.  On next restart the server can
+    call load_server_mek() to pre-populate the MEK without a browser session.
+    """
+    import platform
+    system = platform.system()
+
+    if system == "Windows":
+        try:
+            blob = _dpapi_encrypt(mek)
+            ks = load(db_path)
+            ks["dpapi_mek"] = blob.hex()
+            ks.pop("server_mek_nonce", None)   # remove old key-file slot
+            ks.pop("server_mek_ct",    None)
+            save(db_path, ks)
+            old_key = _server_key_path(db_path)   # remove old key file
+            if old_key.exists():
+                try:
+                    old_key.unlink()
+                except OSError:
+                    pass
+            return
+        except Exception:
+            pass  # fall through to key-file
+    else:
+        try:
+            import keyring as _kr
+            _kr.set_password(_KEYRING_SERVICE, _keyring_account(db_path), mek.hex())
+            return
+        except Exception:
+            pass  # fall through to key-file
+
+    _store_keyfile(db_path, mek)
+
+
+def load_server_mek(db_path: str) -> bytes | None:
+    """Return the MEK from the OS credential store, or None if not available."""
+    import platform
+    system = platform.system()
+
+    if system == "Windows":
+        ks = load(db_path)
+        if "dpapi_mek" in ks:
+            try:
+                return _dpapi_decrypt(bytes.fromhex(ks["dpapi_mek"]))
+            except Exception:
+                pass
+        return _load_keyfile(db_path)   # backward-compat with old key-file slot
+    else:
+        try:
+            import keyring as _kr
+            val = _kr.get_password(_KEYRING_SERVICE, _keyring_account(db_path))
+            if val:
+                return bytes.fromhex(val)
+        except Exception:
+            pass
+        return _load_keyfile(db_path)   # headless Linux without D-Bus / no keyring

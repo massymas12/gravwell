@@ -23,6 +23,8 @@ dependencies = [
     "waitress>=3.0",
     "openpyxl>=3.1",
     "pyinstaller>=6.0",
+    "keyring>=24.0",
+    "secretstorage>=3.3; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

@@ -445,20 +445,6 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
         console.print(f"[bold]TLS fingerprint:[/bold] [yellow]{fp}[/yellow]")
         console.print("[dim]Share this fingerprint with agents using --no-verify-tls "
                       "or pin it manually.[/dim]")
-        import logging
-
-        class _SuppressTLSHandshakeNoise(logging.Filter):
-            """Drop the flood of CERTIFICATE_UNKNOWN alerts browsers send
-            while the user is accepting the self-signed cert warning."""
-            _NOISE = ("SSLV3_ALERT_CERTIFICATE_UNKNOWN",
-                      "peer dropped the TLS connection suddenly",
-                      "SSL handshake")
-            def filter(self, record: logging.LogRecord) -> bool:
-                msg = record.getMessage()
-                return not any(n in msg for n in self._NOISE)
-
-        _tls_filter = _SuppressTLSHandshakeNoise()
-
         console.print(f"[dim]Open [cyan]{scheme}://{host_addr}:{port}[/cyan] — "
                       f"accept the browser's self-signed cert warning to continue.[/dim]")
 
@@ -467,13 +453,18 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
         server = _CherootServer((host_addr, port), app.server, numthreads=8)
         server.ssl_adapter = _SSLAdapter(str(cert_path), str(key_path))
 
-        # Add filter to every possible route cheroot might log through.
-        # Older cheroot uses a Logger instance; newer versions use a plain callable.
-        if hasattr(server.error_log, "addFilter"):
-            server.error_log.addFilter(_tls_filter)
-        for _log_name in ("cheroot.error", "cheroot.ssl", "cheroot.server", "cheroot"):
-            logging.getLogger(_log_name).addFilter(_tls_filter)
-        logging.root.addFilter(_tls_filter)   # catch-all if cheroot logs elsewhere
+        # Cheroot routes connection errors through server.error_log which in
+        # newer versions is a plain callable, not a Logger — patch it directly.
+        _orig_error_log = server.error_log
+        _NOISE = ("SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+                  "peer dropped the TLS connection suddenly")
+
+        def _filtered_error_log(*args, **kwargs):
+            msg = str(args[0]) if args else str(kwargs.get("msg", ""))
+            if not any(n in msg for n in _NOISE):
+                _orig_error_log(*args, **kwargs)
+
+        server.error_log = _filtered_error_log
         try:
             server.start()
         except KeyboardInterrupt:

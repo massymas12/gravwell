@@ -8,6 +8,18 @@ from gravwell.models.dataclasses import Host, ParseResult, Service
 from gravwell.parsers.base import BaseParser
 
 
+def _tls_hostnames(port_info: dict) -> list:
+    """Extract unique, non-wildcard DNS names from a port entry's TLS cert fields."""
+    names = []
+    cn = port_info.get("tls_cn", "")
+    if cn and not cn.startswith("*"):
+        names.append(cn)
+    for san in (port_info.get("tls_sans") or []):
+        if san and not san.startswith("*") and san not in names:
+            names.append(san)
+    return names
+
+
 class AgentParser(BaseParser):
     name = "agent"
 
@@ -144,13 +156,30 @@ class AgentParser(BaseParser):
                 port = port_info.get("port")
                 if not port:
                     continue
+
+                # Synthesise a banner from http_server / http_title if no raw banner
+                banner = port_info.get("banner") or None
+                if not banner:
+                    parts = []
+                    if port_info.get("http_server"):
+                        parts.append(port_info["http_server"])
+                    if port_info.get("http_title"):
+                        parts.append(f'[{port_info["http_title"]}]')
+                    if parts:
+                        banner = " ".join(parts)
+
                 host.services.append(Service(
                     port=int(port),
                     protocol=port_info.get("proto", "tcp"),
                     state="open",
                     service_name=port_info.get("service") or None,
-                    banner=port_info.get("banner") or None,
+                    banner=banner,
                 ))
+
+                # TLS certificate hostnames → add to host.hostnames
+                for hn in _tls_hostnames(port_info):
+                    if hn not in host.hostnames:
+                        host.hostnames.append(hn)
 
         if not result.hosts:
             result.warnings.append("No hosts found in agent output")

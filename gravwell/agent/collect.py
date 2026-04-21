@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """
-GravWell Collection Agent v1.1
+GravWell Collection Agent v1.2
 
 Collects network reconnaissance data from the local machine and optionally
 uploads it to a GravWell server for import into the network graph.
+
+Discovery methods (all stdlib-only, no third-party packages required):
+  - ARP / IPv6 neighbor table
+  - Active TCP connection harvest (netstat)
+  - Windows DNS cache (ipconfig /displaydns) and SMB browse list (net view)
+  - mDNS multicast (224.0.0.251:5353) — Apple, Linux/Avahi, IoT devices
+  - SSDP multicast (239.255.255.250:1900) — UPnP / smart appliances
+  - TCP-first host discovery (50+ common ports) with ICMP supplement
+  - NetBIOS Node Status (UDP 137) hostname resolution
+  - Reverse DNS sweep (PTR records)
+  - TLS certificate extraction (CN + SANs reveal internal FQDNs)
+  - HTTP/HTTPS enrichment (Server header + page title fingerprinting)
+  - nmap -sn / nmap port scan (used automatically when available)
 
 Usage:
     python collect.py [options]
@@ -11,14 +24,11 @@ Usage:
     --output PATH     Write JSON to PATH  (default: gravwell_collect_<host>_<ts>.json)
     --server URL      GravWell server URL (e.g. https://gravwell.corp.local)
     --key TOKEN       API key for server upload
-    --no-sweep        Skip subnet ping sweep (passive ARP table only)
+    --no-sweep        Skip active host discovery (TCP probe + ping)
     --no-scan         Skip port scan
     --routes          Also sweep routed (non-directly-attached) subnets
-    --timeout SECS    Port-scan / ping timeout in seconds (default: 1.0)
+    --timeout SECS    Scan/ping timeout in seconds (default: 1.0)
     --workers N       Concurrent threads for scanning (default: 150)
-
-Requires no third-party packages.  nmap and fping are used automatically
-when available.
 """
 
 from __future__ import annotations
@@ -35,9 +45,10 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 # ── Port lists ────────────────────────────────────────────────────────────────
 
@@ -124,6 +135,13 @@ _TOP_PORTS: List[Tuple[int, str]] = [
 
 # Ports where we attempt to read a plain-text banner
 _BANNER_PORTS = {21, 22, 25, 80, 110, 143, 514, 8080}
+
+# Ports where we attempt TLS certificate extraction
+_TLS_PORTS = {443, 636, 993, 995, 465, 3269, 5061, 8443}
+
+# Ports where we attempt HTTP enrichment (title + Server header)
+_HTTP_PORTS = {80, 8080, 8000, 8008, 8888}
+_HTTPS_PORTS = {443, 8443}
 
 # ── OS / role inference ───────────────────────────────────────────────────────
 # Maps open port sets → (os_family_hint, role_tags).
@@ -668,6 +686,448 @@ def _ipv6_neighbors_macos() -> List[dict]:
     return neighbors
 
 
+# ── Active connection harvesting ──────────────────────────────────────────────
+
+def collect_active_connections() -> List[dict]:
+    """Harvest remote IPs from established TCP connections via netstat.
+
+    Discovers servers that block all inbound probes (ICMP + TCP scan) but are
+    reachable from this machine — e.g. cloud endpoints, internal APIs, etc.
+    """
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        out = _run("netstat -an")
+        for line in out.splitlines():
+            upper = line.upper()
+            if "ESTABLISHED" not in upper and "CLOSE_WAIT" not in upper:
+                continue
+            parts = line.split()
+            # Find IP:port pairs; local addr is first, remote is second
+            addrs = [p for p in parts
+                     if re.match(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[:.]\d+$", p)]
+            if len(addrs) < 2:
+                continue
+            m = re.match(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})[:.]\d+$", addrs[1])
+            if not m:
+                continue
+            ip = m.group(1)
+            try:
+                addr = ipaddress.IPv4Address(ip)
+                if addr.is_loopback or addr.is_unspecified:
+                    continue
+            except ValueError:
+                continue
+            if ip not in seen:
+                seen.add(ip)
+                neighbors.append({"ip": ip, "source": "netstat"})
+    except Exception as exc:
+        _warn(f"netstat harvest error: {exc}")
+    return neighbors
+
+
+# ── Windows-specific passive discovery ───────────────────────────────────────
+
+def collect_windows_dns_cache() -> List[dict]:
+    """Parse ipconfig /displaydns for cached A records (Windows only)."""
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        out = _run("ipconfig /displaydns")
+        current_name = ""
+        for line in out.splitlines():
+            m = re.search(r"Record Name[^:]*:\s+(\S+)", line)
+            if m:
+                current_name = m.group(1).rstrip(".")
+                continue
+            m = re.search(r"A \(Host\) Record[^:]*:\s+([\d.]+)", line)
+            if m:
+                ip = m.group(1)
+                try:
+                    addr = ipaddress.IPv4Address(ip)
+                    if addr.is_loopback or addr.is_unspecified or not addr.is_private:
+                        continue
+                except ValueError:
+                    continue
+                if ip not in seen:
+                    seen.add(ip)
+                    entry: dict = {"ip": ip, "source": "dns_cache"}
+                    if current_name:
+                        entry["hostname"] = current_name
+                    neighbors.append(entry)
+    except Exception as exc:
+        _warn(f"DNS cache harvest error: {exc}")
+    return neighbors
+
+
+def collect_smb_neighbors_windows() -> List[dict]:
+    """Enumerate Windows machines via SMB browse list (net view)."""
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        out = _run("net view")
+        for line in out.splitlines():
+            m = re.match(r"\\\\(\S+)", line.strip())
+            if not m:
+                continue
+            name = m.group(1)
+            try:
+                ip = socket.gethostbyname(name)
+                try:
+                    if not ipaddress.IPv4Address(ip).is_private:
+                        continue
+                except ValueError:
+                    continue
+                if ip not in seen:
+                    seen.add(ip)
+                    neighbors.append({"ip": ip, "hostname": name, "source": "smb"})
+            except Exception:
+                pass
+    except Exception as exc:
+        _warn(f"SMB browse error: {exc}")
+    return neighbors
+
+
+# ── NetBIOS name resolution ───────────────────────────────────────────────────
+
+def _netbios_node_status(ip: str, timeout_secs: float) -> Optional[str]:
+    """Send NBNS Node Status Request to IP:137. Returns machine name or None."""
+    # Header + wildcard name "*\x00×15" L2-encoded + QTYPE=NBSTAT, QCLASS=IN
+    pkt = (
+        b"\xa4\x56\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00"
+        b"\x00\x21\x00\x01"
+    )
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(timeout_secs)
+        s.sendto(pkt, (ip, 137))
+        data, _ = s.recvfrom(1024)
+        s.close()
+        if len(data) < 13:
+            return None
+        # QD count tells us how many question entries are echoed back (38 bytes each)
+        qd_count = int.from_bytes(data[4:6], "big")
+        # answer name = 34 bytes, RR meta (type+class+ttl+rdlen) = 10 bytes
+        num_names_offset = 12 + qd_count * 38 + 34 + 10
+        if num_names_offset >= len(data):
+            return None
+        num_names = data[num_names_offset]
+        if num_names == 0 or num_names > 32:
+            return None
+        name_start = num_names_offset + 1
+        for i in range(num_names):
+            off = name_start + i * 18
+            if off + 17 > len(data):
+                break
+            name_type = data[off + 15]
+            flags = int.from_bytes(data[off + 16:off + 18], "big")
+            if (flags & 0x8000) or name_type != 0x00:
+                continue  # Skip group names and non-workstation entries
+            name = data[off:off + 15].decode("ascii", errors="replace").rstrip()
+            if name:
+                return name
+        return None
+    except Exception:
+        return None
+
+
+def enrich_netbios(neighbors: List[dict], timeout_secs: float = 1.5) -> None:
+    """Query UDP 137 for each neighbor without a hostname to get its NetBIOS name."""
+    targets = [n for n in neighbors if not n.get("hostname") and n.get("ip")]
+    if not targets:
+        return
+    lock = threading.Lock()
+
+    def _query(neighbor: dict) -> None:
+        ip = neighbor.get("ip", "")
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            return
+        name = _netbios_node_status(ip, timeout_secs)
+        if name:
+            with lock:
+                neighbor["hostname"] = name
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+        list(ex.map(_query, targets))
+
+
+# ── mDNS / SSDP passive discovery ────────────────────────────────────────────
+
+def _mdns_query(sock: socket.socket, addr: str, port: int) -> None:
+    """Send mDNS PTR query for _services._dns-sd._udp.local to solicit responses."""
+    pkt = (
+        b"\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        b"\x09_services\x07_dns-sd\x04_udp\x05local\x00"
+        b"\x00\x0c\x00\x01"
+    )
+    try:
+        sock.sendto(pkt, (addr, port))
+    except Exception:
+        pass
+
+
+def _parse_mdns_name(data: bytes) -> str:
+    """Extract a meaningful host label from an mDNS packet (best effort)."""
+    try:
+        if len(data) < 13:
+            return ""
+        offset = 12  # Skip DNS header
+        parts: List[str] = []
+        while offset < len(data):
+            length = data[offset]
+            if length == 0 or length & 0xC0 == 0xC0:
+                break
+            offset += 1
+            if offset + length > len(data):
+                break
+            label = data[offset:offset + length].decode("ascii", errors="replace")
+            if not label.startswith("_") and label.lower() != "local":
+                parts.append(label)
+            offset += length
+        return parts[0] if parts else ""
+    except Exception:
+        return ""
+
+
+def _mdns_listen(timeout_secs: float) -> List[dict]:
+    """Join the mDNS multicast group, send a query, and collect responding IPs."""
+    import struct
+    MDNS_ADDR = "224.0.0.251"
+    MDNS_PORT = 5353
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            pass  # Windows / older Linux
+        try:
+            sock.bind(("", MDNS_PORT))
+        except OSError:
+            sock.close()
+            return neighbors  # Port owned by avahi-daemon or similar
+        mcast = struct.pack("4sL", socket.inet_aton(MDNS_ADDR), socket.INADDR_ANY)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mcast)
+        _mdns_query(sock, MDNS_ADDR, MDNS_PORT)
+        deadline = time.monotonic() + timeout_secs
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(min(remaining, 0.5))
+            try:
+                data, (src_ip, _) = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if src_ip in seen:
+                continue
+            seen.add(src_ip)
+            hostname = _parse_mdns_name(data)
+            entry: dict = {"ip": src_ip, "source": "mdns"}
+            if hostname:
+                entry["hostname"] = hostname
+            neighbors.append(entry)
+        sock.close()
+    except Exception as exc:
+        _warn(f"mDNS listen error: {exc}")
+    return neighbors
+
+
+def _ssdp_listen(timeout_secs: float) -> List[dict]:
+    """Send SSDP M-SEARCH and collect responding UPnP device IPs."""
+    SSDP_ADDR = "239.255.255.250"
+    SSDP_PORT = 1900
+    neighbors: List[dict] = []
+    seen: set = set()
+    msearch = (
+        "M-SEARCH * HTTP/1.1\r\n"
+        f"HOST: {SSDP_ADDR}:{SSDP_PORT}\r\n"
+        'MAN: "ssdp:discover"\r\n'
+        "MX: 3\r\n"
+        "ST: ssdp:all\r\n"
+        "\r\n"
+    )
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", 0))
+        sock.sendto(msearch.encode(), (SSDP_ADDR, SSDP_PORT))
+        deadline = time.monotonic() + timeout_secs
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(min(remaining, 0.5))
+            try:
+                data, (src_ip, _) = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if src_ip in seen:
+                continue
+            seen.add(src_ip)
+            entry: dict = {"ip": src_ip, "source": "ssdp"}
+            response = data.decode("utf-8", errors="replace")
+            m = re.search(r"^Server:\s*(.+)", response, re.I | re.M)
+            if m:
+                entry["ssdp_server"] = m.group(1).strip()[:100]
+            neighbors.append(entry)
+        sock.close()
+    except Exception as exc:
+        _warn(f"SSDP listen error: {exc}")
+    return neighbors
+
+
+def mdns_ssdp_listen(timeout_secs: float = 5.0) -> List[dict]:
+    """Discover LAN devices via mDNS (224.0.0.251:5353) and SSDP (239.255.255.250:1900).
+
+    Covers Apple/Linux/IoT devices (mDNS/Bonjour) and UPnP appliances such as
+    smart TVs, NAS boxes, printers, and routers (SSDP). No third-party packages.
+    """
+    results: List[dict] = []
+    lock = threading.Lock()
+
+    def _run_listener(fn):
+        items = fn(timeout_secs)
+        with lock:
+            results.extend(items)
+
+    threads = [
+        threading.Thread(target=_run_listener, args=(_mdns_listen,), daemon=True),
+        threading.Thread(target=_run_listener, args=(_ssdp_listen,), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+# ── Reverse DNS sweep ─────────────────────────────────────────────────────────
+
+def reverse_dns_sweep(ips: List[str]) -> Dict[str, str]:
+    """PTR-resolve a list of IPs concurrently. Returns {ip: hostname}."""
+    result: Dict[str, str] = {}
+    lock = threading.Lock()
+
+    def _resolve(ip: str) -> None:
+        try:
+            hostname = socket.gethostbyaddr(ip)[0]
+            if hostname:
+                with lock:
+                    result[ip] = hostname
+        except Exception:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+        list(ex.map(_resolve, ips))
+    return result
+
+
+# ── TLS certificate extraction ────────────────────────────────────────────────
+
+def enrich_tls(scan_results: List[dict], timeout: float = 2.0, workers: int = 30) -> None:
+    """Extract TLS certificate CN and SANs from HTTPS/LDAPS/etc ports.
+
+    Stores tls_cn and tls_sans on matching port entries (in-place). SANs
+    often reveal internal FQDNs not visible via reverse DNS or NetBIOS.
+    """
+    import ssl
+
+    tasks = [
+        (host["ip"], pe["port"], pe)
+        for host in scan_results
+        for pe in host.get("open_ports", [])
+        if pe.get("port") in _TLS_PORTS
+    ]
+    if not tasks:
+        return
+
+    def _grab_cert(task: Tuple) -> None:
+        ip, port, port_entry = task
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((ip, port), timeout=timeout) as raw:
+                with ctx.wrap_socket(raw, server_hostname=ip) as ssock:
+                    cert = ssock.getpeercert()
+            if not cert:
+                return
+            subject = dict(x[0] for x in cert.get("subject", []))
+            cn = subject.get("commonName", "")
+            if cn:
+                port_entry["tls_cn"] = cn
+            sans = [v for t, v in cert.get("subjectAltName", []) if t == "DNS"]
+            if sans:
+                port_entry["tls_sans"] = sans
+        except Exception:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_grab_cert, tasks))
+
+
+# ── HTTP enrichment ───────────────────────────────────────────────────────────
+
+def enrich_http(scan_results: List[dict], timeout: float = 3.0, workers: int = 20) -> None:
+    """Extract <title> and Server header from HTTP/HTTPS ports.
+
+    Stores http_title and http_server on matching port entries (in-place).
+    Page titles fingerprint appliances, routers, and management UIs that
+    don't expose hostnames any other way.
+    """
+    import ssl
+    import urllib.request
+
+    tasks = [
+        (host["ip"], pe["port"], pe)
+        for host in scan_results
+        for pe in host.get("open_ports", [])
+        if pe.get("port") in _HTTP_PORTS or pe.get("port") in _HTTPS_PORTS
+    ]
+    if not tasks:
+        return
+
+    def _fetch(task: Tuple) -> None:
+        ip, port, port_entry = task
+        is_https = port in _HTTPS_PORTS
+        scheme = "https" if is_https else "http"
+        url = f"{scheme}://{ip}:{port}/"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "GravWell/1.1"})
+            if is_https:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                resp = urllib.request.urlopen(req, context=ctx, timeout=timeout)
+            else:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+            with resp:
+                server = resp.headers.get("Server", "")
+                if server:
+                    port_entry["http_server"] = server[:100]
+                ctype = resp.headers.get("Content-Type", "")
+                if "html" in ctype.lower():
+                    body = resp.read(8192).decode("utf-8", errors="replace")
+                    m = re.search(r"<title[^>]*>([^<]{1,200})</title>", body, re.I)
+                    if m:
+                        port_entry["http_title"] = m.group(1).strip()
+        except Exception:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_fetch, tasks))
+
+
 # ── Host discovery ────────────────────────────────────────────────────────────
 
 # Ports probed to determine liveness when ICMP is blocked.
@@ -1171,12 +1631,38 @@ Examples:
     direct_nets, routed_nets = discover_networks(system)
     _info(f"  Networks — directly attached: {len(direct_nets)}, routed: {len(routed_nets)}")
 
-    # 3. ARP table (passive)
-    _info("Reading ARP/neighbor table…")
+    # 3. Passive discovery (ARP + netstat + Windows-specific sources)
+    _info("Passive discovery…")
     neighbors = collect_arp()
-    _info(f"  {len(neighbors)} neighbour(s)")
+    existing_ips: set = {n["ip"] for n in neighbors}
 
-    # 4. Ping sweep
+    for n in collect_active_connections():
+        if n["ip"] not in existing_ips:
+            neighbors.append(n)
+            existing_ips.add(n["ip"])
+
+    if system == "Windows":
+        for n in collect_windows_dns_cache():
+            if n["ip"] not in existing_ips:
+                neighbors.append(n)
+                existing_ips.add(n["ip"])
+        for n in collect_smb_neighbors_windows():
+            if n["ip"] not in existing_ips:
+                neighbors.append(n)
+                existing_ips.add(n["ip"])
+
+    _info(f"  {len(neighbors)} neighbour(s) from passive sources")
+
+    # 4. mDNS / SSDP multicast discovery (runs concurrently with ping sweep)
+    _info("mDNS/SSDP multicast discovery (5 s, background)…")
+    _mdns_ssdp_bag: List[dict] = []
+    _mdns_thread = threading.Thread(
+        target=lambda: _mdns_ssdp_bag.extend(mdns_ssdp_listen(5.0)),
+        daemon=True,
+    )
+    _mdns_thread.start()
+
+    # 5. Ping sweep
     if not args.no_sweep:
         # Always sweep directly-attached networks; add routed ones with --routes
         sweep_nets = list(direct_nets)
@@ -1202,29 +1688,55 @@ Examples:
 
         if sweep_nets:
             live = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers)
-            existing = {n["ip"] for n in neighbors}
             for ip in live:
-                if ip not in existing:
+                if ip not in existing_ips:
                     neighbors.append({"ip": ip, "source": "ping_sweep"})
-                    existing.add(ip)
+                    existing_ips.add(ip)
             # Re-read ARP to fill in MACs of newly discovered hosts
             arp_map = {n["ip"]: n for n in collect_arp()}
             for n in neighbors:
                 if not n.get("mac") and n["ip"] in arp_map:
                     n["mac"] = arp_map[n["ip"]].get("mac", "")
             for entry in arp_map.values():
-                if entry["ip"] not in existing:
+                if entry["ip"] not in existing_ips:
                     neighbors.append(entry)
+                    existing_ips.add(entry["ip"])
+
+    # Merge mDNS/SSDP results (thread should be done by now; join to be safe)
+    _mdns_thread.join()
+    for n in _mdns_ssdp_bag:
+        if n["ip"] not in existing_ips:
+            neighbors.append(n)
+            existing_ips.add(n["ip"])
+    if _mdns_ssdp_bag:
+        _info(f"  mDNS/SSDP: {len(_mdns_ssdp_bag)} device(s) found")
 
     _info(f"Total neighbours discovered: {len(neighbors)}")
 
-    # 5. Port scan
+    # 6. Port scan
     scan_results: List[dict] = []
     if not args.no_scan and neighbors:
         scan_targets = list({n["ip"] for n in neighbors} | set(self_info.get("ips", [])))
         scan_results = port_scan(scan_targets, timeout=args.timeout, workers=args.workers)
 
-    # 6. Build payload
+    # 7. Post-scan enrichment
+    if scan_results:
+        _info("TLS certificate extraction…")
+        enrich_tls(scan_results, timeout=min(args.timeout + 1, 3.0))
+
+        _info("HTTP title/Server enrichment…")
+        enrich_http(scan_results, timeout=min(args.timeout + 2, 4.0))
+
+    _info("NetBIOS name resolution…")
+    enrich_netbios(neighbors, timeout_secs=min(args.timeout, 1.5))
+
+    _info("Reverse DNS sweep…")
+    rdns = reverse_dns_sweep(list(existing_ips))
+    for n in neighbors:
+        if not n.get("hostname") and n["ip"] in rdns:
+            n["hostname"] = rdns[n["ip"]]
+
+    # 8. Build payload
     meta = {
         "direct_networks": direct_nets,
         "routed_networks": routed_nets,
@@ -1232,7 +1744,7 @@ Examples:
     }
     payload = build_payload(self_info, neighbors, scan_results, meta=meta)
 
-    # 7. Write local file
+    # 9. Write local file
     out_path = args.output
     if not out_path:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1240,7 +1752,7 @@ Examples:
     write_json(payload, out_path)
     _info(f"Saved: {out_path}")
 
-    # 8. Upload if requested
+    # 10. Upload if requested
     if args.server:
         if not args.key:
             _warn("--server requires --key")

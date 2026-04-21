@@ -9,7 +9,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 ## Features
 
 - **Wide format support** — nmap, Nessus, Masscan, OpenVAS, Nuclei, enum4linux, CrowdStrike Falcon, Cisco IOS, Juniper JunOS, Fortinet FortiOS, Palo Alto PAN-OS (all auto-detected)
-- **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; discovers neighbours via ARP, TCP-probe sweep (ICMP-independent), and port scan with OS/role inference; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
+- **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; uses 8 stdlib-only discovery methods (ARP, netstat, mDNS/SSDP, NetBIOS, reverse DNS, TLS certs, HTTP fingerprinting, TCP-probe sweep) plus nmap/fping when available; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
 - **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
@@ -45,20 +45,32 @@ All formats are auto-detected. You can also force a specific parser with `--form
 
 ### GravWell Collection Agent
 
-The collection agent is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It collects:
+The collection agent (`collect.py`, v1.2) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
 
-| Stage | What it does |
-|-------|-------------|
-| **System info** | Hostname, OS, all interface IPs/MACs, default gateway, DNS servers, Windows domain/workgroup |
-| **ARP / neighbour table** | Passive read of the OS neighbour cache (IPv4 + IPv6) — no packets sent |
-| **Host discovery** | Multi-method active sweep: nmap `-sn` when available (ARP + TCP SYN + ICMP simultaneously), otherwise TCP probe sweep on common ports + ICMP ping as supplement. Works even when hosts block ICMP. |
-| **Port scan** | ~50 ports covering all major OS/device types; uses nmap with `-sV` (service versions) and `-O` (OS detection when elevated), otherwise raw socket scan with banner grabbing |
-| **OS / role inference** | Open port signatures automatically infer OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…) |
+**Discovery pipeline:**
 
-**Discovery is TCP-first.** Many modern hosts (Windows with firewall, Linux servers, cloud VMs) block ICMP by default. The agent probes TCP ports (22, 80, 135, 443, 445, 554, 631, 3389, 5060, 8080, 9100…) to confirm liveness before falling back to ping — so hosts that would be invisible to a pure ping sweep are still found.
+| Stage | Method | What it finds |
+|-------|--------|---------------|
+| **System info** | `platform`, `socket`, OS commands | Hostname, OS, all interface IPs/MACs, default gateway, DNS servers, Windows domain/workgroup |
+| **ARP / neighbour table** | `arp -a` / `ip neigh` / `ndp` | Hosts on directly-connected subnets — IPv4 + IPv6 |
+| **Active connections** | `netstat -an` | Remote IPs from established TCP connections — discovers servers that block *all* inbound probes |
+| **Windows DNS cache** | `ipconfig /displaydns` | Cached A records with hostnames (Windows only) |
+| **SMB browse list** | `net view` | Windows machines visible via SMB browser service (Windows only) |
+| **mDNS multicast** | UDP 224.0.0.251:5353 | Apple, Linux/Avahi, IoT, and printer devices via Bonjour/mDNS |
+| **SSDP multicast** | UDP 239.255.255.250:1900 | UPnP devices — smart TVs, NAS boxes, printers, routers |
+| **TCP probe sweep** | Socket connect to ~14 common ports | Host liveness when ICMP is blocked — primary fallback without nmap |
+| **ICMP ping** | `fping` or system `ping` | Supplement to TCP — catches ICMP-only devices (routers, printers) |
+| **Port scan** | ~50 ports; nmap with `-sV`/`-O` or socket scan | Open services, service versions, banner grabbing |
+| **NetBIOS Node Status** | UDP 137 | Windows machine names for hosts without reverse DNS |
+| **Reverse DNS sweep** | `socket.gethostbyaddr` | PTR records for all discovered IPs — concurrent, 50 threads |
+| **TLS cert extraction** | `ssl` module | CN and SANs from HTTPS/LDAPS/IMAPS certs — reveals internal FQDNs |
+| **HTTP enrichment** | `urllib.request` | `Server:` header + page `<title>` — fingerprints routers, NAS, printers, management UIs |
+| **OS / role inference** | Port signature matching | OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…) |
+
+**mDNS and SSDP run concurrently** with the TCP probe sweep in a background thread to avoid adding to wall-clock time.
 
 **Optional tools** (used automatically if on PATH, not required):
-- `nmap` — richer host discovery, service versions, OS fingerprinting
+- `nmap` — richer host discovery (`-sn`), service versions (`-sV`), OS fingerprinting (`-O`)
 - `fping` — faster ICMP sweep on large subnets
 
 **Delivery modes:**

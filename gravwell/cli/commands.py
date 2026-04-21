@@ -456,8 +456,13 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
         # Cheroot routes connection errors through server.error_log which in
         # newer versions is a plain callable, not a Logger — patch it directly.
         _orig_error_log = server.error_log
-        _NOISE = ("SSLV3_ALERT_CERTIFICATE_UNKNOWN",
-                  "peer dropped the TLS connection suddenly")
+        _NOISE = (
+            "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+            "peer dropped the TLS connection suddenly",
+            "plain HTTP to an SSL",          # browser hit https port with http://
+            "speak plain HTTP",
+            "CLIENT_HELLO",
+        )
 
         def _filtered_error_log(*args, **kwargs):
             msg = str(args[0]) if args else str(kwargs.get("msg", ""))
@@ -465,9 +470,56 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
                 _orig_error_log(*args, **kwargs)
 
         server.error_log = _filtered_error_log
+
+        # Redirect plain-HTTP connections to HTTPS in a background thread.
+        import threading as _threading
+
+        def _http_redirect_server():
+            import socket as _sock
+            redirect_port = 80 if port == 443 else port - 1
+            try:
+                with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as srv:
+                    srv.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+                    srv.bind((host_addr, redirect_port))
+                    srv.listen(16)
+                    srv.settimeout(1.0)
+                    while _redirect_running:
+                        try:
+                            conn, _ = srv.accept()
+                        except _sock.timeout:
+                            continue
+                        try:
+                            conn.recv(1024)   # drain the HTTP request
+                            location = f"https://{host_addr}:{port}/"
+                            resp = (
+                                f"HTTP/1.1 301 Moved Permanently\r\n"
+                                f"Location: {location}\r\n"
+                                f"Content-Length: 0\r\n"
+                                f"Connection: close\r\n\r\n"
+                            )
+                            conn.sendall(resp.encode())
+                        except Exception:
+                            pass
+                        finally:
+                            conn.close()
+            except Exception:
+                pass   # redirect listener is best-effort
+
+        _redirect_running = True
+        _redir_port = 80 if port == 443 else port - 1
+        _redir_thread = _threading.Thread(
+            target=_http_redirect_server, daemon=True, name="http-redirect"
+        )
+        try:
+            _redir_thread.start()
+            console.print(f"[dim]HTTP on :{_redir_port} → redirects to HTTPS :{port}[/dim]")
+        except Exception:
+            pass
+
         try:
             server.start()
         except KeyboardInterrupt:
+            _redirect_running = False
             server.stop()
     else:
         console.print("[yellow]TLS disabled — traffic is unencrypted[/yellow]")

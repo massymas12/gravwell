@@ -149,9 +149,6 @@ _TLS_PORTS = {443, 636, 993, 995, 465, 3269, 5061, 8443}
 _HTTP_PORTS = {80, 8080, 8000, 8008, 8888}
 _HTTPS_PORTS = {443, 8443}
 
-# Flat port list derived from _TOP_PORTS — used by the raw SYN scanner
-_TOP_PORT_NUMS: List[int] = []   # populated after _TOP_PORTS is defined (see below)
-
 # Raw SYN scanner constants
 _RAW_SYN_SECRET: bytes = os.urandom(8)   # per-run HMAC secret — prevents cookie forgery
 _RAW_SYN_SRC_PORT: int = 61000           # source port for outgoing SYN packets
@@ -1429,15 +1426,11 @@ def _nmap_host_discovery(targets: List[str], timeout_secs: float) -> Optional[Li
         return None
     try:
         timing = "-T4" if timeout_secs <= 1.0 else "-T3"
-        cmd = ["nmap", "-sn", timing, "--open"] + targets
         _info("  Using nmap -sn for host discovery…")
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
         import xml.etree.ElementTree as ET
-        # nmap -sn without -oX prints to stdout in text; use -oX -
-        # Re-run with XML output
-        cmd_xml = ["nmap", "-sn", "-oX", "-", timing] + targets
-        r = subprocess.run(cmd_xml, capture_output=True, text=True, timeout=600)
+        cmd_xml = ["nmap", "-sn", "-oX", "-", timing, "-iL", "-"]
+        r = subprocess.run(cmd_xml, input="\n".join(targets),
+                           capture_output=True, text=True, timeout=600)
         xml_out = r.stdout.strip()
         if not xml_out.startswith("<?xml"):
             return None
@@ -1575,7 +1568,7 @@ def port_scan(
     during host discovery — those are seeded directly and skipped during scan.
     """
     nmap = _nmap_scan(ips, timeout)
-    if nmap is not None:
+    if nmap:
         return nmap
 
     # Seed results with already-known open ports from the probe sweep
@@ -1685,9 +1678,10 @@ def _nmap_scan(ips: List[str], timeout: float) -> Optional[List[dict]]:
         if _is_elevated():
             cmd.append("-O")
 
-        cmd += ips
+        cmd += ["-iL", "-"]
         _info(f"nmap scan: {len(ips)} host(s)…")
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, input="\n".join(ips),
+                           capture_output=True, text=True, timeout=600)
         xml_out = r.stdout.strip()
         if not xml_out.startswith("<?xml"):
             return None

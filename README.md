@@ -11,6 +11,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 - **Wide format support** — nmap, Nessus, Masscan, OpenVAS, Nuclei, enum4linux, CrowdStrike Falcon, Cisco IOS, Juniper JunOS, Fortinet FortiOS, Palo Alto PAN-OS (all auto-detected)
 - **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; uses 8 stdlib-only discovery methods (ARP, netstat, mDNS/SSDP, NetBIOS, reverse DNS, TLS certs, HTTP fingerprinting, TCP-probe sweep) plus nmap/fping when available; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
+- **HTTPS by default** — self-signed TLS cert auto-generated at first start; SHA-256 fingerprint printed in the console so you can verify the connection; collection agents skip verification automatically for self-signed server certs
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
 - **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
 - **CVE enrichment** — CISA KEV (is this CVE actively exploited in the wild?), FIRST.org EPSS (0–100% probability of exploitation in the next 30 days), and NIST NVD CVSS v3 base scores — all fetched on demand and overlaid on every vulnerability view and export
@@ -95,10 +96,16 @@ gravwell user add admin --admin
 ### 2. Start the web UI
 
 ```bash
-gravwell serve --port 8050
+gravwell serve --port 8888
 ```
 
-Open `http://localhost:8050` and sign in.
+GravWell serves **HTTPS by default**. On first run it auto-generates a self-signed TLS certificate next to the database and prints its SHA-256 fingerprint:
+
+```
+TLS fingerprint: E3:83:A6:83:D2:71:87:B3:...
+```
+
+Open `https://localhost:8888`, accept the browser's self-signed certificate warning (click **Advanced → Proceed**), and sign in. You only need to accept it once per browser.
 
 ### 3. Ingest scan data
 
@@ -157,8 +164,8 @@ python gravwell-collect.py --no-sweep --no-scan
 # Full collection, save locally
 python gravwell-collect.py
 
-# Full collection + upload to GravWell
-python gravwell-collect.py --server https://gravwell.corp.local --key YOUR_TOKEN
+# Full collection + upload to GravWell (self-signed cert — skip TLS verification)
+python gravwell-collect.py --server https://gravwell.corp.local --key YOUR_TOKEN --no-verify-tls
 
 # Also sweep routed (non-directly-attached) subnets — useful on pivot hosts
 python gravwell-collect.py --routes --server https://gravwell.corp.local --key YOUR_TOKEN
@@ -182,7 +189,7 @@ Binaries are built via the GitHub Actions workflow (`.github/workflows/build-age
 Agent tokens are managed from the web UI (**☰ → Agent Tokens**, admin only). Each token is scoped to a single project — a token created in Project A will always submit data into Project A regardless of which project the UI has open at the time.
 
 - **Generate** a token — the plain value is shown once; copy it immediately. The label defaults to the current project name.
-- After generation a **pre-configured Python script** is offered for download with the server URL and token baked in as defaults (the user can still override at runtime with `--server` / `--key`)
+- After generation a **pre-configured Python script** is offered for download with the server URL, token, and `--no-verify-tls` baked in as defaults (the user can still override at runtime with `--server` / `--key`)
 - **Revoke** individual tokens by label without affecting others
 
 From the CLI:
@@ -500,7 +507,9 @@ gravwell discover <target-cidr> \
 
 gravwell merge-macs [--dry-run]               Merge hosts sharing a MAC address into one node
 
-gravwell serve [--port PORT] [--host HOST]    Start the web server
+gravwell serve [--port PORT] [--host HOST]    Start the HTTPS web server (TLS on by default)
+gravwell serve --no-tls                       Disable TLS (plain HTTP — not recommended)
+gravwell serve --cert cert.pem --key key.pem  Use your own TLS certificate
 gravwell reset                                Wipe all data in the current project
 ```
 
@@ -520,4 +529,6 @@ GRAVWELL_DB=~/.gravwell/projects/client-acme.db gravwell list hosts
 - Each user stores an independent AES-256-GCM encrypted copy of the MEK. Changing a user's password re-encrypts only their MEK slot; all other users and the database content are unaffected.
 - User accounts (password hashes + encrypted MEK slots) are stored in `~/.gravwell/gravwell.keystore.json` — separate from the encrypted database to avoid a bootstrapping problem. This file contains no scan data.
 - The Flask session secret is stored in `~/.gravwell/gravwell.key` (mode 0600).
-- Never commit `.db`, `.keystore.json`, or `.key` files.
+- **MEK auto-unlock** — after any successful login the MEK is stored in the OS credential store (DPAPI on Windows, Keychain on macOS, libsecret/GNOME Keyring on Linux) so the server can re-unlock the database on restart and agent uploads work without an active browser session. A local AES-256-GCM key file is used as a last-resort fallback on headless servers with no credential store.
+- **Transport security** — the web UI and agent upload endpoint are served over HTTPS by default. A self-signed RSA-2048 certificate is auto-generated on first start with SANs covering `localhost`, the machine hostname, and all detected local IPs. The SHA-256 fingerprint is printed at startup. Pre-configured agent scripts automatically disable TLS verification since they talk to a known self-signed cert; manually configured agents should pass `--no-verify-tls` or use a trusted cert.
+- Never commit `.db`, `.keystore.json`, `.key`, `.crt`, or `.key.pem` files.

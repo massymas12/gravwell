@@ -28,7 +28,8 @@ Usage:
     --no-scan         Skip port scan
     --routes          Also sweep routed (non-directly-attached) subnets
     --timeout SECS    Scan/ping timeout in seconds (default: 1.0)
-    --workers N       Concurrent threads for scanning (default: 150)
+    --workers N       Concurrent threads for socket scan (default: 150)
+    --rate N          Raw SYN scan rate packets/sec — Linux/macOS + root only (default: 10000)
 """
 
 from __future__ import annotations
@@ -36,12 +37,15 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import platform
 import re
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -133,6 +137,8 @@ _TOP_PORTS: List[Tuple[int, str]] = [
     (5480,  "vmware-appliance"),
 ]
 
+_TOP_PORT_NUMS = [p for p, _ in _TOP_PORTS]
+
 # Ports where we attempt to read a plain-text banner
 _BANNER_PORTS = {21, 22, 25, 80, 110, 143, 514, 8080}
 
@@ -142,6 +148,13 @@ _TLS_PORTS = {443, 636, 993, 995, 465, 3269, 5061, 8443}
 # Ports where we attempt HTTP enrichment (title + Server header)
 _HTTP_PORTS = {80, 8080, 8000, 8008, 8888}
 _HTTPS_PORTS = {443, 8443}
+
+# Flat port list derived from _TOP_PORTS — used by the raw SYN scanner
+_TOP_PORT_NUMS: List[int] = []   # populated after _TOP_PORTS is defined (see below)
+
+# Raw SYN scanner constants
+_RAW_SYN_SECRET: bytes = os.urandom(8)   # per-run HMAC secret — prevents cookie forgery
+_RAW_SYN_SRC_PORT: int = 61000           # source port for outgoing SYN packets
 
 # ── OS / role inference ───────────────────────────────────────────────────────
 # Maps open port sets → (os_family_hint, role_tags).
@@ -1128,6 +1141,191 @@ def enrich_http(scan_results: List[dict], timeout: float = 3.0, workers: int = 2
         list(ex.map(_fetch, tasks))
 
 
+# ── Raw SYN scanner ──────────────────────────────────────────────────────────
+#
+# Linux/macOS + root only.  Crafts IP+TCP SYN packets via SOCK_RAW, fires them
+# at a configurable rate, and listens for SYN-ACKs on a parallel RX thread.
+# Responses are validated with an HMAC SYN cookie stored in the TCP seq field —
+# no per-target state table is needed.
+#
+# The OS automatically sends RST to any SYN-ACK that arrives on our source
+# port (nothing is listening there), which cleanly tears down half-open
+# connections on the target.  The raw RX socket sees the SYN-ACK before the
+# kernel's RST goes out, so no responses are missed.
+
+
+def _raw_checksum(data: bytes) -> int:
+    """RFC 1071 Internet checksum."""
+    if len(data) % 2:
+        data += b'\x00'
+    s = sum(struct.unpack_from('!' + 'H' * (len(data) // 2), data))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+
+def _syn_cookie(dst_ip: str, dst_port: int) -> int:
+    """HMAC-MD5 cookie packed into a uint32, embedded in the TCP sequence number."""
+    msg = f"{dst_ip}:{dst_port}".encode()
+    digest = hmac.new(_RAW_SYN_SECRET, msg, hashlib.md5).digest()
+    return struct.unpack('!I', digest[:4])[0]
+
+
+def _build_syn(src_ip: str, dst_ip: str, dst_port: int) -> bytes:
+    """Return a 40-byte raw IP + TCP SYN packet."""
+    seq = _syn_cookie(dst_ip, dst_port)
+    src_b = socket.inet_aton(src_ip)
+    dst_b = socket.inet_aton(dst_ip)
+
+    # TCP header (checksum = 0 placeholder)
+    tcp = struct.pack('!HHIIBBHHH',
+        _RAW_SYN_SRC_PORT, dst_port,
+        seq, 0,        # seq, ack=0
+        0x50, 0x02,    # data offset=5 (20 bytes), flags=SYN
+        1024, 0, 0,    # window, checksum placeholder, urgent
+    )
+    pseudo = struct.pack('!4s4sBBH', src_b, dst_b, 0, 6, len(tcp))
+    tcp_cs = _raw_checksum(pseudo + tcp)
+    tcp = tcp[:16] + struct.pack('!H', tcp_cs) + tcp[18:]
+
+    # IP header (checksum = 0 placeholder)
+    ip = struct.pack('!BBHHHBBH4s4s',
+        0x45, 0, 40,    # ver+IHL, TOS, total len (20+20)
+        0, 0x4000,      # id=0, DF flag
+        64, 6, 0,       # TTL, proto=TCP, checksum placeholder
+        src_b, dst_b,
+    )
+    ip_cs = _raw_checksum(ip)
+    ip = ip[:10] + struct.pack('!H', ip_cs) + ip[12:]
+    return ip + tcp
+
+
+def _parse_syn_ack(pkt: bytes) -> Optional[Tuple[str, int]]:
+    """Return (src_ip, src_port) if *pkt* is a SYN-ACK matching our cookie, else None."""
+    try:
+        ihl = (pkt[0] & 0x0F) * 4
+        if pkt[9] != 6:                      # not TCP
+            return None
+        src_ip  = socket.inet_ntoa(pkt[12:16])
+        tcp     = pkt[ihl:]
+        src_port = struct.unpack('!H', tcp[0:2])[0]
+        dst_port = struct.unpack('!H', tcp[2:4])[0]
+        ack_num  = struct.unpack('!I', tcp[8:12])[0]
+        flags    = tcp[13]
+        if dst_port != _RAW_SYN_SRC_PORT:    # not addressed to us
+            return None
+        if flags & 0x12 != 0x12:             # not SYN+ACK
+            return None
+        expected = (_syn_cookie(src_ip, src_port) + 1) & 0xFFFFFFFF
+        if ack_num != expected:              # cookie mismatch — not our packet
+            return None
+        return src_ip, src_port
+    except Exception:
+        return None
+
+
+def _raw_syn_scan(
+    targets: List[str],
+    ports: List[int],
+    timeout_secs: float = 1.0,
+    rate_pps: int = 10_000,
+) -> Optional[Tuple[List[str], Dict[str, List[int]]]]:
+    """Raw SYN scanner — Linux/macOS with root privileges only.
+
+    Sends IP+TCP SYN packets at *rate_pps* packets/second via a raw socket.
+    A parallel RX thread captures SYN-ACKs and validates them via HMAC cookie.
+    No per-target state table; dead hosts cost zero wait time.
+
+    Scans *ports* against every IP in *targets* in a single pass, so discovery
+    and port scan are combined into one sweep.
+
+    Returns (live_ips, {ip: [open_ports]}) or None if unavailable.
+    """
+    if platform.system() == "Windows" or not _is_elevated():
+        return None
+
+    try:
+        tx_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+        tx_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        rx_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        rx_sock.settimeout(0.05)
+    except OSError:
+        return None
+
+    # Determine our outbound source IP
+    try:
+        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _s.connect(("8.8.8.8", 80))
+        src_ip = _s.getsockname()[0]
+        _s.close()
+    except Exception:
+        tx_sock.close()
+        rx_sock.close()
+        return None
+
+    open_ports: Dict[str, List[int]] = {}
+    lock = threading.Lock()
+    tx_done = threading.Event()
+
+    tasks = [(ip, port) for ip in targets for port in ports]
+    total_pkts = len(tasks)
+
+    def _tx() -> None:
+        interval = 1.0 / rate_pps
+        next_send = time.monotonic()
+        for ip, port in tasks:
+            pkt = _build_syn(src_ip, ip, port)
+            try:
+                tx_sock.sendto(pkt, (ip, 0))
+            except Exception:
+                pass
+            next_send += interval
+            delta = next_send - time.monotonic()
+            if delta > 0:
+                time.sleep(delta)
+        tx_done.set()
+
+    def _rx() -> None:
+        deadline: Optional[float] = None
+        while True:
+            if tx_done.is_set():
+                if deadline is None:
+                    deadline = time.monotonic() + timeout_secs
+                if time.monotonic() >= deadline:
+                    break
+            try:
+                pkt, _ = rx_sock.recvfrom(65535)
+                result = _parse_syn_ack(pkt)
+                if result:
+                    ip, port = result
+                    with lock:
+                        if ip not in open_ports:
+                            open_ports[ip] = []
+                        if port not in open_ports[ip]:
+                            open_ports[ip].append(port)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    rx_thread = threading.Thread(target=_rx, daemon=True)
+    tx_thread = threading.Thread(target=_tx, daemon=True)
+    rx_thread.start()
+    tx_thread.start()
+    tx_thread.join()
+    rx_thread.join()
+
+    tx_sock.close()
+    rx_sock.close()
+
+    live = list(open_ports.keys())
+    send_secs = total_pkts / rate_pps
+    _info(f"  Raw SYN: {total_pkts:,} pkts @ {rate_pps:,} pps "
+          f"({send_secs:.1f}s TX + {timeout_secs:.1f}s wait) → "
+          f"{len(live)} hosts")
+    return live, open_ports
+
+
 # ── Host discovery ────────────────────────────────────────────────────────────
 
 # Ports probed to determine liveness when ICMP is blocked.
@@ -1147,18 +1345,20 @@ def host_discovery(
     networks: List[str],
     timeout_secs: float = 1.0,
     workers: int = 200,
+    rate_pps: int = 10_000,
 ) -> Tuple[List[str], Dict[str, List[int]]]:
     """Discover live hosts across the given CIDR networks.
 
     Priority:
-      1. nmap -sn  — multi-probe (ARP + TCP SYN 443 + TCP ACK 80 + ICMP).
-                     Most reliable; used when nmap is available.
-      2. TCP probe + ICMP ping run concurrently.
-                     TCP covers ICMP-blocked hosts; ICMP catches devices with
-                     no open TCP ports (routers, printers, embedded devices).
+      1. nmap -sn         — ARP + TCP SYN + ICMP simultaneously. Best if available.
+      2. Raw SYN scan     — masscan-style; Linux/macOS + root only. Combines host
+                            discovery and port scan into one pass at up to rate_pps
+                            packets/second. Dead hosts cost zero wait time.
+      3. TCP connect()    — parallel socket connects; works everywhere without root.
+         + ICMP ping      — run concurrently with TCP to catch ICMP-only devices.
 
-    Returns (live_ips, known_open) where known_open is {ip: [probe_ports]}
-    from the TCP sweep — passed to port_scan to avoid re-scanning those ports.
+    Returns (live_ips, known_open) where known_open is {ip: [open_ports]}
+    — passed to port_scan to skip re-scanning already-confirmed ports.
     """
     targets = _expand_networks(networks)
     if not targets:
@@ -1172,7 +1372,14 @@ def host_discovery(
         _info(f"Host discovery done (nmap -sn): {len(nmap_live)} hosts")
         return nmap_live, {}
 
-    # 2. TCP probe + ICMP ping run concurrently
+    # 2. Raw SYN scan — scans all _TOP_PORTS in one pass (discovery + port scan)
+    raw = _raw_syn_scan(targets, _TOP_PORT_NUMS, timeout_secs, rate_pps)
+    if raw is not None:
+        live, known_open = raw
+        _info(f"Host discovery done (raw SYN): {len(live)} hosts")
+        return live, known_open
+
+    # 3. TCP connect + ICMP — run concurrently
     tcp_result: List[Tuple[List[str], Dict[str, List[int]]]] = []
     icmp_live: List[str] = []
 
@@ -1662,7 +1869,9 @@ Examples:
     parser.add_argument("--timeout", type=float, default=1.0,
                         help="Scan/ping timeout in seconds (default: 1.0)")
     parser.add_argument("--workers", type=int, default=150,
-                        help="Concurrent threads (default: 150)")
+                        help="Concurrent threads for socket scan (default: 150)")
+    parser.add_argument("--rate", type=int, default=10_000,
+                        help="Raw SYN scan rate in packets/sec — Linux/macOS + root only (default: 10000)")
     args = parser.parse_args()
 
     _info(f"GravWell Collection Agent v{VERSION}")
@@ -1743,7 +1952,7 @@ Examples:
             sweep_nets += [n for n in routed_nets if n not in sweep_nets]
 
         if sweep_nets:
-            live, known_open = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers)
+            live, known_open = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers, rate_pps=args.rate)
             for ip in live:
                 if ip not in existing_ips:
                     neighbors.append({"ip": ip, "source": "ping_sweep"})

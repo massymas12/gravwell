@@ -449,15 +449,15 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
 
         class _SuppressTLSHandshakeNoise(logging.Filter):
             """Drop the flood of CERTIFICATE_UNKNOWN alerts browsers send
-            before the user clicks through the self-signed cert warning."""
+            while the user is accepting the self-signed cert warning."""
             _NOISE = ("SSLV3_ALERT_CERTIFICATE_UNKNOWN",
-                      "peer dropped the TLS connection suddenly")
+                      "peer dropped the TLS connection suddenly",
+                      "SSL handshake")
             def filter(self, record: logging.LogRecord) -> bool:
                 msg = record.getMessage()
                 return not any(n in msg for n in self._NOISE)
 
-        for _log_name in ("cheroot.error", "cheroot.ssl", "cheroot.server"):
-            logging.getLogger(_log_name).addFilter(_SuppressTLSHandshakeNoise())
+        _tls_filter = _SuppressTLSHandshakeNoise()
 
         console.print(f"[dim]Open [cyan]{scheme}://{host_addr}:{port}[/cyan] — "
                       f"accept the browser's self-signed cert warning to continue.[/dim]")
@@ -466,6 +466,12 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
         from cheroot.ssl.builtin import BuiltinSSLAdapter as _SSLAdapter
         server = _CherootServer((host_addr, port), app.server, numthreads=8)
         server.ssl_adapter = _SSLAdapter(str(cert_path), str(key_path))
+
+        # Add filter directly to the server's own error_log instance (the one
+        # cheroot actually uses) as well as all named loggers as a belt-and-braces.
+        server.error_log.addFilter(_tls_filter)
+        for _log_name in ("cheroot.error", "cheroot.ssl", "cheroot.server", "cheroot"):
+            logging.getLogger(_log_name).addFilter(_tls_filter)
         try:
             server.start()
         except KeyboardInterrupt:

@@ -1797,24 +1797,29 @@ def write_json(data: dict, path: str) -> str:
 
 
 def upload(data: dict, server: str, key: str) -> bool:
-    """POST the payload to the GravWell server."""
+    """POST the payload to the GravWell server, gzip-compressed."""
+    import gzip
     import ssl
     import urllib.error
     import urllib.request
 
     url = server.rstrip("/") + "/api/agent/submit"
-    body = json.dumps(data).encode()
+    body = gzip.compress(json.dumps(data).encode(), compresslevel=6)
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json", "X-Gravwell-Key": key},
+        headers={
+            "Content-Type":     "application/json",
+            "Content-Encoding": "gzip",
+            "X-Gravwell-Key":   key,
+        },
         method="POST",
     )
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
             _info(f"Server: {resp.read().decode()}")
             return True
     except urllib.error.HTTPError as exc:

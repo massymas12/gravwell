@@ -18,6 +18,7 @@ GET  /api/agent/tokens
 """
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import pathlib
@@ -54,10 +55,21 @@ def agent_submit():
         logger.warning("Agent submit rejected: invalid or missing key (remote=%s)", request.remote_addr)
         return jsonify(error="Invalid or missing API key"), 401
 
-    if not request.is_json:
+    if request.content_type and "json" not in request.content_type:
         return jsonify(error="Content-Type must be application/json"), 400
 
-    data = request.get_json(force=True, silent=True)
+    raw = request.get_data()
+    if request.headers.get("Content-Encoding", "").lower() == "gzip":
+        try:
+            raw = gzip.decompress(raw)
+        except Exception:
+            return jsonify(error="Failed to decompress gzip body"), 400
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return jsonify(error="Invalid JSON"), 400
+
     if not data or not data.get("gravwell_agent"):
         return jsonify(error="Not a GravWell agent payload"), 400
 

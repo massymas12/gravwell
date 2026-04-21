@@ -445,6 +445,23 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
         console.print(f"[bold]TLS fingerprint:[/bold] [yellow]{fp}[/yellow]")
         console.print("[dim]Share this fingerprint with agents using --no-verify-tls "
                       "or pin it manually.[/dim]")
+        import logging
+
+        class _SuppressTLSHandshakeNoise(logging.Filter):
+            """Drop the flood of CERTIFICATE_UNKNOWN alerts browsers send
+            before the user clicks through the self-signed cert warning."""
+            _NOISE = ("SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+                      "peer dropped the TLS connection suddenly")
+            def filter(self, record: logging.LogRecord) -> bool:
+                msg = record.getMessage()
+                return not any(n in msg for n in self._NOISE)
+
+        for _log_name in ("cheroot.error", "cheroot.ssl", "cheroot.server"):
+            logging.getLogger(_log_name).addFilter(_SuppressTLSHandshakeNoise())
+
+        console.print(f"[dim]Open [cyan]{scheme}://{host_addr}:{port}[/cyan] — "
+                      f"accept the browser's self-signed cert warning to continue.[/dim]")
+
         from cheroot.wsgi import Server as _CherootServer
         from cheroot.ssl.builtin import BuiltinSSLAdapter as _SSLAdapter
         server = _CherootServer((host_addr, port), app.server, numthreads=8)

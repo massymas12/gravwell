@@ -52,7 +52,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 # ── Port lists ────────────────────────────────────────────────────────────────
 

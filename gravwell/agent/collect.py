@@ -30,6 +30,7 @@ Usage:
     --timeout SECS    Scan/ping timeout in seconds (default: 1.0)
     --workers N       Concurrent threads for socket scan (default: 150)
     --rate N          Raw SYN scan rate packets/sec — Linux/macOS + root only (default: 10000)
+    --no-verify-tls   Skip TLS certificate verification (for self-signed server certs)
 """
 
 from __future__ import annotations
@@ -1817,7 +1818,7 @@ def write_json(data: dict, path: str) -> str:
     return path
 
 
-def upload(data: dict, server: str, key: str) -> bool:
+def upload(data: dict, server: str, key: str, verify_tls: bool = True) -> bool:
     """POST the payload to the GravWell server, gzip-compressed."""
     import gzip
     import ssl
@@ -1837,8 +1838,9 @@ def upload(data: dict, server: str, key: str) -> bool:
         method="POST",
     )
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    if not verify_tls:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
             _info(f"Server: {resp.read().decode()}")
@@ -1898,6 +1900,8 @@ Examples:
                         help="Concurrent threads for socket scan (default: 150)")
     parser.add_argument("--rate", type=int, default=10_000,
                         help="Raw SYN scan rate in packets/sec — Linux/macOS + root only (default: 10000)")
+    parser.add_argument("--no-verify-tls", action="store_true", default=False,
+                        help="Skip TLS certificate verification (needed for self-signed server certs)")
     args = parser.parse_args()
 
     _info(f"GravWell Collection Agent v{VERSION}")
@@ -2070,7 +2074,8 @@ Examples:
             _warn("--server requires --key")
         else:
             _info(f"Uploading to {args.server}…")
-            ok = upload(payload, args.server, args.key)
+            ok = upload(payload, args.server, args.key,
+                        verify_tls=not args.no_verify_tls)
             if not ok:
                 _warn("Upload failed — results saved locally")
 

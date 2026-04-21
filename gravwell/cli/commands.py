@@ -404,9 +404,15 @@ def discover(ctx, target, methods, community, snmp_port, tcp_ports,
 @click.option("--port", default=8888, type=int, show_default=True)
 @click.option("--host", "host_addr", default="127.0.0.1", show_default=True)
 @click.option("--debug", is_flag=True, default=False)
+@click.option("--tls/--no-tls", default=True, show_default=True,
+              help="Enable HTTPS with a self-signed cert (default: on)")
+@click.option("--cert", default=None, type=click.Path(),
+              help="Path to TLS certificate PEM (auto-generated if omitted)")
+@click.option("--key", "tls_key", default=None, type=click.Path(),
+              help="Path to TLS private key PEM (auto-generated if omitted)")
 @click.pass_context
-def serve(ctx, port, host_addr, debug):
-    """Start the web UI."""
+def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
+    """Start the web UI (HTTPS by default)."""
     import gravwell.keystore as ks_mod
     db_path = ctx.obj["db"]
     ks = ks_mod.load(db_path)
@@ -415,14 +421,40 @@ def serve(ctx, port, host_addr, debug):
         console.print("  gravwell user add admin --admin")
         raise SystemExit(1)
     _print_banner()
+
+    scheme = "https" if tls else "http"
     console.print(f"[bold magenta]Starting[/bold magenta] on "
-                  f"[cyan]http://{host_addr}:{port}[/cyan]")
+                  f"[cyan]{scheme}://{host_addr}:{port}[/cyan]")
     console.print(f"Database: [dim]{db_path}[/dim]")
+
     from gravwell.ui.app import create_app
     app = create_app(db_path)
+
     if debug:
         app.run(host=host_addr, port=port, debug=True)
+        return
+
+    if tls:
+        from gravwell.tls import ensure_cert, fingerprint as cert_fingerprint
+        cert_path = Path(cert) if cert else Path(db_path).with_suffix(".crt")
+        key_path  = Path(tls_key) if tls_key else Path(db_path).with_suffix(".key.pem")
+        newly = ensure_cert(cert_path, key_path)
+        if newly:
+            console.print(f"[dim]Generated self-signed cert: {cert_path}[/dim]")
+        fp = cert_fingerprint(cert_path)
+        console.print(f"[bold]TLS fingerprint:[/bold] [yellow]{fp}[/yellow]")
+        console.print("[dim]Share this fingerprint with agents using --no-verify-tls "
+                      "or pin it manually.[/dim]")
+        from cheroot.wsgi import Server as _CherootServer
+        from cheroot.ssl.builtin import BuiltinSSLAdapter as _SSLAdapter
+        server = _CherootServer((host_addr, port), app.server, numthreads=8)
+        server.ssl_adapter = _SSLAdapter(str(cert_path), str(key_path))
+        try:
+            server.start()
+        except KeyboardInterrupt:
+            server.stop()
     else:
+        console.print("[yellow]TLS disabled — traffic is unencrypted[/yellow]")
         from waitress import serve as _serve
         _serve(app.server, host=host_addr, port=port, threads=8)
 

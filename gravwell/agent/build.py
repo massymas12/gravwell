@@ -33,10 +33,12 @@ def generate_script(server: str = "", token: str = "") -> str:
     """
     source = AGENT.read_text(encoding="utf-8")
 
+    no_verify = bool(server)   # self-signed cert when server is pre-filled
     config_block = (
         "\n# ── Embedded configuration (pre-configured by GravWell server) ──────────────\n"
-        f"_EMBEDDED_SERVER: str = {repr(server)}\n"
-        f"_EMBEDDED_KEY: str    = {repr(token)}\n"
+        f"_EMBEDDED_SERVER:        str  = {repr(server)}\n"
+        f"_EMBEDDED_KEY:           str  = {repr(token)}\n"
+        f"_EMBEDDED_NO_VERIFY_TLS: bool = {repr(no_verify)}\n"
         "# ─────────────────────────────────────────────────────────────────────────────\n"
     )
     import re
@@ -50,6 +52,10 @@ def generate_script(server: str = "", token: str = "") -> str:
     source = source.replace(
         'parser.add_argument("--key", "-k", default="", help="API key for server upload")',
         'parser.add_argument("--key", "-k", default=_EMBEDDED_KEY, help="API key for server upload")',
+    )
+    source = source.replace(
+        'parser.add_argument("--no-verify-tls", action="store_true", default=False,',
+        'parser.add_argument("--no-verify-tls", action="store_true", default=_EMBEDDED_NO_VERIFY_TLS,',
     )
 
     return source

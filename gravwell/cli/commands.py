@@ -410,8 +410,10 @@ def discover(ctx, target, methods, community, snmp_port, tcp_ports,
               help="Path to TLS certificate PEM (auto-generated if omitted)")
 @click.option("--key", "tls_key", default=None, type=click.Path(),
               help="Path to TLS private key PEM (auto-generated if omitted)")
+@click.option("--http-port", "http_port", default=None, type=int,
+              help="Port for HTTP→HTTPS redirect listener (default: 80 when --port 443, else 8080)")
 @click.pass_context
-def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
+def serve(ctx, port, host_addr, debug, tls, cert, tls_key, http_port):
     """Start the web UI (HTTPS by default)."""
     import gravwell.keystore as ks_mod
     db_path = ctx.obj["db"]
@@ -471,16 +473,17 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
 
         server.error_log = _filtered_error_log
 
-        # Redirect plain-HTTP connections to HTTPS in a background thread.
+        # Redirect plain-HTTP connections on a standard port to HTTPS.
         import threading as _threading
+        _redir_port = http_port if http_port is not None else (80 if port == 443 else 8080)
+        _redirect_running = True
 
         def _http_redirect_server():
             import socket as _sock
-            redirect_port = 80 if port == 443 else port - 1
             try:
                 with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as srv:
                     srv.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
-                    srv.bind((host_addr, redirect_port))
+                    srv.bind((host_addr, _redir_port))
                     srv.listen(16)
                     srv.settimeout(1.0)
                     while _redirect_running:
@@ -489,7 +492,7 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
                         except _sock.timeout:
                             continue
                         try:
-                            conn.recv(1024)   # drain the HTTP request
+                            conn.recv(2048)   # drain the HTTP request
                             location = f"https://{host_addr}:{port}/"
                             resp = (
                                 f"HTTP/1.1 301 Moved Permanently\r\n"
@@ -502,19 +505,18 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
                             pass
                         finally:
                             conn.close()
-            except Exception:
-                pass   # redirect listener is best-effort
+            except OSError as exc:
+                console.print(
+                    f"[yellow]HTTP redirect on :{_redir_port} unavailable ({exc.strerror}) "
+                    f"— use --http-port to choose another port[/yellow]"
+                )
 
-        _redirect_running = True
-        _redir_port = 80 if port == 443 else port - 1
         _redir_thread = _threading.Thread(
             target=_http_redirect_server, daemon=True, name="http-redirect"
         )
-        try:
-            _redir_thread.start()
-            console.print(f"[dim]HTTP on :{_redir_port} → redirects to HTTPS :{port}[/dim]")
-        except Exception:
-            pass
+        _redir_thread.start()
+        console.print(f"[dim]HTTP :{_redir_port} → redirects to "
+                      f"[cyan]{scheme}://{host_addr}:{port}[/cyan][/dim]")
 
         try:
             server.start()

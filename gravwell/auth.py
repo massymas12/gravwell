@@ -113,7 +113,7 @@ def init_auth(flask_app, db_path: str) -> None:
 
     @flask_app.before_request
     def require_login():
-        allowed = ("/login", "/logout", "/assets/", "/_favicon")
+        allowed = ("/login", "/logout", "/assets/", "/_favicon", "/api/agent/submit")
         if any(request.path.startswith(p) for p in allowed):
             return None
         if not current_user.is_authenticated:

@@ -467,11 +467,13 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key):
         server = _CherootServer((host_addr, port), app.server, numthreads=8)
         server.ssl_adapter = _SSLAdapter(str(cert_path), str(key_path))
 
-        # Add filter directly to the server's own error_log instance (the one
-        # cheroot actually uses) as well as all named loggers as a belt-and-braces.
-        server.error_log.addFilter(_tls_filter)
+        # Add filter to every possible route cheroot might log through.
+        # Older cheroot uses a Logger instance; newer versions use a plain callable.
+        if hasattr(server.error_log, "addFilter"):
+            server.error_log.addFilter(_tls_filter)
         for _log_name in ("cheroot.error", "cheroot.ssl", "cheroot.server", "cheroot"):
             logging.getLogger(_log_name).addFilter(_tls_filter)
+        logging.root.addFilter(_tls_filter)   # catch-all if cheroot logs elsewhere
         try:
             server.start()
         except KeyboardInterrupt:

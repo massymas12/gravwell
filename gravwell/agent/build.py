@@ -39,7 +39,9 @@ def generate_script(server: str = "", token: str = "") -> str:
         f"_EMBEDDED_KEY: str    = {repr(token)}\n"
         "# ─────────────────────────────────────────────────────────────────────────────\n"
     )
-    source = source.replace('VERSION = "1.0"', 'VERSION = "1.0"' + config_block, 1)
+    import re
+    source = re.sub(r'VERSION = "[^"]+"\n',
+                    lambda m: m.group() + config_block, source, count=1)
 
     source = source.replace(
         'parser.add_argument("--server", "-s", default="", help="GravWell server URL")',

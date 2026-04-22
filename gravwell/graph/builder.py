@@ -202,10 +202,26 @@ def _add_subnet_edges(
     for subnet, nodes in subnet_members.items():
         if len(nodes) < 2:
             continue
-        for i in range(len(nodes)):
-            for j in range(i + 1, len(nodes)):
-                if not G.has_edge(nodes[i], nodes[j]):
-                    G.add_edge(nodes[i], nodes[j], edge_type="subnet", subnet=subnet)
+        if len(nodes) <= 30:
+            # Small subnet: full mesh — richer shortest-path analysis
+            for i in range(len(nodes)):
+                for j in range(i + 1, len(nodes)):
+                    if not G.has_edge(nodes[i], nodes[j]):
+                        G.add_edge(nodes[i], nodes[j],
+                                   edge_type="subnet", subnet=subnet)
+        else:
+            # Large subnet: star topology through the lowest-octet host (gateway).
+            # O(n) edges instead of O(n²) — preserves reachability for path
+            # analysis without generating millions of edges for big subnets.
+            def _last_octet(ip: str) -> int:
+                try:
+                    return int(ip.rsplit(".", 1)[-1])
+                except ValueError:
+                    return 999
+            hub = min(nodes, key=_last_octet)
+            for node in nodes:
+                if node != hub and not G.has_edge(hub, node):
+                    G.add_edge(hub, node, edge_type="subnet", subnet=subnet)
 
 
 def _add_shared_service_edges(G: nx.Graph, host_data: list[dict]) -> None:
@@ -765,8 +781,16 @@ def _compute_preset_positions(
         # 2. Otherwise use centroid of saved spoke positions if most are saved.
         # 3. Fall back to algorithmic centre.
         cx, cy = algo_cx, algo_cy
+        hub_from_saved = False
+
         if saved_positions and hub_id and hub_id in saved_positions:
-            cx, cy = saved_positions[hub_id]
+            sx, sy = saved_positions[hub_id]
+            # Reject hub positions that are wildly far from the algorithmic
+            # centre — these come from a diverged force-layout run and would
+            # scatter every spoke in the subnet far from its box.
+            if abs(sx - algo_cx) < 1500 and abs(sy - algo_cy) < 1500:
+                cx, cy = sx, sy
+                hub_from_saved = True
         elif saved_positions:
             saved_spokes = [
                 saved_positions[ip]
@@ -776,16 +800,13 @@ def _compute_preset_positions(
             if len(saved_spokes) >= max(1, len(ips) // 2):
                 cx_cand = sum(p[0] for p in saved_spokes) / len(saved_spokes)
                 cy_cand = sum(p[1] for p in saved_spokes) / len(saved_spokes)
-                # Reject centroids from widely-scattered positions — high spread
-                # means these are stale positions from a diverged force-layout
-                # run and no longer correspond to a coherent subnet cluster.
-                # Threshold: 300 px ≈ one large subnet box.
                 spread = max(
                     max(p[0] for p in saved_spokes) - min(p[0] for p in saved_spokes),
                     max(p[1] for p in saved_spokes) - min(p[1] for p in saved_spokes),
                 )
                 if spread <= 300:
                     cx, cy = cx_cand, cy_cand
+                    hub_from_saved = True
 
         sz = _node_sz(len(ips))
         non_hub = [ip for ip in ips if ip != hub_id]
@@ -793,16 +814,24 @@ def _compute_preset_positions(
         if hub_id:
             node_positions[hub_id] = {"x": cx, "y": cy}
 
-        # Nodes without saved positions are placed on concentric rings
-        needs_place = [ip for ip in non_hub
-                       if not (saved_positions and ip in saved_positions)]
-        algo_pos = _place_rings(cx, cy, needs_place, sz)
-
-        for ip in non_hub:
-            if saved_positions and ip in saved_positions:
-                sx, sy = saved_positions[ip]
-                node_positions[ip] = {"x": sx, "y": sy}
-            else:
+        # Only use individual saved spoke positions when the hub centre itself
+        # came from saved positions — otherwise the spokes' saved coordinates
+        # are relative to an old hub location and would scatter outside the box.
+        if hub_from_saved:
+            needs_place = [ip for ip in non_hub
+                           if not (saved_positions and ip in saved_positions)]
+            algo_pos = _place_rings(cx, cy, needs_place, sz)
+            for ip in non_hub:
+                if saved_positions and ip in saved_positions:
+                    node_positions[ip] = {"x": saved_positions[ip][0],
+                                          "y": saved_positions[ip][1]}
+                else:
+                    node_positions[ip] = algo_pos.get(ip, {"x": cx, "y": cy})
+        else:
+            # Hub is algorithmic — place all spokes algorithmically too so
+            # they land inside the subnet box rather than at stale positions.
+            algo_pos = _place_rings(cx, cy, non_hub, sz)
+            for ip in non_hub:
                 node_positions[ip] = algo_pos.get(ip, {"x": cx, "y": cy})
 
     # Position bridge (multi-subnet) nodes in a dedicated row ABOVE the entire

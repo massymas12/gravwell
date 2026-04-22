@@ -244,18 +244,16 @@ def register(app: dash.Dash) -> None:
         # gravity: pull toward the centre.  Lower = more spread-out layout.
         _cb = {
             "name": "cose-bilkent", "animate": True,
-            # Values close to cose-bilkent's own defaults (nodeRepulsion 4500,
-            # gravity 0.25).  Previous values (80 000 / 0.05) caused explosive
-            # divergence on maps with many subnet compound boxes.
-            "nodeRepulsion": 6500,
-            "idealEdgeLength": 80,
-            "edgeElasticity": 0.45,
-            "nestingFactor": 0.1,
-            "gravity": 0.25,
-            "gravityCompound": 1.0,
-            "gravityRange": 3.8,
-            "numIter": 2500,
-            "padding": 40,
+            # Low gravity preserves the domain-depth vertical hierarchy baked
+            # into the preset warm-start positions.  nodeRepulsion is halved
+            # from the old 80 000 that caused explosive divergence on large maps.
+            "nodeRepulsion": 40000,
+            "idealEdgeLength": 90,
+            "edgeElasticity": 0.4,
+            "nestingFactor": 0.2,
+            "gravity": 0.05,
+            "numIter": 3000,
+            "padding": 60,
             "nodeDimensionsIncludeLabels": True,
             # randomize: False uses preset positions as warm start so the
             # domain-depth grid seeding keeps parent domains above subdomains.
@@ -264,12 +262,12 @@ def register(app: dash.Dash) -> None:
         # ── Cose-Bilkent Spread — more separation for very dense maps ──────
         _cb_spread = {
             **_cb,
-            "nodeRepulsion": 14000,
-            "idealEdgeLength": 140,
-            "nestingFactor": 0.2,
-            "gravity": 0.15,
-            "numIter": 3500,
-            "padding": 60,
+            "nodeRepulsion": 70000,
+            "idealEdgeLength": 180,
+            "nestingFactor": 0.35,
+            "gravity": 0.03,
+            "numIter": 4000,
+            "padding": 80,
         }
         configs = {
             "preset": {

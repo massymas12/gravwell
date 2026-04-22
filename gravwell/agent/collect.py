@@ -31,6 +31,8 @@ Usage:
     --workers N       Concurrent threads for socket scan (default: 150)
     --rate N          Raw SYN scan rate packets/sec — Linux/macOS + root only (default: 10000)
     --no-verify-tls   Skip TLS certificate verification (for self-signed server certs)
+    --ot-mode         OT/ICS-safe discovery: BACnet/EtherNet-IP broadcasts only, no sweep,
+                      no banner grabbing, low concurrency, OT protocol ports only
     --include CIDR    Only actively probe hosts in this subnet (repeat or comma-separate)
     --exclude CIDR    Never actively probe hosts in this subnet — OT-safe (repeat or comma-separate)
 """
@@ -55,7 +57,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.5"
+VERSION = "1.6"
 
 # ── Port lists ────────────────────────────────────────────────────────────────
 
@@ -1797,6 +1799,224 @@ def _grab_banner(sock: socket.socket, ip: str, port: int,
         return None
 
 
+# ── OT-safe active discovery ──────────────────────────────────────────────────
+#
+# All techniques here use a single broadcast/multicast packet and collect
+# responses.  No unicast probing of unknown hosts, no banner grabbing,
+# no data sent after connection.  Safe for PLCs, RTUs, HMIs, safety systems.
+
+# OT protocol + common IT management ports — the only ports probed in OT mode
+_OT_PORTS: List[Tuple[int, str]] = [
+    (80,    "http"),           # HMI / SCADA web interfaces
+    (443,   "https"),          # HMI / SCADA HTTPS
+    (22,    "ssh"),            # managed switches, Linux-based RTUs
+    (23,    "telnet"),         # legacy PLCs
+    (21,    "ftp"),            # some PLCs / RTUs
+    (161,   "snmp"),           # SNMP (UDP — tested separately)
+    (502,   "modbus"),         # Modbus TCP
+    (102,   "s7comm"),         # Siemens S7 (ISO-TSAP)
+    (44818, "ethernet-ip"),    # EtherNet/IP / CIP (Rockwell, Allen-Bradley)
+    (47808, "bacnet"),         # BACnet/IP
+    (20000, "dnp3"),           # DNP3 over TCP
+    (4840,  "opc-ua"),         # OPC-UA
+    (2404,  "iec104"),         # IEC 60870-5-104
+    (1911,  "niagara-fox"),    # Niagara / Tridium Fox
+    (4911,  "niagara-foxs"),   # Niagara Fox TLS
+    (9600,  "omron-fins"),     # Omron FINS
+    (18245, "ge-srtp"),        # GE SRTP (Series 90)
+    (1962,  "pcworx"),         # Phoenix Contact PCWorx
+    (2455,  "wago"),           # WAGO Fieldbus
+    (34962, "profinet-rt"),    # PROFINET RT (UDP)
+    (2222,  "ethernet-ip-ud"), # EtherNet/IP implicit messaging
+]
+
+# OT port → role tag mapping
+_OT_PORT_ROLES: Dict[int, str] = {
+    502:   "modbus",
+    102:   "s7-plc",
+    44818: "ethernet-ip",
+    47808: "bacnet",
+    20000: "dnp3",
+    4840:  "opc-ua",
+    2404:  "iec104",
+    1911:  "niagara",
+    4911:  "niagara",
+    9600:  "omron-fins",
+    18245: "ge-srtp",
+    1962:  "pcworx",
+}
+
+
+def _bacnet_whois(timeout: float = 3.0) -> List[dict]:
+    """Send a BACnet Who-Is broadcast; collect I-Am responses.
+
+    Uses a single UDP broadcast — the standard mechanism for BACnet device
+    discovery.  Safe for all BACnet/IP devices (building automation,
+    Honeywell, Siemens, Johnson Controls, etc.).
+    """
+    BACNET_PORT = 47808
+    # BVLC(4) + NPDU(2) + APDU Who-Is(2) = 8 bytes
+    WHO_IS = bytes([
+        0x81, 0x0b, 0x00, 0x08,   # BVLC: type, Original-Broadcast-NPDU, len=8
+        0x01, 0x00,               # NPDU: version=1, control=0x00
+        0x10, 0x08,               # APDU: Unconfirmed-REQ + Who-Is service
+    ])
+    found: List[dict] = []
+    seen: set = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(timeout)
+        sock.sendto(WHO_IS, ("<broadcast>", BACNET_PORT))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, (src_ip, _) = sock.recvfrom(512)
+            except socket.timeout:
+                break
+            if src_ip in seen:
+                continue
+            seen.add(src_ip)
+            entry: dict = {"ip": src_ip, "source": "bacnet-whois"}
+            # Parse device instance from I-Am APDU if present
+            # I-Am: BVLC(4) + NPDU(var) + APDU 0x10 0x00 + encoded object-id
+            try:
+                apdu_start = 6   # skip BVLC + minimal NPDU
+                if len(data) > apdu_start + 4 and data[apdu_start] == 0x10 and data[apdu_start + 1] == 0x00:
+                    # Object-id is a BACnet encoded 4-byte tag
+                    obj_bytes = data[apdu_start + 2: apdu_start + 6]
+                    instance = int.from_bytes(obj_bytes, "big") & 0x3FFFFF
+                    entry["bacnet_device_id"] = instance
+            except Exception:
+                pass
+            found.append(entry)
+    except Exception:
+        pass
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    return found
+
+
+def _enip_list_identity(timeout: float = 3.0) -> List[dict]:
+    """Send EtherNet/IP List Identity broadcast; collect responses.
+
+    List Identity (command 0x0063) is a read-only discovery request defined
+    in the CIP spec.  Safe for Rockwell, Allen-Bradley, and any CIP device.
+    Returns device type, product name, and vendor information.
+    """
+    ENIP_PORT = 44818
+    LIST_IDENTITY = bytes([
+        0x63, 0x00,                          # Command: List Identity
+        0x00, 0x00,                          # Length: 0
+        0x00, 0x00, 0x00, 0x00,              # Session handle
+        0x00, 0x00, 0x00, 0x00,              # Status
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,              # Sender context (8 bytes)
+        0x00, 0x00, 0x00, 0x00,              # Options
+    ])
+    found: List[dict] = []
+    seen: set = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(timeout)
+        sock.sendto(LIST_IDENTITY, ("<broadcast>", ENIP_PORT))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, (src_ip, _) = sock.recvfrom(1024)
+            except socket.timeout:
+                break
+            if src_ip in seen:
+                continue
+            seen.add(src_ip)
+            entry: dict = {"ip": src_ip, "source": "enip-list-identity"}
+            # Parse List Identity response (command 0x0063, item type 0x000C)
+            try:
+                if len(data) >= 26 and data[0] == 0x63 and data[1] == 0x00:
+                    # Item count at offset 24, item type at 26
+                    if len(data) >= 28:
+                        # Product name: offset varies; vendor/device type at fixed offsets
+                        # Vendor ID at byte 36 (2 bytes LE), device type at 38, product name at 42+
+                        if len(data) > 42:
+                            vendor_id   = int.from_bytes(data[36:38], "little")
+                            device_type = int.from_bytes(data[38:40], "little")
+                            name_len = data[42] if len(data) > 43 else 0
+                            if name_len and len(data) >= 43 + name_len:
+                                product = data[43: 43 + name_len].decode("ascii", errors="replace").strip()
+                                entry["enip_product"] = product
+                            entry["enip_vendor_id"]   = vendor_id
+                            entry["enip_device_type"] = device_type
+            except Exception:
+                pass
+            found.append(entry)
+    except Exception:
+        pass
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    return found
+
+
+def ot_safe_scan(ips: List[str], timeout: float = 5.0,
+                 workers: int = 5) -> List[dict]:
+    """Gentle port scan for OT networks.
+
+    Rules:
+      - Only known OT + management ports (_OT_PORTS)
+      - No banner grabbing — connect test only, then immediately close
+      - Low concurrency (default 5), long timeout (default 5 s)
+      - Assigns OT role tags based on open ports
+    """
+    results: Dict[str, dict] = {}
+    lock = threading.Lock()
+    tasks = [(ip, port, svc) for ip in ips for port, svc in _OT_PORTS
+             if port != 161]   # skip SNMP — UDP, handled separately
+
+    def _try_ot(task: Tuple) -> Optional[Tuple]:
+        ip, port, svc = task
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            connected = s.connect_ex((ip, port)) == 0
+            s.close()   # close immediately — no banner grab
+            if connected:
+                return (ip, port, svc)
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for result in ex.map(_try_ot, tasks):
+            if result:
+                ip, port, svc = result
+                with lock:
+                    if ip not in results:
+                        results[ip] = {"ip": ip, "open_ports": []}
+                    results[ip]["open_ports"].append(
+                        {"port": port, "proto": "tcp", "service": svc}
+                    )
+
+    # Assign OT role tags and OS hints from open ports
+    for data in results.values():
+        open_port_nums = [p["port"] for p in data["open_ports"]]
+        roles = [_OT_PORT_ROLES[p] for p in open_port_nums if p in _OT_PORT_ROLES]
+        if roles:
+            data["role_hints"] = list(dict.fromkeys(roles))  # deduplicate
+        # OS hint from port evidence
+        os_hint, _ = infer_os_and_roles(open_port_nums)
+        if os_hint:
+            data["os_hint"] = os_hint
+
+    _info(f"OT scan done: {len(results)} host(s) with open ports")
+    return list(results.values())
+
+
 def _nmap_scan(ips: List[str], timeout: float) -> Optional[List[dict]]:
     """Run nmap and return structured results. Returns None if nmap unavailable."""
     import shutil
@@ -2085,13 +2305,15 @@ def _wizard(args) -> object:
                   getattr(args, "output", "") or "")
 
     print("\n── Scope  ──────────────────────────────────────────")
-    print("  (OT environments: exclude PLC/SCADA subnets to avoid disrupting devices)")
+    ot_mode = _ask_bool("OT/ICS network? (enables safe broadcast-only discovery, no banner grabbing)", False)
     exclude_str = _ask("Subnets to EXCLUDE from active probing, comma-separated (blank = none)", "")
     include_str = _ask("Subnets to LIMIT active probing to, comma-separated (blank = all)", "")
 
     print("\n── Discovery ───────────────────────────────────────")
-    no_sweep = _ask_bool("Skip active host discovery (ping/TCP sweep)?", False)
-    no_scan  = _ask_bool("Skip port scan?", False)
+    if ot_mode:
+        print("  (OT mode: ping/TCP sweep replaced with BACnet Who-Is + EtherNet/IP broadcast)")
+    no_sweep = False if ot_mode else _ask_bool("Skip active host discovery (ping/TCP sweep)?", False)
+    no_scan  = False if ot_mode else _ask_bool("Skip port scan?", False)
     routes   = _ask_bool("Also sweep routed (non-directly-attached) subnets?", False)
 
     print("\n── Tuning ──────────────────────────────────────────")
@@ -2116,6 +2338,7 @@ def _wizard(args) -> object:
         print(f"  Exclude : {exclude_str}")
     if include_str:
         print(f"  Include : {include_str}")
+    print(f"  OT mode : {'yes — broadcast-only, no banner grabbing' if ot_mode else 'no'}")
     print(f"  Sweep   : {'skip' if no_sweep else 'yes'}")
     print(f"  Scan    : {'skip' if no_scan else 'yes'}")
     print(f"  Routes  : {'yes' if routes else 'no'}")
@@ -2131,6 +2354,7 @@ def _wizard(args) -> object:
     args.output        = output
     args.exclude       = [exclude_str] if exclude_str else []
     args.include       = [include_str] if include_str else []
+    args.ot_mode       = ot_mode
     args.no_sweep      = no_sweep
     args.no_scan       = no_scan
     args.routes        = routes
@@ -2170,6 +2394,9 @@ Examples:
                         help="Raw SYN scan rate in packets/sec — Linux/macOS + root only (default: 10000)")
     parser.add_argument("--no-verify-tls", action="store_true", default=False,
                         help="Skip TLS certificate verification (needed for self-signed server certs)")
+    parser.add_argument("--ot-mode", action="store_true", default=False,
+                        help="OT-safe discovery: broadcast-only host detection, "
+                             "no banner grabbing, low concurrency, OT protocol ports only")
     parser.add_argument("--include", action="append", default=[], metavar="CIDR",
                         help="Only actively probe hosts inside this CIDR "
                              "(can repeat or comma-separate; passive data still collected for all hosts)")
@@ -2233,7 +2460,7 @@ Examples:
 
     _info(f"  {len(neighbors)} neighbour(s) from passive sources")
 
-    # 4. mDNS / SSDP multicast discovery (runs concurrently with ping sweep)
+    # 4. mDNS / SSDP multicast discovery (runs concurrently with sweep)
     _info("mDNS/SSDP multicast discovery (5 s, background)…")
     _mdns_ssdp_bag: List[dict] = []
     _mdns_thread = threading.Thread(
@@ -2242,9 +2469,23 @@ Examples:
     )
     _mdns_thread.start()
 
-    # 5. Ping sweep
+    # 4b. OT protocol broadcasts (BACnet Who-Is + EtherNet/IP List Identity)
+    if args.ot_mode:
+        _info("OT mode: sending BACnet Who-Is broadcast…")
+        for entry in _bacnet_whois(timeout=args.timeout + 2):
+            if entry["ip"] not in existing_ips:
+                neighbors.append(entry)
+                existing_ips.add(entry["ip"])
+
+        _info("OT mode: sending EtherNet/IP List Identity broadcast…")
+        for entry in _enip_list_identity(timeout=args.timeout + 2):
+            if entry["ip"] not in existing_ips:
+                neighbors.append(entry)
+                existing_ips.add(entry["ip"])
+
+    # 5. Active sweep — skipped in OT mode (broadcasts above replace it)
     known_open: Dict[str, List[int]] = {}
-    if not args.no_sweep:
+    if not args.no_sweep and not args.ot_mode:
         # Always sweep directly-attached networks; add routed ones with --routes
         sweep_nets = list(direct_nets)
 
@@ -2322,12 +2563,20 @@ Examples:
             skipped = before - len(scan_targets)
             if skipped:
                 _info(f"  {skipped} host(s) skipped by --include/--exclude filter (passive data retained)")
-        scan_results = port_scan(
-            scan_targets,
-            timeout=args.timeout,
-            workers=args.workers,
-            known_open=known_open,
-        )
+        if args.ot_mode:
+            _info("OT mode: running safe OT port scan (no banner grabbing, low concurrency)…")
+            scan_results = ot_safe_scan(
+                scan_targets,
+                timeout=max(args.timeout, 5.0),
+                workers=min(args.workers, 5),
+            )
+        else:
+            scan_results = port_scan(
+                scan_targets,
+                timeout=args.timeout,
+                workers=args.workers,
+                known_open=known_open,
+            )
 
     # 7. Post-scan enrichment — all four methods are pure I/O; run concurrently
     _info("Post-scan enrichment (TLS / HTTP / NetBIOS / rDNS — concurrent)…")

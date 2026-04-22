@@ -455,6 +455,17 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key, http_port):
         server = _CherootServer((host_addr, port), app.server, numthreads=8)
         server.ssl_adapter = _SSLAdapter(str(cert_path), str(key_path))
 
+        # Cheroot socket file wrappers raise WinError 10038 ("not a socket")
+        # in __del__ after TLS connections close — harmless GC noise.  Suppress
+        # via sys.unraisablehook which is Python's hook for __del__ exceptions.
+        import sys as _sys, traceback as _tb
+        _orig_unraisable = _sys.unraisablehook
+        def _quiet_unraisable(u):
+            if isinstance(u.exc_value, OSError) and "makefile" in "".join(_tb.format_tb(u.exc_tb)):
+                return
+            _orig_unraisable(u)
+        _sys.unraisablehook = _quiet_unraisable
+
         # Cheroot routes connection errors through server.error_log which in
         # newer versions is a plain callable, not a Logger — patch it directly.
         _orig_error_log = server.error_log

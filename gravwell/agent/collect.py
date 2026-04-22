@@ -31,6 +31,8 @@ Usage:
     --workers N       Concurrent threads for socket scan (default: 150)
     --rate N          Raw SYN scan rate packets/sec — Linux/macOS + root only (default: 10000)
     --no-verify-tls   Skip TLS certificate verification (for self-signed server certs)
+    --include CIDR    Only actively probe hosts in this subnet (repeat or comma-separate)
+    --exclude CIDR    Never actively probe hosts in this subnet — OT-safe (repeat or comma-separate)
 """
 
 from __future__ import annotations
@@ -1990,6 +1992,42 @@ def _warn(msg: str) -> None:
     print(f"[!] {msg}", file=sys.stderr, flush=True)
 
 
+# ── Include / exclude filters ────────────────────────────────────────────────
+
+def _parse_cidr_list(specs: List[str]) -> List[ipaddress.IPv4Network]:
+    """Expand a list of CIDR/IP strings (comma-separated entries supported)."""
+    nets: List[ipaddress.IPv4Network] = []
+    for spec in specs:
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                nets.append(ipaddress.IPv4Network(part, strict=False))
+            except ValueError:
+                _warn(f"Invalid CIDR/IP ignored: {part!r}")
+    return nets
+
+
+def _ip_allowed(ip: str,
+                includes: List[ipaddress.IPv4Network],
+                excludes: List[ipaddress.IPv4Network]) -> bool:
+    """Return True if *ip* should be actively probed.
+
+    Excludes take priority: an IP matching any exclude net is always blocked.
+    If includes are specified the IP must also match at least one of them.
+    """
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return True
+    if excludes and any(addr in net for net in excludes):
+        return False
+    if includes and not any(addr in net for net in includes):
+        return False
+    return True
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -2020,7 +2058,21 @@ Examples:
                         help="Raw SYN scan rate in packets/sec — Linux/macOS + root only (default: 10000)")
     parser.add_argument("--no-verify-tls", action="store_true", default=False,
                         help="Skip TLS certificate verification (needed for self-signed server certs)")
+    parser.add_argument("--include", action="append", default=[], metavar="CIDR",
+                        help="Only actively probe hosts inside this CIDR "
+                             "(can repeat or comma-separate; passive data still collected for all hosts)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="CIDR",
+                        help="Never actively probe hosts inside this CIDR "
+                             "(OT-safe: excluded hosts still appear in output from passive sources)")
     args = parser.parse_args()
+
+    include_nets = _parse_cidr_list(args.include)
+    exclude_nets = _parse_cidr_list(args.exclude)
+    _has_filter  = bool(include_nets or exclude_nets)
+    if include_nets:
+        _info(f"Include filter: only probe {', '.join(str(n) for n in include_nets)}")
+    if exclude_nets:
+        _info(f"Exclude filter: never probe {', '.join(str(n) for n in exclude_nets)}")
 
     _info(f"GravWell Collection Agent v{VERSION}")
     if _is_elevated():
@@ -2099,6 +2151,23 @@ Examples:
             _info(f"  Adding {len(routed_nets)} routed subnet(s) to sweep (--routes)")
             sweep_nets += [n for n in routed_nets if n not in sweep_nets]
 
+        if _has_filter:
+            filtered_nets = []
+            for cidr in sweep_nets:
+                try:
+                    net = ipaddress.IPv4Network(cidr, strict=False)
+                except ValueError:
+                    filtered_nets.append(cidr)
+                    continue
+                if exclude_nets and any(net.overlaps(ex) for ex in exclude_nets):
+                    _info(f"  Skipping sweep of {cidr} (excluded)")
+                    continue
+                if include_nets and not any(net.overlaps(inc) for inc in include_nets):
+                    _info(f"  Skipping sweep of {cidr} (not in --include list)")
+                    continue
+                filtered_nets.append(cidr)
+            sweep_nets = filtered_nets
+
         if sweep_nets:
             live, known_open = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers, rate_pps=args.rate)
             for ip in live:
@@ -2130,6 +2199,13 @@ Examples:
     scan_results: List[dict] = []
     if not args.no_scan and neighbors:
         scan_targets = list({n["ip"] for n in neighbors} | set(self_info.get("ips", [])))
+        if _has_filter:
+            before = len(scan_targets)
+            scan_targets = [ip for ip in scan_targets
+                            if _ip_allowed(ip, include_nets, exclude_nets)]
+            skipped = before - len(scan_targets)
+            if skipped:
+                _info(f"  {skipped} host(s) skipped by --include/--exclude filter (passive data retained)")
         scan_results = port_scan(
             scan_targets,
             timeout=args.timeout,

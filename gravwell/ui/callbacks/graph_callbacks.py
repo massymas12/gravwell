@@ -252,6 +252,11 @@ def register(app: dash.Dash) -> None:
             "edgeElasticity": 0.4,
             "nestingFactor": 0.2,
             "gravity": 0.05,
+            # gravityCompound pulls subnet nodes back toward their domain
+            # compound centre, preventing subnets from drifting apart within
+            # a domain box under nodeRepulsion.
+            "gravityCompound": 1.5,
+            "gravityRangeCompound": 1.5,
             "numIter": 3000,
             "padding": 60,
             "nodeDimensionsIncludeLabels": True,

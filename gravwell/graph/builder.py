@@ -780,15 +780,18 @@ def _compute_preset_positions(
         # 1. Use saved hub position if present.
         # 2. Otherwise use centroid of saved spoke positions if most are saved.
         # 3. Fall back to algorithmic centre.
+        # Natural radius of this subnet: half the estimated compound box size.
+        # Saved hub positions that drift further than 3× this are from a
+        # diverged force-layout run and get replaced with the algorithmic centre.
+        _nat_r = subnet_box.get(subnet, 200.0) / 2
+        _max_hub_drift = max(300.0, _nat_r * 3.0)
+
         cx, cy = algo_cx, algo_cy
         hub_from_saved = False
 
         if saved_positions and hub_id and hub_id in saved_positions:
             sx, sy = saved_positions[hub_id]
-            # Reject hub positions that are wildly far from the algorithmic
-            # centre — these come from a diverged force-layout run and would
-            # scatter every spoke in the subnet far from its box.
-            if abs(sx - algo_cx) < 1500 and abs(sy - algo_cy) < 1500:
+            if abs(sx - algo_cx) < _max_hub_drift and abs(sy - algo_cy) < _max_hub_drift:
                 cx, cy = sx, sy
                 hub_from_saved = True
         elif saved_positions:
@@ -817,16 +820,26 @@ def _compute_preset_positions(
         # Only use individual saved spoke positions when the hub centre itself
         # came from saved positions — otherwise the spokes' saved coordinates
         # are relative to an old hub location and would scatter outside the box.
+        # Max distance a saved spoke can be from the hub and still be trusted.
+        # Spokes further than 2.5× the outer ring radius are from a blown-out
+        # layout and get re-placed algorithmically.
+        _outer_r = _outer_ring_r(len(non_hub), sz)
+        _max_spoke_drift = max(200.0, _outer_r * 2.5)
+
         if hub_from_saved:
-            needs_place = [ip for ip in non_hub
-                           if not (saved_positions and ip in saved_positions)]
-            algo_pos = _place_rings(cx, cy, needs_place, sz)
+            needs_place = []
             for ip in non_hub:
                 if saved_positions and ip in saved_positions:
-                    node_positions[ip] = {"x": saved_positions[ip][0],
-                                          "y": saved_positions[ip][1]}
+                    sx, sy = saved_positions[ip]
+                    if abs(sx - cx) < _max_spoke_drift and abs(sy - cy) < _max_spoke_drift:
+                        node_positions[ip] = {"x": sx, "y": sy}
+                    else:
+                        needs_place.append(ip)
                 else:
-                    node_positions[ip] = algo_pos.get(ip, {"x": cx, "y": cy})
+                    needs_place.append(ip)
+            algo_pos = _place_rings(cx, cy, needs_place, sz)
+            for ip in needs_place:
+                node_positions[ip] = algo_pos.get(ip, {"x": cx, "y": cy})
         else:
             # Hub is algorithmic — place all spokes algorithmically too so
             # they land inside the subnet box rather than at stale positions.

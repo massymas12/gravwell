@@ -60,13 +60,14 @@ def register(app: dash.Dash) -> None:
         Input("admin-if-btn",      "n_clicks"),
         Input("smb-spread-btn",    "n_clicks"),
         Input("ad-enum-btn",       "n_clicks"),
+        Input("internet-exp-btn",  "n_clicks"),
         State("path-src-ip", "value"),
         State("path-dst-ip", "value"),
         prevent_initial_call=True,
     )
     def run_analysis(
         path_c, hvt_c, pivot_c, exposure_c, terrain_c, legacy_c,
-        kerb_c, clear_c, admin_c, smb_c, ad_enum_c,
+        kerb_c, clear_c, admin_c, smb_c, ad_enum_c, inet_exp_c,
         src_ip, dst_ip,
     ):
         from dash import ctx
@@ -98,6 +99,8 @@ def register(app: dash.Dash) -> None:
             return _render_smb_spread(G)
         elif triggered == "ad-enum-btn":
             return _render_domain_enum(G, db_path)
+        elif triggered == "internet-exp-btn":
+            return _render_internet_exposed(G)
         return no_update
 
     # ── Focus callbacks: path table host cells, services table, vulns table ──
@@ -494,6 +497,8 @@ def _render_paths_ui():
                             className="btn btn-sm btn-danger"),
                 html.Button("Legacy OS",        id="legacy-sys-btn",
                             className="btn btn-sm btn-secondary"),
+                html.Button("Internet Exposed", id="internet-exp-btn",
+                            className="btn btn-sm btn-danger"),
             ),
             _grp(
                 "ATTACK SURFACE",
@@ -816,6 +821,37 @@ def _render_admin_interfaces(G):
         f"Exposed Admin Interfaces ({len(hosts)} hosts) -- lateral movement entry points",
         ["Host", "OS", "Interfaces", "CVSS"],
         rows,
+    )
+
+
+def _render_internet_exposed(G):
+    hosts = analysis.find_internet_exposed(G)
+    if not hosts:
+        return _msg("No internet-routable IPs found on any host.", "#27AE60")
+    rows = []
+    for h in hosts:
+        label = h.hostnames[0] if h.hostnames else h.ip
+        pub_ip_spans = []
+        for pip in h.public_ips:
+            pub_ip_spans.append(
+                html.Span(pip, style={"color": "#E74C3C", "fontWeight": "bold",
+                                      "fontSize": "11px", "marginRight": "6px"})
+            )
+        port_str = ", ".join(str(p) for p in h.open_ports[:12])
+        if len(h.open_ports) > 12:
+            port_str += f" +{len(h.open_ports) - 12} more"
+        rows.append(html.Tr([
+            html.Td(_host_cell(label, h.ip if h.hostnames else "", ip=h.ip)),
+            html.Td(h.os_name, style={"fontSize": "11px"}),
+            html.Td(pub_ip_spans),
+            html.Td(port_str, style={"fontSize": "10px", "color": "#999"}),
+            html.Td(f"{h.max_cvss:.1f}"),
+        ]))
+    return _table(
+        f"Internet-Exposed Hosts ({len(hosts)}) — hosts with at least one public IP",
+        ["Host", "OS", "Public IP(s)", "Open Ports", "CVSS"],
+        rows,
+        heading_color="#E74C3C",
     )
 
 

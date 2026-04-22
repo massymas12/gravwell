@@ -130,6 +130,16 @@ class DomainEnumHost:
     max_cvss: float
 
 
+@dataclass
+class InternetExposedHost:
+    ip: str
+    os_name: str
+    hostnames: list[str]
+    public_ips: list[str]        # all IPs on this host that are internet-routable
+    open_ports: list[int]
+    max_cvss: float
+
+
 # ── Role detection port sets ──────────────────────────────────────────────────
 
 _DC_PORTS        = {88, 3268, 3269}
@@ -721,6 +731,39 @@ def find_domain_enum(G: nx.Graph) -> list[DomainEnumHost]:
             os_name=(attrs.get("os_name") or attrs.get("os_family") or ""),
             hostnames=attrs.get("hostnames", []),
             domain=domain_tags[0] if domain_tags else "",
+            max_cvss=attrs.get("max_cvss", 0.0),
+        ))
+    results.sort(key=lambda x: -x.max_cvss)
+    return results
+
+
+def find_internet_exposed(G: nx.Graph) -> list[InternetExposedHost]:
+    """
+    List hosts that have at least one internet-routable (non-RFC-1918) IP,
+    whether as their primary IP or among their additional_ips.  Sorted by
+    CVSS score descending so the most critical exposed hosts appear first.
+    """
+    results: list[InternetExposedHost] = []
+    for ip, attrs in G.nodes(data=True):
+        if attrs.get("node_type") != "host":
+            continue
+        all_ips = [ip] + (attrs.get("additional_ips") or [])
+        public_ips: list[str] = []
+        for candidate in all_ips:
+            try:
+                addr = ipaddress.ip_address(candidate)
+                if not addr.is_private and not addr.is_loopback and not addr.is_link_local:
+                    public_ips.append(candidate)
+            except ValueError:
+                pass
+        if not public_ips:
+            continue
+        results.append(InternetExposedHost(
+            ip=ip,
+            os_name=attrs.get("os_name") or attrs.get("os_family", "Unknown"),
+            hostnames=attrs.get("hostnames", []),
+            public_ips=public_ips,
+            open_ports=sorted(attrs.get("open_ports", [])),
             max_cvss=attrs.get("max_cvss", 0.0),
         ))
     results.sort(key=lambda x: -x.max_cvss)

@@ -9,7 +9,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 ## Features
 
 - **Wide format support** — nmap, Nessus, Masscan, OpenVAS, Nuclei, enum4linux, CrowdStrike Falcon, Cisco IOS, Juniper JunOS, Fortinet FortiOS, Palo Alto PAN-OS (all auto-detected)
-- **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; uses 8 stdlib-only discovery methods (ARP, netstat, mDNS/SSDP, NetBIOS, reverse DNS, TLS certs, HTTP fingerprinting, TCP-probe sweep) plus nmap/fping when available; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
+- **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; uses stdlib-only discovery methods (ARP, netstat, mDNS/SSDP, NetBIOS, reverse DNS, TLS certs, HTTP fingerprinting, TCP-probe sweep, OT broadcasts) plus nmap/fping when available; interactive wizard when run with no arguments; `--ot-mode` for safe ICS/OT discovery; CIDR include/exclude filters; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
 - **HTTPS by default** — self-signed TLS cert auto-generated at first start; SHA-256 fingerprint printed in the console so you can verify the connection; collection agents skip verification automatically for self-signed server certs
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
@@ -120,7 +120,7 @@ gravwell ingest results.nessus masscan_output.json
 
 ## Collection Agent
 
-The collection agent (`collect.py`, v1.2) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
+The collection agent (`collect.py`, v1.6) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
 
 ### Discovery pipeline
 
@@ -140,9 +140,11 @@ The collection agent (`collect.py`, v1.2) is a zero-dependency Python script (or
 | **Reverse DNS sweep** | `socket.gethostbyaddr` | PTR records for all discovered IPs — concurrent, 50 threads |
 | **TLS cert extraction** | `ssl` module | CN and SANs from HTTPS/LDAPS/IMAPS certs — reveals internal FQDNs |
 | **HTTP enrichment** | `urllib.request` | `Server:` header + page `<title>` — fingerprints routers, NAS, printers, management UIs |
-| **OS / role inference** | Port signature matching | OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…) |
+| **OS / role inference** | Port signatures · SSH/FTP/SMTP/IMAP banners · HTTP `Server:` header · IIS version mapping | OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…); banner evidence takes priority over port-signature guesses |
 
 mDNS and SSDP run concurrently with the TCP probe sweep in a background thread to avoid adding to wall-clock time.
+
+**OS fingerprinting priority** (highest wins): nmap `-O` result → SSH/FTP/SMTP/IMAP/POP3 banner → HTTP `Server:` / `X-Powered-By:` headers → port signature. SSH banners carry the distro build string (e.g. `OpenSSH_8.9p1 Ubuntu-3ubuntu0.6` → Ubuntu 22.04 LTS). IIS version numbers are mapped to their Windows Server release (e.g. IIS 10.0 → Windows Server 2016/2019/2022).
 
 **Optional tools** (used automatically if on PATH, not required):
 - `nmap` — richer host discovery (`-sn`), service versions (`-sV`), OS fingerprinting (`-O`)
@@ -156,6 +158,26 @@ mDNS and SSDP run concurrently with the TCP probe sweep in a background thread t
 | **Direct upload** | Agent POSTs to GravWell with `--server` and `--key`; data appears immediately in the correct project |
 
 ### Running on the target
+
+Run the script with no arguments on a TTY and it launches an **interactive wizard** that walks through all options with sensible defaults — just press Enter to accept each default:
+
+```
+$ python gravwell-collect.py
+
+  GravWell Collection Agent — Interactive Setup
+  ───────────────────────────────────────────
+  GravWell server URL (leave blank to save locally):
+  > https://gravwell.corp.local
+
+  API token (from ☰ → Agent Tokens in the web UI):
+  > eyJ...
+
+  OT / ICS mode? Safe broadcast-only discovery [y/N]: n
+
+  ...
+```
+
+Or pass flags directly for scripted/automated use:
 
 ```bash
 # Passive only — ARP table + own system info, no active probing
@@ -172,6 +194,15 @@ python gravwell-collect.py --routes --server https://gravwell.corp.local --key Y
 
 # Skip port scan (faster, discovery only)
 python gravwell-collect.py --no-scan
+
+# Restrict discovery to specific subnets (OT-safe scoping)
+python gravwell-collect.py --include 10.10.5.0/24 --include 10.10.6.0/24
+
+# Exclude a management VLAN from all active probing
+python gravwell-collect.py --exclude 192.168.1.0/24
+
+# OT / ICS mode — broadcast-only discovery, no port scan banner grab
+python gravwell-collect.py --ot-mode --server https://gravwell.corp.local --key YOUR_TOKEN
 ```
 
 The script requires Python 3.8+ and no third-party packages. Copy the single `.py` file to the target — no `pip install` needed.
@@ -183,6 +214,45 @@ Pre-built standalone binaries for Windows, Linux, and macOS ship with GravWell a
 **☰ → Agent Tokens → Download Agent**
 
 Binaries are built via the GitHub Actions workflow (`.github/workflows/build-agents.yml`) which compiles on real Windows/Linux/macOS runners and commits the results back into the package.
+
+### CIDR include / exclude filters
+
+Use `--include` and `--exclude` to scope active discovery to specific subnets. Both flags accept any number of CIDR prefixes:
+
+```bash
+# Only probe hosts inside these two ranges
+python gravwell-collect.py --include 10.1.0.0/16 --include 172.16.5.0/24
+
+# Probe everything discovered except the OT VLAN
+python gravwell-collect.py --exclude 192.168.100.0/24
+```
+
+Excludes take priority over includes. Passive/local sources (ARP table, netstat, mDNS, SSDP) are always collected regardless — the filter applies only to active probe targets (sweep and port scan).
+
+### OT / ICS Networks
+
+Active TCP probing of unknown Industrial Control System (ICS) and Operational Technology (OT) devices is dangerous — some PLCs, RTUs, and field devices crash or misbehave when hit with unexpected TCP connections. Use `--ot-mode` for safe, broadcast-only discovery:
+
+```bash
+python gravwell-collect.py --ot-mode --server https://gravwell.corp.local --key YOUR_TOKEN
+```
+
+**What `--ot-mode` does:**
+
+| Discovery method | Protocol | Why it's safe |
+|-----------------|----------|--------------|
+| **BACnet Who-Is** | UDP broadcast → 47808 | Standard discovery packet; devices opt-in by sending I-Am responses |
+| **EtherNet/IP List Identity** | UDP broadcast → 44818 | Standard CIP discovery; read-only enumeration of vendor, device type, product name |
+
+The TCP sweep is replaced by these broadcast-only methods. Any TCP port scan that does run uses **connect-only** (no banner grab, immediate close, 5s timeout, 5 workers max) to minimise load on fragile devices.
+
+**When to use `--ot-mode`:**
+- ICS / SCADA / DCS environments
+- Building automation (BACnet) networks
+- Any network where you've been told not to "scan" devices
+- Safety Instrumented Systems (SIS) — verify with the plant engineer before running *anything*
+
+The wizard asks about OT mode up front and adjusts subsequent questions accordingly.
 
 ### API tokens
 

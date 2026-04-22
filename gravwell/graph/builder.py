@@ -512,13 +512,28 @@ def _compute_preset_positions(
             return 20
         return 32
 
-    def _spoke_r(k: int, sz: int) -> float:
-        if k == 0:
-            return 0.0
-        return max(60.0, (k * sz) / (2 * math.pi))
-
     def _ring_capacity(ring_r: float, sz: int) -> int:
         return max(1, int(2 * math.pi * ring_r / (sz + 4)))
+
+    def _outer_ring_r(k: int, sz: int) -> float:
+        """Return the radius of the outermost ring actually placed by _place_rings.
+
+        _place_rings starts at r = max(60, (min(12,k)*(sz+4))/(2π)) and grows
+        by (sz+8) per ring until all k nodes are placed.  This mirrors that
+        logic exactly so the box-size estimate matches the actual node footprint
+        rather than the old _spoke_r formula which used k*sz/(2π) uncapped and
+        overestimated by 2-3× for large subnets.
+        """
+        if k == 0:
+            return 0.0
+        r = max(60.0, (min(12, k) * (sz + 4)) / (2 * math.pi))
+        remaining = k
+        while remaining > 0:
+            cap = _ring_capacity(r, sz)
+            remaining -= cap
+            if remaining > 0:
+                r += sz + 8
+        return r
 
     def _place_rings(cx: float, cy: float, nodes: list[str], sz: int) -> dict:
         positions: dict[str, dict] = {}
@@ -540,13 +555,15 @@ def _compute_preset_positions(
             r += sz + 8
         return positions
 
-    # Estimate compound bounding-box side for each subnet
+    # Estimate compound bounding-box side for each subnet using the same ring
+    # formula as _place_rings — old formula (_spoke_r = k*sz/2π uncapped) was
+    # 2-3× too large for subnets with 30+ hosts, producing huge empty gaps.
     subnet_box: dict[str, float] = {}
     for subnet, ips in subnet_ips.items():
         hub = subnet_hub.get(subnet, "")
         k = sum(1 for ip in ips if ip != hub)
         sz = _node_sz(len(ips))
-        r = _spoke_r(k, sz)
+        r = _outer_ring_r(k, sz)
         subnet_box[subnet] = max(120.0, 2 * r + 2 * _PAD + sz * 2)
 
     def _sort_subs(subs: list[str]) -> list[str]:
@@ -760,14 +777,14 @@ def _compute_preset_positions(
                 cx_cand = sum(p[0] for p in saved_spokes) / len(saved_spokes)
                 cy_cand = sum(p[1] for p in saved_spokes) / len(saved_spokes)
                 # Reject centroids from widely-scattered positions — high spread
-                # means these positions are from an old heuristic subnet grouping
-                # (before IPAM import) and no longer correspond to this subnet.
-                # Threshold: 500 px ≈ roughly two large subnet boxes side-by-side.
+                # means these are stale positions from a diverged force-layout
+                # run and no longer correspond to a coherent subnet cluster.
+                # Threshold: 300 px ≈ one large subnet box.
                 spread = max(
                     max(p[0] for p in saved_spokes) - min(p[0] for p in saved_spokes),
                     max(p[1] for p in saved_spokes) - min(p[1] for p in saved_spokes),
                 )
-                if spread <= 500:
+                if spread <= 300:
                     cx, cy = cx_cand, cy_cand
 
         sz = _node_sz(len(ips))

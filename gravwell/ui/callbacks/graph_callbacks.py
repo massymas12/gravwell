@@ -244,34 +244,32 @@ def register(app: dash.Dash) -> None:
         # gravity: pull toward the centre.  Lower = more spread-out layout.
         _cb = {
             "name": "cose-bilkent", "animate": True,
-            # Higher repulsion pushes large compound boxes apart so they don't
-            # overlap. 45 000 was fine for small maps; 80 000 works for 10+ subnets.
-            "nodeRepulsion": 80000,
-            "idealEdgeLength": 100,
-            "edgeElasticity": 0.4,
-            # nestingFactor: ideal edge length multiplier INSIDE compounds.
-            # Lower value → shorter ideal edge inside subnet boxes → nodes pack
-            # tighter → boxes stay compact.  0.7 caused boxes to balloon.
-            "nestingFactor": 0.35,
-            # Lower gravity → more spread-out; helps domain compounds separate.
-            "gravity": 0.05,
-            "numIter": 6000,
-            "padding": 80,
+            # Values close to cose-bilkent's own defaults (nodeRepulsion 4500,
+            # gravity 0.25).  Previous values (80 000 / 0.05) caused explosive
+            # divergence on maps with many subnet compound boxes.
+            "nodeRepulsion": 6500,
+            "idealEdgeLength": 80,
+            "edgeElasticity": 0.45,
+            "nestingFactor": 0.1,
+            "gravity": 0.25,
+            "gravityCompound": 1.0,
+            "gravityRange": 3.8,
+            "numIter": 2500,
+            "padding": 40,
             "nodeDimensionsIncludeLabels": True,
-            # randomize: False uses preset positions as warm start, which lets the
-            # domain-depth seeding in _compute_preset_positions keep parent domains
-            # above subdomains.  True would ignore all preset positions entirely.
+            # randomize: False uses preset positions as warm start so the
+            # domain-depth grid seeding keeps parent domains above subdomains.
             "randomize": False,
         }
-        # ── Cose-Bilkent Spread — push even harder apart (very dense maps) ──
+        # ── Cose-Bilkent Spread — more separation for very dense maps ──────
         _cb_spread = {
             **_cb,
-            "nodeRepulsion": 150000,
-            "idealEdgeLength": 220,
-            "nestingFactor": 1.0,
-            "gravity": 0.03,
-            "numIter": 8000,
-            "padding": 100,
+            "nodeRepulsion": 14000,
+            "idealEdgeLength": 140,
+            "nestingFactor": 0.2,
+            "gravity": 0.15,
+            "numIter": 3500,
+            "padding": 60,
         }
         configs = {
             "preset": {

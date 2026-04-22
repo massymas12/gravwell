@@ -42,6 +42,15 @@ _NETWORK_VENDORS = {
 }
 
 
+def _is_private_ip(ip: str) -> bool:
+    """Return True for RFC 1918 / non-internet-routable unicast addresses."""
+    try:
+        a = ipaddress.ip_address(ip)
+        return a.is_private and not a.is_loopback and not a.is_link_local
+    except ValueError:
+        return False
+
+
 def build_graph(session: Session) -> nx.Graph:
     """Build a NetworkX graph from all hosts in the DB."""
     G = nx.Graph()
@@ -926,6 +935,19 @@ def get_cytoscape_elements(
     #   • Subnets with other hosts get virtual-switch or gateway hubs.
     #   • Bridge edges always resolve to a hub that is NOT the bridge node.
     #   • Subnets whose only member is a bridge node produce no compound box.
+
+    # Count private IPs per subnet — used to prefer LAN subnets over VPN
+    # singletons when a multi-IP host straddles two RFC 1918 subnets.
+    _subnet_private_pop: dict[str, int] = {}
+    for _nid, _attrs in G.nodes(data=True):
+        if _attrs.get("node_type") != "host":
+            continue
+        for _ip in [_attrs.get("ip")] + (_attrs.get("additional_ips") or []):
+            if _ip and _is_private_ip(_ip):
+                _s = ip_to_subnet.get(_ip)
+                if _s:
+                    _subnet_private_pop[_s] = _subnet_private_pop.get(_s, 0) + 1
+
     host_subnets: dict[str, str] = {}
     subnet_ips: dict[str, list[str]] = {}
     for node_id, subnets in node_subnets.items():
@@ -935,12 +957,29 @@ def get_cytoscape_elements(
             # Regular host: place in the subnet of its primary IP only.
             # Secondary IPs are still stored in additional_ips and shown in
             # the detail panel, but don't affect visual subnet membership.
-            primary_ip = G.nodes[node_id].get("ip", node_id)
-            primary_subnet = (
-                (subnet_overrides or {}).get(primary_ip)
-                or ip_to_subnet.get(primary_ip)
-                or next(iter(subnets), "unknown")
-            )
+            #
+            # Subnet preference: if the host has any RFC 1918 IP, always prefer
+            # a private subnet over a public/internet-routable one.  When the
+            # host straddles two private subnets (e.g. LAN + VPN tunnel), pick
+            # the subnet that contains the most private hosts — VPN singletons
+            # lose to populated LAN segments.
+            attrs = G.nodes[node_id]
+            primary_ip = attrs.get("ip", node_id)
+            primary_subnet = (subnet_overrides or {}).get(primary_ip)
+            if not primary_subnet:
+                all_ips = [primary_ip] + (attrs.get("additional_ips") or [])
+                private_choices = [
+                    (ip, ip_to_subnet[ip])
+                    for ip in all_ips
+                    if _is_private_ip(ip) and ip_to_subnet.get(ip)
+                ]
+                if private_choices:
+                    _, primary_subnet = max(
+                        private_choices,
+                        key=lambda t: _subnet_private_pop.get(t[1], 0),
+                    )
+                else:
+                    primary_subnet = ip_to_subnet.get(primary_ip) or next(iter(subnets), "unknown")
             host_subnets[node_id] = primary_subnet
             lst = subnet_ips.setdefault(primary_subnet, [])
             if node_id not in lst:

@@ -2028,6 +2028,118 @@ def _ip_allowed(ip: str,
     return True
 
 
+# ── Interactive setup wizard ──────────────────────────────────────────────────
+
+def _wizard(args) -> object:
+    """Walk the user through configuration interactively.
+
+    Called automatically when no CLI flags are given and stdin is a TTY.
+    Returns the same *args* namespace with answers filled in.
+    """
+    def _ask(prompt: str, default: str = "") -> str:
+        disp = f" [{default}]" if default else " [blank]"
+        try:
+            val = input(f"  {prompt}{disp}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        return val if val else default
+
+    def _ask_bool(prompt: str, default: bool = False) -> bool:
+        hint = "Y/n" if default else "y/N"
+        try:
+            val = input(f"  {prompt} [{hint}]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        if not val:
+            return default
+        return val.startswith("y")
+
+    print("\n" + "─" * 56)
+    print("  GravWell Collection Agent — interactive setup")
+    print("  Press Enter to accept the default shown in [ ].")
+    print("─" * 56 + "\n")
+
+    # Show detected networks so the user can make informed exclude/include choices
+    try:
+        _sys = platform.system()
+        direct, routed = discover_networks(_sys)
+        if direct:
+            print(f"  Detected local networks : {', '.join(direct)}")
+        if routed:
+            print(f"  Detected routed networks: {', '.join(routed)}")
+        print()
+    except Exception:
+        pass
+
+    print("── Upload ──────────────────────────────────────────")
+    server = _ask("GravWell server URL (blank = save locally only)",
+                  getattr(args, "server", "") or "")
+    key = ""
+    if server:
+        key = _ask("API token", getattr(args, "key", "") or "")
+
+    print("\n── Output ──────────────────────────────────────────")
+    output = _ask("Output file path (blank = auto-named)",
+                  getattr(args, "output", "") or "")
+
+    print("\n── Scope  ──────────────────────────────────────────")
+    print("  (OT environments: exclude PLC/SCADA subnets to avoid disrupting devices)")
+    exclude_str = _ask("Subnets to EXCLUDE from active probing, comma-separated (blank = none)", "")
+    include_str = _ask("Subnets to LIMIT active probing to, comma-separated (blank = all)", "")
+
+    print("\n── Discovery ───────────────────────────────────────")
+    no_sweep = _ask_bool("Skip active host discovery (ping/TCP sweep)?", False)
+    no_scan  = _ask_bool("Skip port scan?", False)
+    routes   = _ask_bool("Also sweep routed (non-directly-attached) subnets?", False)
+
+    print("\n── Tuning ──────────────────────────────────────────")
+    timeout_str = _ask("Scan timeout in seconds", str(getattr(args, "timeout", 1.0)))
+    workers_str = _ask("Worker threads", str(getattr(args, "workers", 150)))
+
+    try:
+        timeout_val = float(timeout_str)
+    except ValueError:
+        timeout_val = 1.0
+    try:
+        workers_val = int(workers_str)
+    except ValueError:
+        workers_val = 150
+
+    # Summary
+    print("\n── Summary ─────────────────────────────────────────")
+    print(f"  Server  : {server or '(local file only)'}")
+    if output:
+        print(f"  Output  : {output}")
+    if exclude_str:
+        print(f"  Exclude : {exclude_str}")
+    if include_str:
+        print(f"  Include : {include_str}")
+    print(f"  Sweep   : {'skip' if no_sweep else 'yes'}")
+    print(f"  Scan    : {'skip' if no_scan else 'yes'}")
+    print(f"  Routes  : {'yes' if routes else 'no'}")
+    print(f"  Timeout : {timeout_val}s   Workers: {workers_val}")
+    print()
+
+    if not _ask_bool("Proceed with these settings?", True):
+        sys.exit(0)
+    print()
+
+    args.server        = server
+    args.key           = key
+    args.output        = output
+    args.exclude       = [exclude_str] if exclude_str else []
+    args.include       = [include_str] if include_str else []
+    args.no_sweep      = no_sweep
+    args.no_scan       = no_scan
+    args.routes        = routes
+    args.timeout       = timeout_val
+    args.workers       = workers_val
+    args.no_verify_tls = bool(server)   # self-signed cert assumed when server given
+    return args
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -2065,6 +2177,10 @@ Examples:
                         help="Never actively probe hosts inside this CIDR "
                              "(OT-safe: excluded hosts still appear in output from passive sources)")
     args = parser.parse_args()
+
+    # No flags given and running in an interactive terminal → guided setup
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        args = _wizard(args)
 
     include_nets = _parse_cidr_list(args.include)
     exclude_nets = _parse_cidr_list(args.exclude)

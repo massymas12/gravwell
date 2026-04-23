@@ -180,6 +180,32 @@ class PhysicalLinkORM(Base):
     discovered_at = Column(DateTime, default=datetime.utcnow)
 
 
+class VlanORM(Base):
+    """VLAN name table from SNMP Q-BRIDGE-MIB (switch-reported)."""
+    __tablename__ = "vlans"
+    __table_args__ = (UniqueConstraint("switch_ip", "vlan_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    switch_ip = Column(String(45), nullable=False)
+    vlan_id = Column(Integer, nullable=False)
+    vlan_name = Column(String(128), default="")
+    discovered_at = Column(DateTime, default=datetime.utcnow)
+
+
+class HostVlanORM(Base):
+    """Host MAC/IP ↔ VLAN association resolved from the switch FDB."""
+    __tablename__ = "host_vlans"
+    __table_args__ = (UniqueConstraint("host_mac", "vlan_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    host_mac = Column(String(17), nullable=False)
+    host_ip = Column(String(45))          # resolved via HostORM.mac → HostORM.ip
+    vlan_id = Column(Integer, nullable=False)
+    vlan_name = Column(String(128), default="")
+    switch_ip = Column(String(45), nullable=False)
+    discovered_at = Column(DateTime, default=datetime.utcnow)
+
+
 class HiddenEdgeORM(Base):
     """Auto-generated edges that the user has hidden/deleted."""
     __tablename__ = "hidden_edges"

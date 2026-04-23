@@ -399,6 +399,52 @@ CYTOSCAPE_STYLESHEET = [
             "curve-style": "bezier",
         },
     },
+    # Inter-VLAN boundary edges (attack mapping): orange dashed, VLAN label
+    {
+        "selector": ".inter-vlan-edge",
+        "style": {
+            "line-color": "#FF9800",
+            "line-style": "dashed",
+            "line-dash-pattern": [8, 4],
+            "width": "2px",
+            "opacity": 0.85,
+            "curve-style": "bezier",
+            "label": "data(label)",
+            "font-size": "9px",
+            "color": "#FFCC02",
+            "text-background-color": "#1a0f00",
+            "text-background-opacity": 0.85,
+            "text-background-padding": "2px",
+        },
+    },
+    # VLAN color rings — outline around node, 16 cycling colours
+    # Coexists with severity border (border-color) since outline is separate.
+    *[
+        {
+            "selector": f".vlan-color-{i}",
+            "style": {
+                "outline-color": color,
+                "outline-width": "3px",
+                "outline-opacity": 0.9,
+            },
+        }
+        for i, color in enumerate([
+            "#00BCD4", "#FF9800", "#9C27B0", "#4CAF50",
+            "#F44336", "#2196F3", "#FF5722", "#009688",
+            "#FFC107", "#673AB7", "#8BC34A", "#E91E63",
+            "#03A9F4", "#CDDC39", "#FF6D00", "#00E5FF",
+        ])
+    ],
+    # Native VLAN (VLAN 1) — brighter amber outline, security flag
+    {
+        "selector": ".vlan-native",
+        "style": {
+            "outline-color": "#FF6D00",
+            "outline-width": "4px",
+            "outline-style": "dashed",
+            "outline-opacity": 1.0,
+        },
+    },
     # LLDP/CDP-confirmed physical links: solid blue, labelled with switch port
     {
         "selector": ".lldp-edge",

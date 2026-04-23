@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from gravwell.models.dataclasses import ParseResult, Host, Service, Vulnerability
 from gravwell.models.orm import (
     HostORM, ServiceORM, VulnerabilityORM, CVERefORM, ScanFileORM, SubnetLabelORM,
-    PhysicalLinkORM,
+    PhysicalLinkORM, VlanORM, HostVlanORM,
 )
 from gravwell.models.os_inference import infer_os
 
@@ -43,6 +43,8 @@ def ingest_parse_result(
         _upsert_subnet_labels(session, result.subnet_labels)
     if result.physical_links:
         _upsert_physical_links(session, result.physical_links)
+    if result.vlans or result.vlan_fdb:
+        _upsert_vlans(session, result.vlans, result.vlan_fdb)
     _record_scan_file(session, result, checksum)
     # hn: → spotlight merges (not new hosts), nip: → device-inventory assets
     # that were imported without a local IP (these ARE real hosts, count them).
@@ -452,6 +454,62 @@ def _upsert_physical_links(session: Session, links: list[dict]) -> None:
             session.add(PhysicalLinkORM(
                 host_ip=host_ip, peer_ip=peer_ip,
                 port_id=port_id, link_type=link_type,
+            ))
+    session.flush()
+
+
+def _upsert_vlans(session: Session, vlans: list[dict], vlan_fdb: list[dict]) -> None:
+    """Persist VLAN name table and FDB entries; resolve host IPs via MAC."""
+    # Upsert VLAN name table
+    for v in vlans:
+        switch_ip = v.get("switch_ip", "")
+        vlan_id = v.get("vlan_id")
+        vlan_name = v.get("vlan_name", "")
+        if not switch_ip or vlan_id is None:
+            continue
+        existing = session.query(VlanORM).filter_by(
+            switch_ip=switch_ip, vlan_id=vlan_id
+        ).first()
+        if existing:
+            existing.vlan_name = vlan_name
+        else:
+            session.add(VlanORM(switch_ip=switch_ip, vlan_id=vlan_id, vlan_name=vlan_name))
+
+    # Build VLAN ID → name lookup
+    vlan_name_map: dict[int, str] = {
+        v["vlan_id"]: v.get("vlan_name", f"VLAN {v['vlan_id']}")
+        for v in vlans if v.get("vlan_id") is not None
+    }
+
+    # Build normalised MAC → IP map from hosts table
+    mac_to_ip: dict[str, str] = {
+        h.mac.lower(): h.ip
+        for h in session.query(HostORM.mac, HostORM.ip).filter(HostORM.mac.isnot(None)).all()
+        if h.mac
+    }
+
+    # Upsert FDB entries, resolving MAC → IP where possible
+    for entry in vlan_fdb:
+        switch_ip = entry.get("switch_ip", "")
+        vlan_id = entry.get("vlan_id")
+        mac = (entry.get("mac") or "").lower()
+        if not switch_ip or vlan_id is None or not mac:
+            continue
+        host_ip = mac_to_ip.get(mac)
+        vlan_name = vlan_name_map.get(vlan_id, f"VLAN {vlan_id}")
+        existing = session.query(HostVlanORM).filter_by(
+            host_mac=mac, vlan_id=vlan_id
+        ).first()
+        if existing:
+            if host_ip:
+                existing.host_ip = host_ip
+            existing.vlan_name = vlan_name
+            existing.switch_ip = switch_ip
+        else:
+            session.add(HostVlanORM(
+                host_mac=mac, host_ip=host_ip,
+                vlan_id=vlan_id, vlan_name=vlan_name,
+                switch_ip=switch_ip,
             ))
     session.flush()
 

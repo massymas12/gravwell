@@ -123,6 +123,7 @@ def register(app: dash.Dash) -> None:
             "intra_subnet": "Intra-subnet link",
             "inter_subnet": "Inter-subnet link",
             "lldp": "LLDP physical link",
+            "inter_vlan": "Inter-VLAN boundary",
         }.get(etype, "Connection")
 
         info = html.Div([

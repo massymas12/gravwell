@@ -1621,6 +1621,238 @@ def enrich_snmp(neighbors: List[dict], community: str = "public",
         list(ex.map(_do, neighbors))
 
 
+# ── SNMP VLAN MIB walk (Q-BRIDGE-MIB, RFC 4363) ──────────────────────────────
+
+# dot1qVlanStaticName: 1.3.6.1.2.1.17.7.1.4.3.1.1  (vlan_id → name)
+_OID_Q_VLAN_NAME = [1, 3, 6, 1, 2, 1, 17, 7, 1, 4, 3, 1, 1]
+# dot1qTpFdbPort:     1.3.6.1.2.1.17.7.1.2.2.1.2   (vlan_id.mac[6] → port)
+_OID_Q_FDB_PORT  = [1, 3, 6, 1, 2, 1, 17, 7, 1, 2, 2, 1, 2]
+
+
+def _oid_encode(components: List[int]) -> bytes:
+    """BER-encode an OID from its integer components."""
+    first = components[0] * 40 + components[1]
+    out = bytearray([first])
+    for c in components[2:]:
+        if c == 0:
+            out.append(0)
+        else:
+            buf: List[int] = []
+            while c:
+                buf.append(c & 0x7f)
+                c >>= 7
+            for i, b in enumerate(reversed(buf)):
+                out.append(b | (0x80 if i < len(buf) - 1 else 0))
+    return bytes(out)
+
+
+def _oid_decode(raw: bytes) -> List[int]:
+    """Decode raw OID value bytes (after TLV header) into integer components."""
+    if not raw:
+        return []
+    components = [raw[0] // 40, raw[0] % 40]
+    i = 1
+    while i < len(raw):
+        val = 0
+        while i < len(raw):
+            b = raw[i]; i += 1
+            val = (val << 7) | (b & 0x7f)
+            if not (b & 0x80):
+                break
+        components.append(val)
+    return components
+
+
+def _ber_read_len(data: bytes, off: int) -> Tuple[int, int]:
+    """Read a BER length field at *off*. Returns (length, new_offset)."""
+    b = data[off]; off += 1
+    if not (b & 0x80):
+        return b, off
+    nb = b & 0x7f
+    return int.from_bytes(data[off:off + nb], "big"), off + nb
+
+
+def _parse_snmp_varbinds(data: bytes) -> List[Tuple[List[int], bytes]]:
+    """Parse a raw SNMP GetResponse and return (oid_components, raw_value_bytes) pairs."""
+    try:
+        off = 0
+        if data[off] != 0x30:
+            return []
+        off += 1
+        _, off = _ber_read_len(data, off)
+        # version INTEGER
+        off += 1; vlen, off = _ber_read_len(data, off); off += vlen
+        # community OCTET STRING
+        off += 1; clen, off = _ber_read_len(data, off); off += clen
+        # GetResponse-PDU 0xA2
+        if data[off] != 0xA2:
+            return []
+        off += 1; _, off = _ber_read_len(data, off)
+        # request-id, error-status, error-index
+        for _ in range(3):
+            off += 1; fl, off = _ber_read_len(data, off); off += fl
+        # VarBindList SEQUENCE
+        if data[off] != 0x30:
+            return []
+        off += 1; vbl_len, off = _ber_read_len(data, off)
+        vbl_end = off + vbl_len
+        results: List[Tuple[List[int], bytes]] = []
+        while off < vbl_end:
+            if data[off] != 0x30:
+                break
+            off += 1; vb_len, off = _ber_read_len(data, off)
+            vb_end = off + vb_len
+            if off >= vb_end or data[off] != 0x06:
+                off = vb_end; continue
+            off += 1; oid_len, off = _ber_read_len(data, off)
+            oid_comps = _oid_decode(data[off:off + oid_len]); off += oid_len
+            if off < vb_end:
+                off += 1; val_len, off = _ber_read_len(data, off)
+                val_bytes = data[off:off + val_len]; off += val_len
+                results.append((oid_comps, val_bytes))
+            off = vb_end
+        return results
+    except Exception:
+        return []
+
+
+def _snmp_walk_bulk(
+    ip: str,
+    community: str,
+    base_oid: List[int],
+    max_results: int = 500,
+    timeout: float = 2.0,
+) -> List[Tuple[List[int], bytes]]:
+    """Walk an SNMP subtree with GetBulkRequest (v2c, stdlib BER only).
+
+    Returns [(oid_components, raw_value_bytes)] for all entries in the subtree.
+    """
+    def _tlv(tag: int, val: bytes) -> bytes:
+        n = len(val)
+        if n < 128:
+            return bytes([tag, n]) + val
+        if n < 256:
+            return bytes([tag, 0x81, n]) + val
+        return bytes([tag, 0x82, n >> 8, n & 0xFF]) + val
+
+    comm_bytes = community.encode()
+    base_len = len(base_oid)
+    results: List[Tuple[List[int], bytes]] = []
+    current_oid = base_oid[:]
+    req_id = 1
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        sock.connect((ip, 161))
+    except Exception:
+        return []
+
+    try:
+        for _ in range(30):
+            oid_raw = _oid_encode(current_oid)
+            varbind = _tlv(0x30, _tlv(0x06, oid_raw) + b"\x05\x00")
+            pdu = _tlv(0xA5,                             # GetBulkRequest
+                _tlv(0x02, req_id.to_bytes(2, "big")) +  # request-id
+                _tlv(0x02, b"\x00") +                    # non-repeaters
+                _tlv(0x02, b"\x32") +                    # max-repetitions=50
+                _tlv(0x30, varbind)
+            )
+            packet = _tlv(0x30,
+                _tlv(0x02, b"\x01") +   # version=1 (v2c)
+                _tlv(0x04, comm_bytes) +
+                pdu
+            )
+            req_id = (req_id + 1) & 0xFFFF
+
+            try:
+                sock.send(packet)
+                raw = sock.recv(65535)
+            except Exception:
+                break
+
+            varbinds = _parse_snmp_varbinds(raw)
+            if not varbinds:
+                break
+
+            last_oid: Optional[List[int]] = None
+            found_in_subtree = False
+            for oid_comps, val_bytes in varbinds:
+                if oid_comps[:base_len] != base_oid:
+                    continue
+                found_in_subtree = True
+                results.append((oid_comps, val_bytes))
+                last_oid = oid_comps
+                if len(results) >= max_results:
+                    break
+
+            if not found_in_subtree or last_oid is None or len(results) >= max_results:
+                break
+            current_oid = last_oid
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return results
+
+
+def collect_vlan_snmp(
+    switch_ips: List[str],
+    community: str = "public",
+    timeout: float = 2.0,
+) -> Tuple[List[dict], List[dict]]:
+    """Query SNMP Q-BRIDGE-MIB from known switches for VLAN names and the
+    forwarding database (which MACs/hosts are in which VLAN).
+
+    Returns:
+      vlans    = [{"switch_ip": str, "vlan_id": int, "vlan_name": str}]
+      vlan_fdb = [{"switch_ip": str, "vlan_id": int, "mac": str}]
+    """
+    vlans: List[dict] = []
+    vlan_fdb: List[dict] = []
+    base_name_len = len(_OID_Q_VLAN_NAME)
+    base_fdb_len  = len(_OID_Q_FDB_PORT)
+
+    for switch_ip in switch_ips:
+        # VLAN name table: index is a single vlan_id component
+        for oid_comps, val_bytes in _snmp_walk_bulk(
+            switch_ip, community, _OID_Q_VLAN_NAME, timeout=timeout
+        ):
+            if len(oid_comps) != base_name_len + 1:
+                continue
+            vlan_id = oid_comps[-1]
+            try:
+                vlan_name = val_bytes.decode("utf-8", errors="replace").strip()
+            except Exception:
+                vlan_name = ""
+            vlans.append({
+                "switch_ip": switch_ip,
+                "vlan_id": vlan_id,
+                "vlan_name": vlan_name or f"VLAN {vlan_id}",
+            })
+
+        # FDB: index is vlan_id followed by 6 MAC octets
+        for oid_comps, val_bytes in _snmp_walk_bulk(
+            switch_ip, community, _OID_Q_FDB_PORT, timeout=timeout
+        ):
+            if len(oid_comps) != base_fdb_len + 7:
+                continue
+            vlan_id = oid_comps[base_fdb_len]
+            mac_octets = oid_comps[base_fdb_len + 1:]
+            if len(mac_octets) != 6 or any(b > 255 for b in mac_octets):
+                continue
+            mac = ":".join(f"{b:02x}" for b in mac_octets)
+            vlan_fdb.append({
+                "switch_ip": switch_ip,
+                "vlan_id": vlan_id,
+                "mac": mac,
+            })
+
+    return vlans, vlan_fdb
+
+
 # ── LLDP / CDP passive sniff ─────────────────────────────────────────────────
 
 def _lldp_listen(timeout_secs: float = 15.0) -> List[dict]:
@@ -3101,6 +3333,8 @@ Examples:
     # and the specific switch port our machine is plugged into.
     # Run early in passive discovery so the switch IP is known before the sweep.
     _lldp_neighbors = _lldp_listen(timeout_secs=15.0) if not args.ot_mode else []
+    _vlans: List[dict] = []
+    _vlan_fdb: List[dict] = []
     for n in _lldp_neighbors:
         if n["ip"] not in existing_ips:
             neighbors.append(n)
@@ -3308,6 +3542,17 @@ Examples:
         if not n.get("hostname") and n["ip"] in rdns:
             n["hostname"] = rdns[n["ip"]]
 
+    # 7b. VLAN MIB — IT mode only, query switches discovered via LLDP
+    if not args.ot_mode and _lldp_neighbors:
+        _switch_ips = list({n["ip"] for n in _lldp_neighbors if n.get("ip")})
+        if _switch_ips:
+            _info(f"SNMP VLAN MIB query on {len(_switch_ips)} switch(es)…")
+            _vlans, _vlan_fdb = collect_vlan_snmp(_switch_ips)
+            if _vlans:
+                _info(f"  {len(_vlans)} VLAN(s), {len(_vlan_fdb)} FDB entries")
+            else:
+                _info("  No VLAN data returned (switch may not support Q-BRIDGE-MIB)")
+
     # 8. Build payload
     # Build physical link records from LLDP neighbors — one record per
     # (agent_ip, switch_ip) pair, labelled with the switch port we're on.
@@ -3328,6 +3573,8 @@ Examples:
         "routed_networks": routed_nets,
         "elevated": _is_elevated(),
         "physical_links": physical_links,
+        "vlans": _vlans,
+        "vlan_fdb": _vlan_fdb,
     }
     payload = build_payload(self_info, neighbors, scan_results, meta=meta)
 

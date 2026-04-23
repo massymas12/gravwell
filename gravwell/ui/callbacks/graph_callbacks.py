@@ -12,7 +12,7 @@ from gravwell.database import get_session
 from gravwell.graph.builder import build_graph, get_cytoscape_elements, _node_role
 from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, \
     CustomEdgeORM, HiddenEdgeORM, SubnetLabelORM, HostRoleOverrideORM, \
-    CVEEnrichmentORM, NodePositionORM, PhysicalLinkORM
+    CVEEnrichmentORM, NodePositionORM, PhysicalLinkORM, VlanORM
 from gravwell.models.enrichment import exploit_label, resolve_vuln_name
 
 
@@ -83,6 +83,15 @@ def register(app: dash.Dash) -> None:
                      "port_id": r.port_id, "link_type": r.link_type}
                     for r in session.query(PhysicalLinkORM).all()
                 ]
+                _vlan_rows = session.query(VlanORM).all()
+                vlan_info = (
+                    {"vlans": [
+                        {"switch_ip": r.switch_ip, "vlan_id": r.vlan_id,
+                         "vlan_name": r.vlan_name}
+                        for r in _vlan_rows
+                    ]}
+                    if _vlan_rows else None
+                )
         except Exception as exc:
             _log.error("update_graph DB error: %s", exc, exc_info=True)
             return no_update, no_update, no_update, no_update
@@ -200,7 +209,8 @@ def register(app: dash.Dash) -> None:
                                           subnet_overrides=subnet_overrides,
                                           saved_positions=saved_positions or None,
                                           subnet_paddings=subnet_paddings or None,
-                                          physical_links=physical_links or None)
+                                          physical_links=physical_links or None,
+                                          vlan_info=vlan_info)
 
         # Mark nodes that have analyst notes with has-note class
         if noted_ips:
@@ -795,7 +805,7 @@ def register(app: dash.Dash) -> None:
     )
     def update_edge_visibility(visible: list[str] | None):
         from gravwell.ui.styles import CYTOSCAPE_STYLESHEET
-        _ALL = ["inter-subnet", "multi-ip-link", "intra-subnet", "custom-edge", "lldp-edge"]
+        _ALL = ["inter-subnet", "multi-ip-link", "intra-subnet", "custom-edge", "lldp-edge", "inter-vlan-edge"]
         hidden = [t for t in _ALL if t not in (visible or [])]
         extra = [{"selector": f".{t}", "style": {"display": "none"}} for t in hidden]
         return CYTOSCAPE_STYLESHEET + extra

@@ -205,6 +205,14 @@ class AgentParser(BaseParser):
                     if hn not in host.hostnames:
                         host.hostnames.append(hn)
 
+        # ── 4. VLAN data (from SNMP Q-BRIDGE-MIB walk) ───────────────────────
+        for v in (data.get("vlans") or []):
+            if isinstance(v.get("vlan_id"), int) and v.get("switch_ip"):
+                result.vlans.append(v)
+        for entry in (data.get("vlan_fdb") or []):
+            if entry.get("mac") and isinstance(entry.get("vlan_id"), int):
+                result.vlan_fdb.append(entry)
+
         if not result.hosts:
             result.warnings.append("No hosts found in agent output")
         else:

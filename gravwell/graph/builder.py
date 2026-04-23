@@ -4,7 +4,7 @@ import math
 import networkx as nx
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, CVERefORM, CVEEnrichmentORM, SubnetLabelORM
+from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, CVERefORM, CVEEnrichmentORM, SubnetLabelORM, HostVlanORM
 
 # (bg_color, border_color) pairs — one per subnet, cycling
 _SUBNET_PALETTE = [
@@ -105,6 +105,18 @@ def build_graph(session: Session) -> nx.Graph:
         .all()
     }
 
+    # VLAN assignment: IP → (vlan_id, vlan_name) from switch FDB
+    _hv_rows = session.query(
+        HostVlanORM.host_ip, HostVlanORM.vlan_id, HostVlanORM.vlan_name
+    ).filter(HostVlanORM.host_ip.isnot(None)).all()
+    ip_to_vlan: dict[str, tuple[int, str]] = {}
+    for hv in _hv_rows:
+        if not hv.host_ip:
+            continue
+        existing = ip_to_vlan.get(hv.host_ip)
+        if not existing or hv.vlan_id < existing[0]:
+            ip_to_vlan[hv.host_ip] = (hv.vlan_id, hv.vlan_name or f"VLAN {hv.vlan_id}")
+
     # Snapshot data while session is open
     host_data: list[dict] = []
     for h in hosts:
@@ -145,7 +157,16 @@ def build_graph(session: Session) -> nx.Graph:
             "max_epss": epss_map.get(h.id, 0.0),
             "additional_ips": h.additional_ips,
             "tags": list(h.tags),
+            "vlan_id": None,
+            "vlan_name": "",
         })
+
+    # Attach VLAN membership (derived from switch FDB)
+    for hd in host_data:
+        vlan = ip_to_vlan.get(hd["ip"])
+        if vlan:
+            hd["vlan_id"] = vlan[0]
+            hd["vlan_name"] = vlan[1]
 
     # Add nodes
     for hd in host_data:
@@ -939,6 +960,7 @@ def get_cytoscape_elements(
     subnet_overrides: dict[str, str] | None = None,
     saved_positions: dict[str, tuple[float, float]] | None = None,
     subnet_paddings: dict[str, int] | None = None,
+    vlan_info: dict | None = None,
 ) -> list[dict]:
     """
     Produce Cytoscape elements with:
@@ -1217,6 +1239,12 @@ def get_cytoscape_elements(
         elif max_cvss >= 4.0:
             classes.append("severity-medium")
 
+        vlan_id = attrs.get("vlan_id")
+        if vlan_id is not None:
+            classes.append(f"vlan-color-{vlan_id % 16}")
+            if vlan_id == 1:
+                classes.append("vlan-native")
+
         # Reduce visual size in dense subnets so the layout math works out.
         # A hub-and-spoke ring needs radius ≥ (N × node_size) / (2π):
         #   N=32px nodes need 12+ hosts for the ring to fit at nestingFactor=0.6.
@@ -1365,12 +1393,14 @@ def get_cytoscape_elements(
     )
 
     # 10. Custom manually-added edges between host IPs
+    # Build host IP set once here — reused by sections 10, 11, and 12.
+    host_ips: set[str] = set()
+    for node_id, attrs in G.nodes(data=True):
+        if attrs.get("node_type") == "host":
+            host_ips.add(attrs.get("ip", node_id))
+            host_ips.update(attrs.get("additional_ips", []))
+
     if custom_edges:
-        host_ips: set[str] = set()
-        for node_id, attrs in G.nodes(data=True):
-            if attrs.get("node_type") == "host":
-                host_ips.add(attrs.get("ip", node_id))
-                host_ips.update(attrs.get("additional_ips", []))
         for ce in custom_edges:
             src = ce.get("source", "")
             tgt = ce.get("target", "")
@@ -1394,12 +1424,6 @@ def get_cytoscape_elements(
 
     # 11. LLDP/CDP-confirmed physical links — solid blue, labelled with port
     if physical_links:
-        if not custom_edges:  # host_ips may not have been built yet
-            host_ips = set()
-            for node_id, attrs in G.nodes(data=True):
-                if attrs.get("node_type") == "host":
-                    host_ips.add(attrs.get("ip", node_id))
-                    host_ips.update(attrs.get("additional_ips", []))
         for pl in physical_links:
             src = pl.get("host_ip", "")
             tgt = pl.get("peer_ip", "")
@@ -1422,5 +1446,55 @@ def get_cytoscape_elements(
                 },
                 "classes": "lldp-edge",
             })
+
+    # 12. Inter-VLAN attack-path edges
+    # For each pair of VLANs that share a switch, draw a dashed edge between
+    # a representative host from each VLAN.  These show VLAN boundaries and
+    # potential lateral movement paths through inter-VLAN routing.
+    if vlan_info:
+        _vlans_list = vlan_info.get("vlans") or []
+        # switch → set of VLAN IDs present on that switch
+        switch_vlan_ids: dict[str, set[int]] = {}
+        for v in _vlans_list:
+            sw = v.get("switch_ip")
+            vid = v.get("vlan_id")
+            if sw and vid is not None:
+                switch_vlan_ids.setdefault(sw, set()).add(vid)
+
+        # VLAN ID → first representative host IP that exists in the graph
+        vlan_rep: dict[int, str] = {}
+        for node_id, attrs in G.nodes(data=True):
+            if attrs.get("node_type") != "host":
+                continue
+            vid = attrs.get("vlan_id")
+            if vid is not None and vid not in vlan_rep and node_id in host_ips:
+                vlan_rep[vid] = node_id
+
+        seen_ivlan: set[tuple] = set()
+        for sw, vids in switch_vlan_ids.items():
+            vids_with_rep = sorted(v for v in vids if v in vlan_rep)
+            for i in range(len(vids_with_rep)):
+                for j in range(i + 1, len(vids_with_rep)):
+                    va, vb = vids_with_rep[i], vids_with_rep[j]
+                    ha, hb = vlan_rep[va], vlan_rep[vb]
+                    if ha == hb:
+                        continue
+                    pair = tuple(sorted([va, vb]))
+                    if pair in seen_ivlan:
+                        continue
+                    seen_ivlan.add(pair)
+                    edge_id = f"ivlan_{va}_{vb}"
+                    if hidden_edge_ids and edge_id in hidden_edge_ids:
+                        continue
+                    elements.append({
+                        "data": {
+                            "id": edge_id,
+                            "source": ha,
+                            "target": hb,
+                            "edge_type": "inter_vlan",
+                            "label": f"VLAN {va}↔{vb}",
+                        },
+                        "classes": "inter-vlan-edge",
+                    })
 
     return elements

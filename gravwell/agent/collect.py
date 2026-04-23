@@ -1850,6 +1850,55 @@ _OT_PORT_ROLES: Dict[int, str] = {
 }
 
 
+_OT_FW_RULES = [
+    ("GravWell-OT-BACnet",     "UDP", 47808),
+    ("GravWell-OT-EtherNetIP", "UDP", 44818),
+]
+
+
+def _add_ot_firewall_rules() -> bool:
+    """Create temporary inbound UDP firewall rules for OT discovery ports.
+
+    Windows only.  Requires admin — silently skips if netsh fails.
+    Returns True if any rules were successfully added (caller must clean up).
+    """
+    if platform.system() != "Windows":
+        return False
+    added = False
+    for name, proto, port in _OT_FW_RULES:
+        try:
+            r = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "add", "rule",
+                 f"name={name}", f"protocol={proto}", "dir=in",
+                 f"localport={port}", "action=allow"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                added = True
+                _info(f"  Firewall rule added: {name} ({proto}/{port})")
+            else:
+                _warn(f"  Could not add firewall rule {name}: {r.stderr.strip() or r.stdout.strip()}")
+        except Exception as exc:
+            _warn(f"  Firewall rule creation failed: {exc}")
+    return added
+
+
+def _remove_ot_firewall_rules() -> None:
+    """Delete the temporary OT firewall rules created by _add_ot_firewall_rules."""
+    if platform.system() != "Windows":
+        return
+    for name, _proto, _port in _OT_FW_RULES:
+        try:
+            subprocess.run(
+                ["netsh", "advfirewall", "firewall", "delete", "rule",
+                 f"name={name}"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            pass
+    _info("  OT firewall rules removed.")
+
+
 def _local_iface_pairs() -> List[Tuple[str, str]]:
     """Return (local_ip, broadcast_addr) for every non-loopback interface.
 
@@ -2566,17 +2615,22 @@ Examples:
     if args.ot_mode:
         _ot_ifaces = _local_iface_pairs()
         _info(f"OT broadcast interfaces: {[f'{ip}→{bcast}' for ip, bcast in _ot_ifaces]}")
-        _info("OT mode: sending BACnet Who-Is broadcast…")
-        for entry in _bacnet_whois(timeout=args.timeout + 2):
-            if entry["ip"] not in existing_ips:
-                neighbors.append(entry)
-                existing_ips.add(entry["ip"])
+        _ot_fw_added = _add_ot_firewall_rules()
+        try:
+            _info("OT mode: sending BACnet Who-Is broadcast…")
+            for entry in _bacnet_whois(timeout=args.timeout + 2):
+                if entry["ip"] not in existing_ips:
+                    neighbors.append(entry)
+                    existing_ips.add(entry["ip"])
 
-        _info("OT mode: sending EtherNet/IP List Identity broadcast…")
-        for entry in _enip_list_identity(timeout=args.timeout + 2):
-            if entry["ip"] not in existing_ips:
-                neighbors.append(entry)
-                existing_ips.add(entry["ip"])
+            _info("OT mode: sending EtherNet/IP List Identity broadcast…")
+            for entry in _enip_list_identity(timeout=args.timeout + 2):
+                if entry["ip"] not in existing_ips:
+                    neighbors.append(entry)
+                    existing_ips.add(entry["ip"])
+        finally:
+            if _ot_fw_added:
+                _remove_ot_firewall_rules()
 
     # 5. Active sweep — skipped in OT mode (broadcasts above replace it)
     known_open: Dict[str, List[int]] = {}

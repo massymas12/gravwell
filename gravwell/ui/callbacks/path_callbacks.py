@@ -61,13 +61,14 @@ def register(app: dash.Dash) -> None:
         Input("smb-spread-btn",    "n_clicks"),
         Input("ad-enum-btn",       "n_clicks"),
         Input("internet-exp-btn",  "n_clicks"),
+        Input("vlan-risks-btn",    "n_clicks"),
         State("path-src-ip", "value"),
         State("path-dst-ip", "value"),
         prevent_initial_call=True,
     )
     def run_analysis(
         path_c, hvt_c, pivot_c, exposure_c, terrain_c, legacy_c,
-        kerb_c, clear_c, admin_c, smb_c, ad_enum_c, inet_exp_c,
+        kerb_c, clear_c, admin_c, smb_c, ad_enum_c, inet_exp_c, vlan_c,
         src_ip, dst_ip,
     ):
         from dash import ctx
@@ -101,6 +102,8 @@ def register(app: dash.Dash) -> None:
             return _render_domain_enum(G, db_path)
         elif triggered == "internet-exp-btn":
             return _render_internet_exposed(G)
+        elif triggered == "vlan-risks-btn":
+            return _render_vlan_risks(G, db_path)
         return no_update
 
     # ── Focus callbacks: path table host cells, services table, vulns table ──
@@ -499,6 +502,9 @@ def _render_paths_ui():
                             className="btn btn-sm btn-secondary"),
                 html.Button("Internet Exposed", id="internet-exp-btn",
                             className="btn btn-sm btn-danger"),
+                html.Button("VLAN Risks",       id="vlan-risks-btn",
+                            className="btn btn-sm btn-warning",
+                            title="VLAN pivot, native VLAN hopping, and inter-VLAN routing risks"),
             ),
             _grp(
                 "ATTACK SURFACE",
@@ -957,6 +963,88 @@ def _render_domain_enum(G, db_path: str):
          "SMB Signing", "Pwd Policy", "CVSS"],
         rows,
     )
+
+
+def _render_vlan_risks(G, db_path: str):
+    findings = analysis.find_vlan_risks(G, db_path)
+    if not findings:
+        return _msg(
+            "No VLAN data found. Deploy the collection agent with SNMP enabled "
+            "on managed switches to discover VLAN topology.",
+            "#888",
+        )
+
+    multi_vlan    = [f for f in findings if f.risk_type == "multi_vlan_host"]
+    native_vlan   = [f for f in findings if f.risk_type == "native_vlan"]
+    inter_vlan_sw = [f for f in findings if f.risk_type == "inter_vlan_switch"]
+
+    sections = []
+
+    if multi_vlan:
+        rows = []
+        for f in multi_vlan:
+            label    = f.hostnames[0] if f.hostnames else f.ip
+            vlan_str = ", ".join(
+                f"{vid}" + (f" ({name})" if name != str(vid) else "")
+                for vid, name in zip(f.vlan_ids, f.vlan_names)
+            )
+            rows.append(html.Tr([
+                html.Td(_host_cell(label, f.ip if f.hostnames else "", ip=f.ip)),
+                html.Td(f.os_name or "-", style={"fontSize": "11px"}),
+                html.Td(vlan_str, style={"color": "#E67E22", "fontSize": "11px"}),
+                html.Td(str(len(f.vlan_ids)),
+                        style={"color": "#E67E22", "fontWeight": "bold"}),
+                html.Td(f"{f.max_cvss:.1f}"),
+                html.Td(f.switch_ip, style={"fontSize": "10px", "color": "#888"}),
+            ]))
+        sections.append(_table(
+            f"Multi-VLAN Hosts — VLAN Pivot Risk ({len(multi_vlan)})",
+            ["Host", "OS", "VLANs", "Count", "CVSS", "Switch"],
+            rows,
+            heading_color="#E67E22",
+        ))
+
+    if native_vlan:
+        rows = []
+        for f in native_vlan:
+            label = f.hostnames[0] if f.hostnames else f.ip
+            rows.append(html.Tr([
+                html.Td(_host_cell(label, f.ip if f.hostnames else "", ip=f.ip)),
+                html.Td(f.os_name or "-", style={"fontSize": "11px"}),
+                html.Td(f"{f.max_cvss:.1f}"),
+                html.Td(f.switch_ip, style={"fontSize": "10px", "color": "#888"}),
+            ]))
+        sections.append(_table(
+            f"Native VLAN 1 Hosts — Double-Tagging / Hopping Risk ({len(native_vlan)})",
+            ["Host", "OS", "CVSS", "Switch"],
+            rows,
+            heading_color="#F39C12",
+        ))
+
+    if inter_vlan_sw:
+        rows = []
+        for f in inter_vlan_sw:
+            label    = f.hostnames[0] if f.hostnames else f.ip
+            vlan_str = ", ".join(str(v) for v in f.vlan_ids[:10])
+            if len(f.vlan_ids) > 10:
+                vlan_str += f" +{len(f.vlan_ids) - 10} more"
+            rows.append(html.Tr([
+                html.Td(_host_cell(label, f.ip if f.hostnames else "", ip=f.ip)),
+                html.Td(f.os_name or "-", style={"fontSize": "11px"}),
+                html.Td(str(len(f.vlan_ids)),
+                        style={"color": "#5DADE2", "fontWeight": "bold"}),
+                html.Td(vlan_str, style={"fontSize": "10px", "color": "#aaa"}),
+                html.Td(f"{f.max_cvss:.1f}"),
+            ]))
+        sections.append(_table(
+            f"Multi-VLAN Switches — Inter-VLAN Routing Targets ({len(inter_vlan_sw)})",
+            ["Switch", "OS", "VLAN Count", "VLANs", "CVSS"],
+            rows,
+            heading_color="#5DADE2",
+        ))
+
+    return html.Div(sections, style={"display": "flex", "flexDirection": "column",
+                                      "gap": "14px"})
 
 
 # ── Shared UI helpers ─────────────────────────────────────────────────────────

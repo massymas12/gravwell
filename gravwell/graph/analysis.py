@@ -140,6 +140,20 @@ class InternetExposedHost:
     max_cvss: float
 
 
+@dataclass
+class VlanRiskFinding:
+    risk_type: str      # "multi_vlan_host" | "native_vlan" | "inter_vlan_switch"
+    ip: str
+    hostnames: list[str]
+    os_name: str
+    vlan_ids: list[int]
+    vlan_names: list[str]
+    switch_ip: str
+    max_cvss: float
+    risk_label: str
+    risk_score: float
+
+
 # ── Role detection port sets ──────────────────────────────────────────────────
 
 _DC_PORTS        = {88, 3268, 3269}
@@ -796,6 +810,110 @@ def find_path_to_nearest_hvt(
             continue
 
     return best_path, best_target
+
+
+def find_vlan_risks(G: nx.Graph, db_path: str) -> list[VlanRiskFinding]:
+    """
+    Identify VLAN-based attack vectors from Q-BRIDGE-MIB data:
+    - Multi-VLAN hosts: bridge between segments (pivot risk)
+    - Native VLAN 1 hosts: susceptible to double-tagging/hopping attacks
+    - Switches serving many VLANs: inter-VLAN routing targets
+    Returns empty list gracefully when no VLAN data exists.
+    """
+    from collections import defaultdict
+    from gravwell.database import get_session
+    from gravwell.models.orm import HostVlanORM, VlanORM
+
+    findings: list[VlanRiskFinding] = []
+
+    with get_session(db_path) as session:
+        hv_rows  = session.query(HostVlanORM).all()
+        vl_rows  = session.query(VlanORM).all()
+
+    if not hv_rows and not vl_rows:
+        return []
+
+    # ── Multi-VLAN hosts ───────────────────────────────────────────────────────
+    mac_vlans: dict[str, list] = defaultdict(list)
+    for row in hv_rows:
+        mac_vlans[row.host_mac].append(row)
+
+    for mac, rows in mac_vlans.items():
+        distinct_vlans = {r.vlan_id for r in rows}
+        if len(distinct_vlans) < 2:
+            continue
+        ip = next((r.host_ip for r in rows if r.host_ip and r.host_ip in G), None)
+        if ip is None:
+            ip = next((r.host_ip for r in rows if r.host_ip), "") or ""
+        attrs      = G.nodes.get(ip, {}) if ip in G else {}
+        vlan_ids   = sorted(distinct_vlans)
+        vlan_names = [
+            next((r.vlan_name for r in rows if r.vlan_id == v and r.vlan_name), str(v))
+            for v in vlan_ids
+        ]
+        max_cvss   = attrs.get("max_cvss", 0.0)
+        findings.append(VlanRiskFinding(
+            risk_type="multi_vlan_host",
+            ip=ip,
+            hostnames=attrs.get("hostnames", []),
+            os_name=attrs.get("os_name") or attrs.get("os_family", ""),
+            vlan_ids=vlan_ids,
+            vlan_names=vlan_names,
+            switch_ip=rows[0].switch_ip or "",
+            max_cvss=max_cvss,
+            risk_label=f"Host spans {len(distinct_vlans)} VLANs — potential VLAN pivot",
+            risk_score=len(distinct_vlans) * 2.0 + max_cvss,
+        ))
+
+    # ── Native VLAN 1 hosts ────────────────────────────────────────────────────
+    seen_native: set[str] = set()
+    for row in hv_rows:
+        if row.vlan_id != 1 or not row.host_ip or row.host_ip in seen_native:
+            continue
+        seen_native.add(row.host_ip)
+        attrs    = G.nodes.get(row.host_ip, {}) if row.host_ip in G else {}
+        max_cvss = attrs.get("max_cvss", 0.0)
+        findings.append(VlanRiskFinding(
+            risk_type="native_vlan",
+            ip=row.host_ip,
+            hostnames=attrs.get("hostnames", []),
+            os_name=attrs.get("os_name") or attrs.get("os_family", ""),
+            vlan_ids=[1],
+            vlan_names=[row.vlan_name or "VLAN 1 (native)"],
+            switch_ip=row.switch_ip or "",
+            max_cvss=max_cvss,
+            risk_label="Native VLAN 1 — double-tagging / VLAN hopping risk",
+            risk_score=4.0 + max_cvss * 0.5,
+        ))
+
+    # ── Switches with multiple VLANs ───────────────────────────────────────────
+    switch_vlans: dict[str, list] = defaultdict(list)
+    for row in vl_rows:
+        switch_vlans[row.switch_ip].append(row)
+
+    for sw_ip, vlans in switch_vlans.items():
+        if len(vlans) < 2:
+            continue
+        vlans_sorted = sorted(vlans, key=lambda x: x.vlan_id)
+        vlan_ids     = [v.vlan_id for v in vlans_sorted]
+        vlan_names   = [v.vlan_name or str(v.vlan_id) for v in vlans_sorted]
+        attrs        = G.nodes.get(sw_ip, {}) if sw_ip in G else {}
+        max_cvss     = attrs.get("max_cvss", 0.0)
+        findings.append(VlanRiskFinding(
+            risk_type="inter_vlan_switch",
+            ip=sw_ip,
+            hostnames=attrs.get("hostnames", []),
+            os_name=attrs.get("os_name") or attrs.get("os_family", "Switch"),
+            vlan_ids=vlan_ids,
+            vlan_names=vlan_names,
+            switch_ip=sw_ip,
+            max_cvss=max_cvss,
+            risk_label=f"Switch routes {len(vlans)} VLANs — inter-VLAN routing target",
+            risk_score=len(vlans) * 1.5 + max_cvss,
+        ))
+
+    findings.sort(key=lambda f: f.risk_score, reverse=True)
+    return findings
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

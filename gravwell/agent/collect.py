@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GravWell Collection Agent v1.2
+GravWell Collection Agent v2.0
 
 Collects network reconnaissance data from the local machine and optionally
 uploads it to a GravWell server for import into the network graph.
@@ -8,11 +8,15 @@ uploads it to a GravWell server for import into the network graph.
 Discovery methods (all stdlib-only, no third-party packages required):
   - ARP / IPv6 neighbor table
   - Active TCP connection harvest (netstat)
-  - Windows DNS cache (ipconfig /displaydns) and SMB browse list (net view)
+  - SSH known_hosts file and system hosts file (passive, zero traffic)
+  - Windows DNS cache (ipconfig /displaydns), SMB browse list, Active Directory
   - mDNS multicast (224.0.0.251:5353) — Apple, Linux/Avahi, IoT devices
   - SSDP multicast (239.255.255.250:1900) — UPnP / smart appliances
+  - WS-Discovery multicast (239.255.255.250:3702) — printers, cameras, Windows
+  - LLMNR passive listen (224.0.0.252:5355) — Windows name-resolution snooping
   - TCP-first host discovery (50+ common ports) with ICMP supplement
   - NetBIOS Node Status (UDP 137) hostname resolution
+  - SNMP v2c sysDescr + sysName query (community "public")
   - Reverse DNS sweep (PTR records)
   - TLS certificate extraction (CN + SANs reveal internal FQDNs)
   - HTTP/HTTPS enrichment (Server header + page title fingerprinting)
@@ -32,7 +36,9 @@ Usage:
     --rate N          Raw SYN scan rate packets/sec — Linux/macOS + root only (default: 10000)
     --no-verify-tls   Skip TLS certificate verification (for self-signed server certs)
     --ot-mode         OT/ICS-safe discovery: BACnet/EtherNet-IP broadcasts only, no sweep,
-                      no banner grabbing, low concurrency, OT protocol ports only
+                      no banner grabbing, no TCP scan (safe for PLCs, RTUs, safety systems)
+    --ot-scan         With --ot-mode: also run a low-concurrency TCP port scan on discovered
+                      OT hosts (only if you know your devices tolerate unexpected connections)
     --include CIDR    Only actively probe hosts in this subnet (repeat or comma-separate)
     --exclude CIDR    Never actively probe hosts in this subnet — OT-safe (repeat or comma-separate)
 """
@@ -57,7 +63,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "1.6"
+VERSION = "2.0"
 
 # ── Port lists ────────────────────────────────────────────────────────────────
 
@@ -909,6 +915,129 @@ def collect_smb_neighbors_windows() -> List[dict]:
     return neighbors
 
 
+# ── Passive file-based sources ───────────────────────────────────────────────
+
+def collect_ssh_known_hosts() -> List[dict]:
+    """Read ~/.ssh/known_hosts for previously contacted hosts.
+
+    Hashed entries (|1|…) are skipped — the host cannot be recovered from them.
+    Hostnames are resolved to IPs; unresolvable entries are dropped.
+    """
+    import pathlib as _pl
+    path = _pl.Path.home() / ".ssh" / "known_hosts"
+    results: List[dict] = []
+    seen: set = set()
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("|"):
+                continue
+            host_field = line.split()[0]
+            for host in host_field.split(","):
+                host = host.strip()
+                if host.startswith("["):
+                    host = host[1:host.find("]")] if "]" in host else host[1:]
+                try:
+                    ipaddress.IPv4Address(host)
+                    ip = host
+                    hostname = None
+                except ValueError:
+                    try:
+                        ip = socket.gethostbyname(host)
+                        hostname = host
+                    except Exception:
+                        continue
+                if ip.startswith("127.") or ip == "0.0.0.0":
+                    continue
+                if ip not in seen:
+                    seen.add(ip)
+                    entry: dict = {"ip": ip, "source": "ssh_known_hosts"}
+                    if hostname:
+                        entry["hostname"] = hostname
+                    results.append(entry)
+    except Exception:
+        pass
+    return results
+
+
+def collect_hosts_file() -> List[dict]:
+    """Read the system hosts file for static IP→hostname mappings."""
+    import pathlib as _pl
+    if platform.system() == "Windows":
+        path = _pl.Path(r"C:\Windows\System32\drivers\etc\hosts")
+    else:
+        path = _pl.Path("/etc/hosts")
+    results: List[dict] = []
+    seen: set = set()
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            ip = parts[0]
+            try:
+                ipaddress.IPv4Address(ip)
+            except ValueError:
+                continue
+            if ip.startswith("127.") or ip == "0.0.0.0":
+                continue
+            if ip not in seen:
+                seen.add(ip)
+                entry: dict = {"ip": ip, "source": "hosts_file"}
+                entry["hostname"] = parts[1]
+                results.append(entry)
+    except Exception:
+        pass
+    return results
+
+
+def collect_ad_computers() -> List[dict]:
+    """Enumerate domain-joined computers via 'net group' (Windows only).
+
+    Queries Active Directory for all computer accounts.  Each account name
+    ends with '$' (e.g. DESKTOP-ABC123$); that suffix is stripped before
+    DNS resolution.  Silently returns [] if not domain-joined or if the
+    command fails.
+    """
+    if platform.system() != "Windows":
+        return []
+    results: List[dict] = []
+    seen: set = set()
+    try:
+        r = subprocess.run(
+            ["net", "group", "Domain Computers", "/domain"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode != 0:
+            return []
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line or "---" in line or "Group name" in line \
+                    or "Comment" in line or "Members" in line \
+                    or line.startswith("The command"):
+                continue
+            for token in line.split():
+                if not token.endswith("$"):
+                    continue
+                hostname = token.rstrip("$")
+                try:
+                    ip = socket.gethostbyname(hostname)
+                    if ip.startswith("127.") or ip == "0.0.0.0":
+                        continue
+                    if ip not in seen:
+                        seen.add(ip)
+                        results.append({"ip": ip, "hostname": hostname,
+                                        "source": "active_directory"})
+                except Exception:
+                    pass
+    except Exception as exc:
+        _warn(f"AD computer enumeration error: {exc}")
+    return results
+
+
 # ── NetBIOS name resolution ───────────────────────────────────────────────────
 
 def _netbios_node_status(ip: str, timeout_secs: float) -> Optional[str]:
@@ -1107,11 +1236,143 @@ def _ssdp_listen(timeout_secs: float) -> List[dict]:
     return neighbors
 
 
-def mdns_ssdp_listen(timeout_secs: float = 5.0) -> List[dict]:
-    """Discover LAN devices via mDNS (224.0.0.251:5353) and SSDP (239.255.255.250:1900).
+def _wsdiscovery_listen(timeout_secs: float) -> List[dict]:
+    """Send WS-Discovery Probe and collect ProbeMatch responses.
 
-    Covers Apple/Linux/IoT devices (mDNS/Bonjour) and UPnP appliances such as
-    smart TVs, NAS boxes, printers, and routers (SSDP). No third-party packages.
+    WS-Discovery (UDP 3702 multicast) is used by printers, IP cameras (ONVIF),
+    scanners, and modern Windows/Linux hosts.  The Probe sends to the WSD
+    multicast group; responding devices describe their type in the Types element.
+    """
+    import uuid as _uuid
+    WSD_ADDR = "239.255.255.250"
+    WSD_PORT = 3702
+    probe = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"'
+        ' xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"'
+        ' xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery"'
+        ' xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof">'
+        "<soap:Header>"
+        "<wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>"
+        "<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>"
+        f"<wsa:MessageID>uuid:{_uuid.uuid4()}</wsa:MessageID>"
+        "</soap:Header>"
+        "<soap:Body><wsd:Probe>"
+        "<wsd:Types>wsdp:Device</wsd:Types>"
+        "</wsd:Probe></soap:Body></soap:Envelope>"
+    ).encode("utf-8")
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", 0))
+        sock.sendto(probe, (WSD_ADDR, WSD_PORT))
+        deadline = time.monotonic() + timeout_secs
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(min(remaining, 0.5))
+            try:
+                data, (src_ip, _) = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if src_ip in seen:
+                continue
+            seen.add(src_ip)
+            entry: dict = {"ip": src_ip, "source": "wsd"}
+            try:
+                text = data.decode("utf-8", errors="replace")
+                m = re.search(r"<[^:>]*:?Types[^>]*>([^<]+)<", text)
+                if m:
+                    entry["wsd_types"] = m.group(1).strip()[:120]
+                m = re.search(r"<[^:>]*:?XAddrs[^>]*>([^<]+)<", text)
+                if m:
+                    entry["wsd_xaddrs"] = m.group(1).strip()[:200]
+            except Exception:
+                pass
+            neighbors.append(entry)
+        sock.close()
+    except Exception as exc:
+        _warn(f"WS-Discovery error: {exc}")
+    return neighbors
+
+
+def _llmnr_listen(timeout_secs: float) -> List[dict]:
+    """Passively listen for LLMNR queries on 224.0.0.252:5355.
+
+    Windows falls back to LLMNR when DNS resolution fails — devices actively
+    querying the network reveal their presence and often their hostname.
+    This is a pure passive listen; no queries are sent.
+    """
+    import struct as _struct
+    LLMNR_ADDR = "224.0.0.252"
+    LLMNR_PORT = 5355
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            pass
+        try:
+            sock.bind(("", LLMNR_PORT))
+        except OSError:
+            sock.close()
+            return neighbors
+        mcast = _struct.pack("4sL", socket.inet_aton(LLMNR_ADDR), socket.INADDR_ANY)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mcast)
+        deadline = time.monotonic() + timeout_secs
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(min(remaining, 0.5))
+            try:
+                data, (src_ip, _) = sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if src_ip in seen:
+                continue
+            seen.add(src_ip)
+            entry: dict = {"ip": src_ip, "source": "llmnr"}
+            try:
+                # DNS-like header: 12 bytes; QR bit 15 of flags word = 0 for query
+                if len(data) > 12 and not (data[2] & 0x80):
+                    offset, parts = 12, []
+                    while offset < len(data):
+                        n = data[offset]
+                        if n == 0:
+                            break
+                        offset += 1
+                        parts.append(data[offset:offset + n].decode("ascii", errors="replace"))
+                        offset += n
+                    if parts:
+                        entry["llmnr_query"] = ".".join(parts)
+            except Exception:
+                pass
+            neighbors.append(entry)
+        sock.close()
+    except Exception as exc:
+        _warn(f"LLMNR listen error: {exc}")
+    return neighbors
+
+
+def mdns_ssdp_listen(timeout_secs: float = 5.0) -> List[dict]:
+    """Discover LAN devices via mDNS, SSDP, WS-Discovery, and LLMNR.
+
+    Runs all four multicast/passive listeners concurrently:
+      - mDNS  224.0.0.251:5353 — Apple, Linux/Avahi, IoT (Bonjour)
+      - SSDP  239.255.255.250:1900 — UPnP (smart TVs, NAS, routers)
+      - WSD   239.255.255.250:3702 — printers, cameras (ONVIF), Windows
+      - LLMNR 224.0.0.252:5355     — passive Windows name-resolution snooping
     """
     results: List[dict] = []
     lock = threading.Lock()
@@ -1122,8 +1383,10 @@ def mdns_ssdp_listen(timeout_secs: float = 5.0) -> List[dict]:
             results.extend(items)
 
     threads = [
-        threading.Thread(target=_run_listener, args=(_mdns_listen,), daemon=True),
-        threading.Thread(target=_run_listener, args=(_ssdp_listen,), daemon=True),
+        threading.Thread(target=_run_listener, args=(_mdns_listen,),      daemon=True),
+        threading.Thread(target=_run_listener, args=(_ssdp_listen,),      daemon=True),
+        threading.Thread(target=_run_listener, args=(_wsdiscovery_listen,), daemon=True),
+        threading.Thread(target=_run_listener, args=(_llmnr_listen,),     daemon=True),
     ]
     for t in threads:
         t.start()
@@ -1254,6 +1517,108 @@ def enrich_http(scan_results: List[dict], timeout: float = 3.0, workers: int = 2
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(_fetch, tasks))
+
+
+# ── SNMP enrichment ──────────────────────────────────────────────────────────
+
+def _snmp_get(ip: str, community: str = "public", timeout: float = 1.5) -> dict:
+    """Send a single SNMP v2c Get-Request for sysDescr + sysName.
+
+    Pure stdlib — no net-snmp, no pysnmp.  Encodes the request manually in
+    BER and parses the response with a naive OCTET STRING scan.
+    Returns {"snmp_descr": ..., "snmp_name": ...} or {} on any failure.
+    """
+    SYSDESCR = b"\x2b\x06\x01\x02\x01\x01\x01\x00"  # 1.3.6.1.2.1.1.1.0
+    SYSNAME  = b"\x2b\x06\x01\x02\x01\x01\x05\x00"  # 1.3.6.1.2.1.1.5.0
+
+    def _tlv(tag: int, val: bytes) -> bytes:
+        n = len(val)
+        if n < 128:
+            return bytes([tag, n]) + val
+        elif n < 256:
+            return bytes([tag, 0x81, n]) + val
+        else:
+            return bytes([tag, 0x82, n >> 8, n & 0xFF]) + val
+
+    comm = community.encode()
+    varbinds = (
+        _tlv(0x30, _tlv(0x06, SYSDESCR) + b"\x05\x00") +
+        _tlv(0x30, _tlv(0x06, SYSNAME)  + b"\x05\x00")
+    )
+    pdu = _tlv(0xA0,
+        _tlv(0x02, b"\x01") +   # request-id
+        _tlv(0x02, b"\x00") +   # error-status
+        _tlv(0x02, b"\x00") +   # error-index
+        _tlv(0x30, varbinds)
+    )
+    packet = _tlv(0x30, _tlv(0x02, b"\x01") + _tlv(0x04, comm) + pdu)
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        sock.sendto(packet, (ip, 161))
+        data, _ = sock.recvfrom(4096)
+        sock.close()
+    except Exception:
+        return {}
+
+    # Extract all OCTET STRING values from the response via a linear BER scan.
+    # Order in a GetResponse: community (skip), sysDescr value, sysName value.
+    strings: List[str] = []
+    i = 0
+    while i < len(data) - 1:
+        if data[i] == 0x04:
+            i += 1
+            n = data[i]; i += 1
+            if n & 0x80:
+                nb = n & 0x7F
+                n = int.from_bytes(data[i:i + nb], "big")
+                i += nb
+            val = data[i:i + n]
+            i += n
+            try:
+                s = val.decode("utf-8", errors="replace").strip()
+                if s:
+                    strings.append(s)
+            except Exception:
+                pass
+        else:
+            i += 1
+
+    # Drop community string and any empty/binary-looking values
+    values = [s for s in strings if s != community and s.isprintable()]
+    result: dict = {}
+    if values:
+        result["snmp_descr"] = values[0][:300]
+    if len(values) > 1:
+        result["snmp_name"] = values[1][:100]
+    return result
+
+
+def enrich_snmp(neighbors: List[dict], community: str = "public",
+                timeout: float = 1.5, workers: int = 50) -> None:
+    """Query UDP 161 (SNMP) on every neighbor for sysDescr and sysName.
+
+    sysDescr identifies the OS / firmware version of routers, switches, APs,
+    printers, and management cards.  sysName fills in the hostname if unknown.
+    Uses community string "public" (read-only, no write risk).
+    """
+    def _do(neighbor: dict) -> None:
+        ip = neighbor.get("ip", "")
+        if not ip:
+            return
+        result = _snmp_get(ip, community=community, timeout=timeout)
+        if not result:
+            return
+        if result.get("snmp_descr"):
+            neighbor["snmp_descr"] = result["snmp_descr"]
+        if result.get("snmp_name"):
+            neighbor["snmp_name"] = result["snmp_name"]
+            if not neighbor.get("hostname"):
+                neighbor["hostname"] = result["snmp_name"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_do, neighbors))
 
 
 # ── Raw SYN scanner ──────────────────────────────────────────────────────────
@@ -2074,12 +2439,18 @@ def _enip_list_identity(timeout: float = 3.0) -> List[dict]:
         entry: dict = {"ip": src_ip, "source": "enip-list-identity"}
         try:
             if len(data) >= 26 and data[0] == 0x63 and data[1] == 0x00:
-                if len(data) > 42:
-                    vendor_id   = int.from_bytes(data[36:38], "little")
-                    device_type = int.from_bytes(data[38:40], "little")
-                    name_len = data[42] if len(data) > 43 else 0
-                    if name_len and len(data) >= 43 + name_len:
-                        product = data[43: 43 + name_len].decode("ascii", errors="replace").strip()
+                # EIP encapsulation header = 24 bytes, CPF header = 6 bytes.
+                # Identity item data starts at offset 30:
+                #   [30:32] encap version, [32:48] sockaddr_in (sin_family+port+addr+zero),
+                #   [48:50] vendor ID, [50:52] device type, [52:54] product code,
+                #   [54] major rev, [55] minor rev, [56:58] status, [58:62] serial,
+                #   [62] name length, [63:] product name (ASCII)
+                if len(data) > 62:
+                    vendor_id   = int.from_bytes(data[48:50], "little")
+                    device_type = int.from_bytes(data[50:52], "little")
+                    name_len = data[62]
+                    if name_len and len(data) >= 63 + name_len:
+                        product = data[63: 63 + name_len].decode("ascii", errors="replace").strip()
                         entry["enip_product"] = product
                     entry["enip_vendor_id"]   = vendor_id
                     entry["enip_device_type"] = device_type
@@ -2438,6 +2809,8 @@ def _wizard(args) -> object:
     print("\n── Discovery ───────────────────────────────────────")
     if ot_mode:
         print("  (OT mode: ping/TCP sweep replaced with BACnet Who-Is + EtherNet/IP broadcast)")
+        print("  TCP port scan is OFF by default — safe for PLCs, RTUs, and safety systems.")
+        ot_scan = _ask_bool("Enable TCP port scan on discovered OT hosts? (only if devices tolerate it)", False)
     no_sweep = False if ot_mode else _ask_bool("Skip active host discovery (ping/TCP sweep)?", False)
     no_scan  = False if ot_mode else _ask_bool("Skip port scan?", False)
     routes   = _ask_bool("Also sweep routed (non-directly-attached) subnets?", False)
@@ -2464,7 +2837,11 @@ def _wizard(args) -> object:
         print(f"  Exclude : {exclude_str}")
     if include_str:
         print(f"  Include : {include_str}")
-    print(f"  OT mode : {'yes — broadcast-only, no banner grabbing' if ot_mode else 'no'}")
+    if ot_mode:
+        ot_scan_label = "yes (TCP scan enabled via --ot-scan)" if ot_scan else "yes — broadcast-only, no TCP scan"
+        print(f"  OT mode : {ot_scan_label}")
+    else:
+        print(f"  OT mode : no")
     print(f"  Sweep   : {'skip' if no_sweep else 'yes'}")
     print(f"  Scan    : {'skip' if no_scan else 'yes'}")
     print(f"  Routes  : {'yes' if routes else 'no'}")
@@ -2481,6 +2858,7 @@ def _wizard(args) -> object:
     args.exclude       = [exclude_str] if exclude_str else []
     args.include       = [include_str] if include_str else []
     args.ot_mode       = ot_mode
+    args.ot_scan       = ot_scan if ot_mode else False
     args.no_sweep      = no_sweep
     args.no_scan       = no_scan
     args.routes        = routes
@@ -2538,7 +2916,10 @@ Examples:
                         help="Skip TLS certificate verification (needed for self-signed server certs)")
     parser.add_argument("--ot-mode", action="store_true", default=False,
                         help="OT-safe discovery: broadcast-only host detection, "
-                             "no banner grabbing, low concurrency, OT protocol ports only")
+                             "no banner grabbing, no TCP port scan by default")
+    parser.add_argument("--ot-scan", action="store_true", default=False,
+                        help="With --ot-mode: also run a low-concurrency TCP port scan on "
+                             "discovered OT hosts (use only if you know your devices tolerate it)")
     parser.add_argument("--include", action="append", default=[], metavar="CIDR",
                         help="Only actively probe hosts inside this CIDR "
                              "(can repeat or comma-separate; passive data still collected for all hosts)")
@@ -2580,12 +2961,22 @@ Examples:
     direct_nets, routed_nets = discover_networks(system)
     _info(f"  Networks — directly attached: {len(direct_nets)}, routed: {len(routed_nets)}")
 
-    # 3. Passive discovery (ARP + netstat + Windows-specific sources)
+    # 3. Passive discovery (ARP + netstat + file sources + Windows-specific)
     _info("Passive discovery…")
     neighbors = collect_arp()
     existing_ips: set = {n["ip"] for n in neighbors}
 
     for n in collect_active_connections():
+        if n["ip"] not in existing_ips:
+            neighbors.append(n)
+            existing_ips.add(n["ip"])
+
+    for n in collect_ssh_known_hosts():
+        if n["ip"] not in existing_ips:
+            neighbors.append(n)
+            existing_ips.add(n["ip"])
+
+    for n in collect_hosts_file():
         if n["ip"] not in existing_ips:
             neighbors.append(n)
             existing_ips.add(n["ip"])
@@ -2599,17 +2990,25 @@ Examples:
             if n["ip"] not in existing_ips:
                 neighbors.append(n)
                 existing_ips.add(n["ip"])
+        for n in collect_ad_computers():
+            if n["ip"] not in existing_ips:
+                neighbors.append(n)
+                existing_ips.add(n["ip"])
 
     _info(f"  {len(neighbors)} neighbour(s) from passive sources")
 
     # 4. mDNS / SSDP multicast discovery (runs concurrently with sweep)
-    _info("mDNS/SSDP multicast discovery (5 s, background)…")
+    # Skipped in OT mode — multicast queries are still active traffic on the OT LAN.
     _mdns_ssdp_bag: List[dict] = []
-    _mdns_thread = threading.Thread(
-        target=lambda: _mdns_ssdp_bag.extend(mdns_ssdp_listen(5.0)),
-        daemon=True,
-    )
-    _mdns_thread.start()
+    if not args.ot_mode:
+        _info("mDNS/SSDP multicast discovery (5 s, background)…")
+        _mdns_thread = threading.Thread(
+            target=lambda: _mdns_ssdp_bag.extend(mdns_ssdp_listen(5.0)),
+            daemon=True,
+        )
+        _mdns_thread.start()
+    else:
+        _mdns_thread = None
 
     # 4b. OT protocol broadcasts (BACnet Who-Is + EtherNet/IP List Identity)
     if args.ot_mode:
@@ -2691,7 +3090,8 @@ Examples:
                     existing_ips.add(entry["ip"])
 
     # Merge mDNS/SSDP results (thread should be done by now; join to be safe)
-    _mdns_thread.join()
+    if _mdns_thread is not None:
+        _mdns_thread.join()
     for n in _mdns_ssdp_bag:
         if n["ip"] not in existing_ips:
             neighbors.append(n)
@@ -2702,8 +3102,14 @@ Examples:
     _info(f"Total neighbours discovered: {len(neighbors)}")
 
     # 6. Port scan
+    # In OT mode the TCP scan is off by default — only enabled by --ot-scan.
+    # Bare TCP connects to legacy PLCs / RTUs can fill connection state tables
+    # or trigger unexpected behaviour even without sending any data.
+    _scan_suppressed = args.ot_mode and not getattr(args, "ot_scan", False)
+    if _scan_suppressed:
+        _info("OT mode: TCP port scan suppressed (use --ot-scan to enable)")
     scan_results: List[dict] = []
-    if not args.no_scan and neighbors:
+    if not args.no_scan and not _scan_suppressed and neighbors:
         scan_targets = list({n["ip"] for n in neighbors} | set(self_info.get("ips", [])))
         if _has_filter:
             before = len(scan_targets)
@@ -2713,7 +3119,7 @@ Examples:
             if skipped:
                 _info(f"  {skipped} host(s) skipped by --include/--exclude filter (passive data retained)")
         if args.ot_mode:
-            _info("OT mode: running safe OT port scan (no banner grabbing, low concurrency)…")
+            _info("OT mode: running TCP port scan (--ot-scan enabled)…")
             scan_results = ot_safe_scan(
                 scan_targets,
                 timeout=max(args.timeout, 3.0),
@@ -2727,8 +3133,9 @@ Examples:
                 known_open=known_open,
             )
 
-    # 7. Post-scan enrichment — all four methods are pure I/O; run concurrently
-    _info("Post-scan enrichment (TLS / HTTP / NetBIOS / rDNS — concurrent)…")
+    # 7. Post-scan enrichment — all methods run concurrently
+    # NetBIOS + SNMP are suppressed in OT mode (UDP unicast to every host).
+    _info("Post-scan enrichment (TLS / HTTP / SNMP / NetBIOS / rDNS — concurrent)…")
     rdns: Dict[str, str] = {}
 
     def _do_tls() -> None:
@@ -2739,8 +3146,13 @@ Examples:
         if scan_results:
             enrich_http(scan_results, timeout=min(args.timeout + 2, 4.0))
 
+    def _do_snmp() -> None:
+        if not args.ot_mode:
+            enrich_snmp(neighbors, timeout=min(args.timeout + 0.5, 2.0))
+
     def _do_netbios() -> None:
-        enrich_netbios(neighbors, timeout_secs=min(args.timeout, 1.5))
+        if not args.ot_mode:
+            enrich_netbios(neighbors, timeout_secs=min(args.timeout, 1.5))
 
     def _do_rdns() -> None:
         rdns.update(reverse_dns_sweep(list(existing_ips)))
@@ -2748,6 +3160,7 @@ Examples:
     enrich_threads = [
         threading.Thread(target=_do_tls,     daemon=True),
         threading.Thread(target=_do_http,    daemon=True),
+        threading.Thread(target=_do_snmp,    daemon=True),
         threading.Thread(target=_do_netbios, daemon=True),
         threading.Thread(target=_do_rdns,    daemon=True),
     ]

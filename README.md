@@ -9,7 +9,7 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 ## Features
 
 - **Wide format support** — nmap, Nessus, Masscan, OpenVAS, Nuclei, enum4linux, CrowdStrike Falcon, Cisco IOS, Juniper JunOS, Fortinet FortiOS, Palo Alto PAN-OS (all auto-detected)
-- **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; uses stdlib-only discovery methods (ARP, netstat, mDNS/SSDP, NetBIOS, reverse DNS, TLS certs, HTTP fingerprinting, TCP-probe sweep, OT broadcasts) plus nmap/fping when available; interactive wizard when run with no arguments; `--ot-mode` for safe ICS/OT discovery; CIDR include/exclude filters; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
+- **Collection agent** — deploy a zero-dependency Python script or pre-built binary to a client machine; uses stdlib-only discovery methods (ARP, netstat, SSH known_hosts, hosts file, Active Directory, mDNS/SSDP/WS-Discovery/LLMNR multicast, SNMP, NetBIOS, reverse DNS, TLS certs, HTTP fingerprinting, TCP-probe sweep, OT broadcasts) plus nmap/fping when available; interactive wizard when run with no arguments; `--ot-mode` for safe ICS/OT discovery (broadcast-only, no TCP scan by default); CIDR include/exclude filters; uploads directly to GravWell or saves a JSON file for manual import; pre-built binaries for Windows/Linux/macOS downloadable from the web UI
 - **Encrypted database** — AES-256-GCM (SQLCipher 4) with per-user envelope encryption; stealing the `.db` file yields an unreadable blob without a valid GravWell password
 - **HTTPS by default** — self-signed TLS cert auto-generated at first start; SHA-256 fingerprint printed in the console so you can verify the connection; collection agents skip verification automatically for self-signed server certs
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
@@ -120,7 +120,7 @@ gravwell ingest results.nessus masscan_output.json
 
 ## Collection Agent
 
-The collection agent (`collect.py`, v1.6) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
+The collection agent (`collect.py`, v2.0) is a zero-dependency Python script (or compiled binary) you deploy to a client machine. It uses multiple layered discovery methods — all built on Python stdlib — to find as many hosts as possible even in restrictive environments.
 
 ### Discovery pipeline
 
@@ -129,20 +129,26 @@ The collection agent (`collect.py`, v1.6) is a zero-dependency Python script (or
 | **System info** | `platform`, `socket`, OS commands | Hostname, OS, all interface IPs/MACs, default gateway, DNS servers, Windows domain/workgroup |
 | **ARP / neighbour table** | `arp -a` / `ip neigh` / `ndp` | Hosts on directly-connected subnets — IPv4 + IPv6 |
 | **Active connections** | `netstat -an` | Remote IPs from established TCP connections — discovers servers that block *all* inbound probes |
+| **SSH known_hosts** | `~/.ssh/known_hosts` | Every host the user has ever SSH'd to — hostnames resolved to IPs; zero network traffic |
+| **Hosts file** | `/etc/hosts` · `C:\Windows\System32\drivers\etc\hosts` | Statically mapped hostnames and IPs; zero network traffic |
 | **Windows DNS cache** | `ipconfig /displaydns` | Cached A records with hostnames (Windows only) |
 | **SMB browse list** | `net view` | Windows machines visible via SMB browser service (Windows only) |
+| **Active Directory** | `net group "Domain Computers" /domain` | All domain-joined computers via AD (Windows domain members only) |
 | **mDNS multicast** | UDP 224.0.0.251:5353 | Apple, Linux/Avahi, IoT, and printer devices via Bonjour/mDNS |
 | **SSDP multicast** | UDP 239.255.255.250:1900 | UPnP devices — smart TVs, NAS boxes, printers, routers |
+| **WS-Discovery multicast** | UDP 239.255.255.250:3702 | Printers, IP cameras (ONVIF), scanners, modern Windows/Linux hosts |
+| **LLMNR passive listen** | UDP 224.0.0.252:5355 | Windows hosts doing name resolution — passive only, no queries sent |
 | **TCP probe sweep** | Socket connect to ~14 common ports | Host liveness when ICMP is blocked — primary fallback without nmap |
 | **ICMP ping** | `fping` or system `ping` | Supplement to TCP — catches ICMP-only devices (routers, printers) |
 | **Port scan** | ~50 ports; nmap with `-sV`/`-O` or socket scan | Open services, service versions, banner grabbing |
+| **SNMP enrichment** | UDP 161, community `public` | `sysDescr` (OS/firmware string) and `sysName` (hostname) from routers, switches, APs, printers |
 | **NetBIOS Node Status** | UDP 137 | Windows machine names for hosts without reverse DNS |
 | **Reverse DNS sweep** | `socket.gethostbyaddr` | PTR records for all discovered IPs — concurrent, 50 threads |
 | **TLS cert extraction** | `ssl` module | CN and SANs from HTTPS/LDAPS/IMAPS certs — reveals internal FQDNs |
 | **HTTP enrichment** | `urllib.request` | `Server:` header + page `<title>` — fingerprints routers, NAS, printers, management UIs |
 | **OS / role inference** | Port signatures · SSH/FTP/SMTP/IMAP banners · HTTP `Server:` header · IIS version mapping | OS family (Windows/Linux/macOS/Network) and device roles (dc, web, db, smb, rdp, printer, camera, voip, router, docker, kubernetes, hypervisor…); banner evidence takes priority over port-signature guesses |
 
-mDNS and SSDP run concurrently with the TCP probe sweep in a background thread to avoid adding to wall-clock time.
+mDNS, SSDP, WS-Discovery, and LLMNR all run concurrently in a background thread alongside the TCP probe sweep to avoid adding to wall-clock time.
 
 **OS fingerprinting priority** (highest wins): nmap `-O` result → SSH/FTP/SMTP/IMAP/POP3 banner → HTTP `Server:` / `X-Powered-By:` headers → port signature. SSH banners carry the distro build string (e.g. `OpenSSH_8.9p1 Ubuntu-3ubuntu0.6` → Ubuntu 22.04 LTS). IIS version numbers are mapped to their Windows Server release (e.g. IIS 10.0 → Windows Server 2016/2019/2022).
 
@@ -201,8 +207,11 @@ python gravwell-collect.py --include 10.10.5.0/24 --include 10.10.6.0/24
 # Exclude a management VLAN from all active probing
 python gravwell-collect.py --exclude 192.168.1.0/24
 
-# OT / ICS mode — broadcast-only discovery, no port scan banner grab
+# OT / ICS mode — broadcast-only discovery, no TCP scan (safest)
 python gravwell-collect.py --ot-mode --server https://gravwell.corp.local --key YOUR_TOKEN
+
+# OT mode with optional TCP port scan on discovered hosts (only if devices tolerate it)
+python gravwell-collect.py --ot-mode --ot-scan --server https://gravwell.corp.local --key YOUR_TOKEN
 ```
 
 The script requires Python 3.8+ and no third-party packages. Copy the single `.py` file to the target — no `pip install` needed.
@@ -237,14 +246,34 @@ Active TCP probing of unknown Industrial Control System (ICS) and Operational Te
 python gravwell-collect.py --ot-mode --server https://gravwell.corp.local --key YOUR_TOKEN
 ```
 
-**What `--ot-mode` does:**
+**What `--ot-mode` sends on the wire:**
 
-| Discovery method | Protocol | Why it's safe |
-|-----------------|----------|--------------|
-| **BACnet Who-Is** | UDP broadcast → 47808 | Standard discovery packet; devices opt-in by sending I-Am responses |
-| **EtherNet/IP List Identity** | UDP broadcast → 44818 | Standard CIP discovery; read-only enumeration of vendor, device type, product name |
+| Active | Protocol | Why it's safe |
+|--------|----------|--------------|
+| **BACnet Who-Is** | UDP broadcast → 47808 | Standard discovery frame; every BACnet/IP device is required to respond to it |
+| **EtherNet/IP List Identity** | UDP broadcast → 44818 | Standard CIP discovery; read-only, vendor/device-type/product-name only |
 
-The TCP sweep is replaced by these broadcast-only methods. Any TCP port scan that does run uses **connect-only** (no banner grab, immediate close, 5s timeout, 5 workers max) to minimise load on fragile devices.
+**What `--ot-mode` suppresses:**
+
+| Suppressed | Reason |
+|------------|--------|
+| Ping / TCP sweep of entire subnet | High traffic volume, unexpected on OT LANs |
+| mDNS, SSDP, WS-Discovery, LLMNR queries | Multicast traffic; unnecessary on OT segments |
+| TCP port scan | Even a bare TCP SYN can destabilise fragile PLC/RTU connection state tables |
+| NetBIOS UDP 137 per host | Unicast active probe; PLCs do not run NetBIOS |
+| SNMP enrichment | Unexpected UDP from an unknown source |
+
+All passive sources (ARP table, netstat, SSH known_hosts, hosts file) still run — they produce zero network traffic.
+
+**Optional: TCP scan on OT hosts**
+
+If you need port-level detail and your devices are modern enough to tolerate it, add `--ot-scan`:
+
+```bash
+python gravwell-collect.py --ot-mode --ot-scan --server https://gravwell.corp.local --key YOUR_TOKEN
+```
+
+This runs the OT-safe TCP scan (connect-only, no banner grab, 3 s timeout, 20 workers max) on hosts that responded to the broadcasts. Only use this if you know your specific devices can handle it.
 
 **When to use `--ot-mode`:**
 - ICS / SCADA / DCS environments

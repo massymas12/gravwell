@@ -1830,6 +1830,9 @@ _OT_PORTS: List[Tuple[int, str]] = [
     (2222,  "ethernet-ip-ud"), # EtherNet/IP implicit messaging
 ]
 
+# Ports that are UDP-only — skip in TCP connect scan (handled by broadcast or SNMP)
+_OT_UDP_ONLY: set = {161, 47808, 34962, 2222}
+
 # OT port → role tag mapping
 _OT_PORT_ROLES: Dict[int, str] = {
     502:   "modbus",
@@ -2014,7 +2017,7 @@ def ot_safe_scan(ips: List[str], timeout: float = 3.0,
     results: Dict[str, dict] = {}
     lock = threading.Lock()
     tasks = [(ip, port, svc) for ip in ips for port, svc in _OT_PORTS
-             if port != 161]   # skip SNMP — UDP, handled separately
+             if port not in _OT_UDP_ONLY]   # skip UDP-only protocols
 
     def _try_ot(task: Tuple) -> Optional[Tuple]:
         ip, port, svc = task

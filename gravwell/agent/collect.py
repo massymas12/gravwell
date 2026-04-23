@@ -1857,21 +1857,55 @@ def _local_iface_pairs() -> List[Tuple[str, str]]:
     the packet out the correct NIC.  On Windows an unbound socket may pick
     a VPN adapter, loopback, or virtual interface and the packet never
     reaches the physical LAN.
+
+    Uses the same platform-specific parsers as collect_self() so every
+    adapter in ipconfig/ip-addr appears — not just the ones gethostname()
+    happens to resolve to.
     """
     pairs: List[Tuple[str, str]] = []
     seen: set = set()
+
     try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip.startswith("127.") or ip == "0.0.0.0":
+        sys_name = platform.system()
+        if sys_name == "Windows":
+            ifaces = _interfaces_windows()
+        elif sys_name == "Linux":
+            ifaces = _interfaces_linux()
+        elif sys_name == "Darwin":
+            ifaces = _interfaces_macos()
+        else:
+            ifaces = []
+
+        for iface in ifaces:
+            ip = iface.get("ip", "")
+            nm = iface.get("netmask", "")
+            if not ip or ip.startswith("127.") or ip == "0.0.0.0":
                 continue
-            bcast = ip.rsplit(".", 1)[0] + ".255"
+            try:
+                net = ipaddress.IPv4Network(f"{ip}/{nm}", strict=False)
+                bcast = str(net.broadcast_address)
+            except ValueError:
+                bcast = ip.rsplit(".", 1)[0] + ".255"
             if ip not in seen:
                 seen.add(ip)
                 pairs.append((ip, bcast))
     except Exception:
         pass
-    # Fallback: let the OS choose the interface (still better than nothing)
+
+    # Socket-based fallback if platform parsers return nothing
+    if not pairs:
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip.startswith("127.") or ip == "0.0.0.0":
+                    continue
+                bcast = ip.rsplit(".", 1)[0] + ".255"
+                if ip not in seen:
+                    seen.add(ip)
+                    pairs.append((ip, bcast))
+        except Exception:
+            pass
+
     if not pairs:
         pairs.append(("", "255.255.255.255"))
     return pairs
@@ -2530,6 +2564,8 @@ Examples:
 
     # 4b. OT protocol broadcasts (BACnet Who-Is + EtherNet/IP List Identity)
     if args.ot_mode:
+        _ot_ifaces = _local_iface_pairs()
+        _info(f"OT broadcast interfaces: {[f'{ip}→{bcast}' for ip, bcast in _ot_ifaces]}")
         _info("OT mode: sending BACnet Who-Is broadcast…")
         for entry in _bacnet_whois(timeout=args.timeout + 2):
             if entry["ip"] not in existing_ips:

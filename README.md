@@ -142,6 +142,8 @@ The collection agent (`collect.py`, v2.0) is a zero-dependency Python script (or
 | **ICMP ping** | `fping` or system `ping` | Supplement to TCP — catches ICMP-only devices (routers, printers) |
 | **Port scan** | ~50 ports; nmap with `-sV`/`-O` or socket scan | Open services, service versions, banner grabbing |
 | **SNMP enrichment** | UDP 161, community `public` | `sysDescr` (OS/firmware string) and `sysName` (hostname) from routers, switches, APs, printers |
+| **LLDP frame sniffing** | AF_PACKET raw socket (Linux) | Captures IEEE 802.1AB LLDP frames to discover the IP of the directly-connected switch — used as the seed for VLAN collection |
+| **VLAN discovery (Q-BRIDGE-MIB)** | SNMP GetBulk on `dot1qVlanStaticName` and `dot1qTpFdbPort` | Maps VLAN ID → name and MAC → VLAN on discovered switches; pure stdlib BER implementation, no third-party SNMP library required |
 | **NetBIOS Node Status** | UDP 137 | Windows machine names for hosts without reverse DNS |
 | **Reverse DNS sweep** | `socket.gethostbyaddr` | PTR records for all discovered IPs — concurrent, 50 threads |
 | **TLS cert extraction** | `ssl` module | CN and SANs from HTTPS/LDAPS/IMAPS certs — reveals internal FQDNs |
@@ -428,6 +430,10 @@ Node positions are automatically saved after each drag. The **preset** layout re
 | **Inter-subnet** | Bold orange line, bidirectional arrows | Connects the hubs of adjacent subnets within the same /16 block |
 | **Bridge** | Purple dashed, bidirectional arrows | Connects a multi-homed network device (router/firewall) to the hub of each subnet it spans |
 | **Custom** | Green dashed, bidirectional arrows | Manually added by the user via the **+ Edge** button |
+| **LLDP/CDP** | Solid blue line, labelled with port | Physical link detected from IEEE 802.1AB LLDP or Cisco CDP frames captured on the network; label shows the switch port name |
+| **Inter-VLAN** | Dashed orange line, labelled VLAN A↔B | Drawn between representative hosts on two VLANs that share a switch — indicates an inter-VLAN routing boundary (potential lateral movement vector) |
+
+All edge types can be toggled individually using the **Edges:** checklist in the graph toolbar.
 
 ### How arrows are placed
 
@@ -462,6 +468,12 @@ A subnet is assigned to a domain when at least 50% of its hosts carry a matching
 | **Manual** | Click any host node → **Edit** → fill in the **Domain** field |
 
 Tags from all three sources are merged in the database, so re-ingesting a file or editing a node adds to existing domain information rather than replacing it.
+
+### VLAN visualisation
+
+When the collection agent returns Q-BRIDGE-MIB data, every host node gains a **coloured outline badge** indicating its VLAN membership. Up to 16 distinct VLAN colours cycle automatically (cyan, amber, purple, green, red, blue, …). Hosts on **VLAN 1** (the native/default VLAN, commonly left unconfigured) additionally show a dashed amber outline to flag the double-tagging risk. VLAN outlines coexist visually with vulnerability severity borders (which use the node border rather than the outline) so both signals are visible simultaneously.
+
+When no VLAN data has been collected the graph renders identically to the standard view — VLAN badges appear only once SNMP switch discovery has run.
 
 ### Multi-node selection
 
@@ -518,6 +530,8 @@ The **Attack Paths** tab provides several automated analyses:
 | **Admin Interfaces** | Hosts with management interfaces exposed (RDP, SSH, WinRM, IPMI, iDRAC, etc.) |
 | **Network Segments** | Disconnected components in the graph — isolated network islands with no visible path to the rest |
 | **AD Enum** | Domain enumeration findings from enum4linux: group names, password policy weaknesses, SMB signing status |
+| **Internet Exposed** | Hosts with at least one internet-routable (non-RFC-1918) IP; multicast, reserved, and link-local addresses are excluded automatically |
+| **VLAN Risks** | Three categories of VLAN-based attack vector (requires SNMP switch collection): **Multi-VLAN hosts** — hosts spanning two or more VLANs (potential VLAN pivot); **Native VLAN 1 hosts** — susceptible to double-tagging/VLAN hopping; **Multi-VLAN switches** — switches routing many VLANs, prime inter-VLAN lateral movement targets |
 
 Clicking any IP or hostname in analysis results pans the graph to that node. Clicking a row in the Services or Vulnerabilities sub-tabs does the same.
 

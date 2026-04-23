@@ -699,6 +699,27 @@ def _parse_routes_macos(direct: List[str], routed: List[str]) -> None:
 
 # ── ARP table ─────────────────────────────────────────────────────────────────
 
+def _is_routable_host_ip(ip: str) -> bool:
+    """Return True only for unicast IPs that represent real hosts.
+
+    Rejects multicast (224.x–239.x), broadcast, loopback, link-local,
+    and unspecified addresses — all of which appear in ARP/neighbour
+    tables but are not actual network devices.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (
+        addr.is_multicast
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_unspecified
+        or addr.is_reserved
+        or (isinstance(addr, ipaddress.IPv4Address) and str(addr).endswith(".255"))
+    )
+
+
 def collect_arp() -> List[dict]:
     system = platform.system()
     neighbors: List[dict] = []
@@ -723,7 +744,7 @@ def _arp_windows() -> List[dict]:
         m = re.match(r"\s+([\d.]+)\s+([\da-fA-F-]{17})\s+(\w+)", line)
         if m:
             ip, mac, kind = m.groups()
-            if kind.lower() in ("dynamic", "static"):
+            if kind.lower() in ("dynamic", "static") and _is_routable_host_ip(ip):
                 neighbors.append({
                     "ip": ip,
                     "mac": mac.replace("-", ":").upper(),
@@ -739,7 +760,7 @@ def _arp_linux() -> List[dict]:
         for line in out.splitlines():
             # Only include entries that have a resolved MAC
             m = re.match(r"([\d.]+)\s+dev\s+\S+\s+lladdr\s+([\da-fA-F:]{17})", line)
-            if m:
+            if m and _is_routable_host_ip(m.group(1)):
                 neighbors.append({
                     "ip": m.group(1),
                     "mac": m.group(2).upper(),
@@ -751,7 +772,7 @@ def _arp_linux() -> List[dict]:
     out = _run("arp -a")
     for line in out.splitlines():
         m = re.match(r"\S+\s+\(([\d.]+)\)\s+at\s+([\da-fA-F:]{17})", line)
-        if m:
+        if m and _is_routable_host_ip(m.group(1)):
             neighbors.append({
                 "ip": m.group(1),
                 "mac": m.group(2).upper(),
@@ -767,6 +788,8 @@ def _arp_macos() -> List[dict]:
         m = re.match(r"(\S+)\s+\(([\d.]+)\)\s+at\s+([\da-fA-F:]{17})", line)
         if m:
             hn, ip, mac = m.groups()
+            if not _is_routable_host_ip(ip):
+                continue
             entry: dict = {"ip": ip, "mac": mac.upper(), "source": "arp"}
             if hn != "?":
                 entry["hostname"] = hn

@@ -51,6 +51,27 @@ def _is_private_ip(ip: str) -> bool:
         return False
 
 
+def _is_graphable_ip(ip: str) -> bool:
+    """Return False for IPs that should never appear as graph nodes.
+
+    Multicast group addresses (224.x–239.x), broadcast (.255), loopback,
+    link-local, unspecified, and reserved addresses all show up in ARP/
+    neighbour tables but are not real network devices.  They are silently
+    dropped here even if they were previously imported into the DB.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.is_multicast or addr.is_loopback or addr.is_link_local:
+        return False
+    if addr.is_unspecified or addr.is_reserved:
+        return False
+    if isinstance(addr, ipaddress.IPv4Address) and str(addr).endswith(".255"):
+        return False
+    return True
+
+
 def build_graph(session: Session) -> nx.Graph:
     """Build a NetworkX graph from all hosts in the DB."""
     G = nx.Graph()
@@ -168,7 +189,9 @@ def build_graph(session: Session) -> nx.Graph:
             hd["vlan_id"] = vlan[0]
             hd["vlan_name"] = vlan[1]
 
-    # Add nodes
+    # Add nodes — skip multicast, broadcast, loopback, and other non-host IPs
+    # that the ARP table may have contributed before the collection-side filter.
+    host_data = [hd for hd in host_data if _is_graphable_ip(hd["ip"])]
     for hd in host_data:
         G.add_node(hd["ip"], node_type="host", **hd)
 

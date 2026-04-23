@@ -1847,12 +1847,38 @@ _OT_PORT_ROLES: Dict[int, str] = {
 }
 
 
+def _local_broadcast_addrs() -> List[str]:
+    """Return broadcast addresses to probe for OT discovery.
+
+    Always includes 255.255.255.255 (global limited broadcast, works on all
+    platforms with SO_BROADCAST).  Also derives per-subnet .255 addresses
+    from every non-loopback local IP so the packet reaches the correct
+    interface on multi-homed hosts and on Windows where the OS does not
+    route to "<broadcast>" reliably.
+    """
+    addrs: List[str] = ["255.255.255.255"]
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip.startswith("127."):
+                continue
+            # Derive the /24 subnet broadcast — sufficient for OT LANs
+            prefix = ip.rsplit(".", 1)[0]
+            bcast = prefix + ".255"
+            if bcast not in addrs:
+                addrs.append(bcast)
+    except Exception:
+        pass
+    return addrs
+
+
 def _bacnet_whois(timeout: float = 3.0) -> List[dict]:
     """Send a BACnet Who-Is broadcast; collect I-Am responses.
 
-    Uses a single UDP broadcast — the standard mechanism for BACnet device
-    discovery.  Safe for all BACnet/IP devices (building automation,
-    Honeywell, Siemens, Johnson Controls, etc.).
+    Uses UDP broadcast — the standard mechanism for BACnet device discovery.
+    Sends to every local interface's subnet broadcast as well as 255.255.255.255
+    so the packet reaches BACnet devices on multi-homed hosts and Windows.
+    Safe for all BACnet/IP devices (Honeywell, Siemens, Johnson Controls, etc.).
     """
     BACNET_PORT = 47808
     # BVLC(4) + NPDU(2) + APDU Who-Is(2) = 8 bytes
@@ -1863,11 +1889,16 @@ def _bacnet_whois(timeout: float = 3.0) -> List[dict]:
     ])
     found: List[dict] = []
     seen: set = set()
+    sock: Optional[socket.socket] = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.settimeout(timeout)
-        sock.sendto(WHO_IS, ("<broadcast>", BACNET_PORT))
+        for bcast in _local_broadcast_addrs():
+            try:
+                sock.sendto(WHO_IS, (bcast, BACNET_PORT))
+            except Exception as exc:
+                _warn(f"BACnet Who-Is send to {bcast} failed: {exc}")
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -1890,13 +1921,14 @@ def _bacnet_whois(timeout: float = 3.0) -> List[dict]:
             except Exception:
                 pass
             found.append(entry)
-    except Exception:
-        pass
+    except Exception as exc:
+        _warn(f"BACnet Who-Is failed: {exc}")
     finally:
-        try:
-            sock.close()
-        except Exception:
-            pass
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     return found
 
 
@@ -1919,11 +1951,16 @@ def _enip_list_identity(timeout: float = 3.0) -> List[dict]:
     ])
     found: List[dict] = []
     seen: set = set()
+    sock: Optional[socket.socket] = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.settimeout(timeout)
-        sock.sendto(LIST_IDENTITY, ("<broadcast>", ENIP_PORT))
+        for bcast in _local_broadcast_addrs():
+            try:
+                sock.sendto(LIST_IDENTITY, (bcast, ENIP_PORT))
+            except Exception as exc:
+                _warn(f"EtherNet/IP List Identity send to {bcast} failed: {exc}")
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -1953,24 +1990,25 @@ def _enip_list_identity(timeout: float = 3.0) -> List[dict]:
             except Exception:
                 pass
             found.append(entry)
-    except Exception:
-        pass
+    except Exception as exc:
+        _warn(f"EtherNet/IP List Identity failed: {exc}")
     finally:
-        try:
-            sock.close()
-        except Exception:
-            pass
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     return found
 
 
-def ot_safe_scan(ips: List[str], timeout: float = 5.0,
-                 workers: int = 5) -> List[dict]:
+def ot_safe_scan(ips: List[str], timeout: float = 3.0,
+                 workers: int = 20) -> List[dict]:
     """Gentle port scan for OT networks.
 
     Rules:
       - Only known OT + management ports (_OT_PORTS)
       - No banner grabbing — connect test only, then immediately close
-      - Low concurrency (default 5), long timeout (default 5 s)
+      - Low concurrency (default 20), moderate timeout (default 3 s)
       - Assigns OT role tags based on open ports
     """
     results: Dict[str, dict] = {}
@@ -2366,7 +2404,23 @@ def _wizard(args) -> object:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main() -> None:  # noqa: C901
+    try:
+        _main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted.", file=sys.stderr)
+        sys.exit(1)
+    except Exception:
+        import traceback
+        print("\n[ERROR] Unexpected crash — please report the following traceback:\n",
+              file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def _main() -> None:
     parser = argparse.ArgumentParser(
         description="GravWell Collection Agent — network recon and asset discovery",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2567,8 +2621,8 @@ Examples:
             _info("OT mode: running safe OT port scan (no banner grabbing, low concurrency)…")
             scan_results = ot_safe_scan(
                 scan_targets,
-                timeout=max(args.timeout, 5.0),
-                workers=min(args.workers, 5),
+                timeout=max(args.timeout, 3.0),
+                workers=min(args.workers, 20),
             )
         else:
             scan_results = port_scan(
@@ -2624,7 +2678,12 @@ Examples:
     if not out_path:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = f"gravwell_collect_{self_info['hostname']}_{ts}.json"
-    write_json(payload, out_path)
+    _info(f"Writing output to: {os.path.abspath(out_path)}")
+    try:
+        write_json(payload, out_path)
+    except Exception as exc:
+        _warn(f"Failed to write output file: {exc}")
+        raise
     _info(f"Saved: {out_path}")
 
     # 10. Upload if requested

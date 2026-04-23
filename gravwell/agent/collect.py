@@ -529,7 +529,7 @@ def _collect_default_gateway(system: str) -> str:
                 if parts and parts[0] == "default":
                     # Gateway is second column; skip link# entries
                     gw = parts[1] if len(parts) > 1 else ""
-                    if re.match(r"[\d.]+", gw):
+                    if re.match(r"[\d.]+", gw) and gw != "0.0.0.0":
                         return gw
     except Exception:
         pass
@@ -1149,6 +1149,7 @@ def _mdns_listen(timeout_secs: float) -> List[dict]:
     MDNS_PORT = 5353
     neighbors: List[dict] = []
     seen: set = set()
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1159,7 +1160,6 @@ def _mdns_listen(timeout_secs: float) -> List[dict]:
         try:
             sock.bind(("", MDNS_PORT))
         except OSError:
-            sock.close()
             return neighbors  # Port owned by avahi-daemon or similar
         mcast = struct.pack("4sL", socket.inet_aton(MDNS_ADDR), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mcast)
@@ -1184,9 +1184,14 @@ def _mdns_listen(timeout_secs: float) -> List[dict]:
             if hostname:
                 entry["hostname"] = hostname
             neighbors.append(entry)
-        sock.close()
     except Exception as exc:
         _warn(f"mDNS listen error: {exc}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     return neighbors
 
 
@@ -1204,6 +1209,7 @@ def _ssdp_listen(timeout_secs: float) -> List[dict]:
         "ST: ssdp:all\r\n"
         "\r\n"
     )
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1230,9 +1236,14 @@ def _ssdp_listen(timeout_secs: float) -> List[dict]:
             if m:
                 entry["ssdp_server"] = m.group(1).strip()[:100]
             neighbors.append(entry)
-        sock.close()
     except Exception as exc:
         _warn(f"SSDP listen error: {exc}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     return neighbors
 
 
@@ -1263,6 +1274,7 @@ def _wsdiscovery_listen(timeout_secs: float) -> List[dict]:
     ).encode("utf-8")
     neighbors: List[dict] = []
     seen: set = set()
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1295,9 +1307,14 @@ def _wsdiscovery_listen(timeout_secs: float) -> List[dict]:
             except Exception:
                 pass
             neighbors.append(entry)
-        sock.close()
     except Exception as exc:
         _warn(f"WS-Discovery error: {exc}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     return neighbors
 
 
@@ -1313,6 +1330,7 @@ def _llmnr_listen(timeout_secs: float) -> List[dict]:
     LLMNR_PORT = 5355
     neighbors: List[dict] = []
     seen: set = set()
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1323,7 +1341,6 @@ def _llmnr_listen(timeout_secs: float) -> List[dict]:
         try:
             sock.bind(("", LLMNR_PORT))
         except OSError:
-            sock.close()
             return neighbors
         mcast = _struct.pack("4sL", socket.inet_aton(LLMNR_ADDR), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mcast)
@@ -1359,9 +1376,14 @@ def _llmnr_listen(timeout_secs: float) -> List[dict]:
             except Exception:
                 pass
             neighbors.append(entry)
-        sock.close()
     except Exception as exc:
         _warn(f"LLMNR listen error: {exc}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     return neighbors
 
 
@@ -1823,6 +1845,8 @@ def collect_vlan_snmp(
             if len(oid_comps) != base_name_len + 1:
                 continue
             vlan_id = oid_comps[-1]
+            if not (1 <= vlan_id <= 4094):  # VLAN 0 reserved; > 4094 invalid per 802.1Q
+                continue
             try:
                 vlan_name = val_bytes.decode("utf-8", errors="replace").strip()
             except Exception:
@@ -1840,6 +1864,8 @@ def collect_vlan_snmp(
             if len(oid_comps) != base_fdb_len + 7:
                 continue
             vlan_id = oid_comps[base_fdb_len]
+            if not (1 <= vlan_id <= 4094):
+                continue
             mac_octets = oid_comps[base_fdb_len + 1:]
             if len(mac_octets) != 6 or any(b > 255 for b in mac_octets):
                 continue
@@ -1941,6 +1967,7 @@ def _lldp_listen(timeout_secs: float = 15.0) -> List[dict]:
 
     neighbors: List[dict] = []
     seen: set = set()
+    sock = None
     try:
         sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,  # type: ignore[attr-defined]
                              socket.htons(ETH_P_LLDP))
@@ -1971,9 +1998,14 @@ def _lldp_listen(timeout_secs: float = 15.0) -> List[dict]:
             if info.get("capabilities"):
                 entry["lldp_capabilities"] = info["capabilities"]
             neighbors.append(entry)
-        sock.close()
     except Exception as exc:
         _warn(f"LLDP sniff error: {exc}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
     if neighbors:
         _info(f"  LLDP: {len(neighbors)} switch(es) found")
     return neighbors
@@ -2111,17 +2143,19 @@ def _raw_syn_scan(
     def _tx() -> None:
         interval = 1.0 / rate_pps
         next_send = time.monotonic()
-        for ip, port in tasks:
-            pkt = _build_syn(src_ip, ip, port)
-            try:
-                tx_sock.sendto(pkt, (ip, 0))
-            except Exception:
-                pass
-            next_send += interval
-            delta = next_send - time.monotonic()
-            if delta > 0:
-                time.sleep(delta)
-        tx_done.set()
+        try:
+            for ip, port in tasks:
+                pkt = _build_syn(src_ip, ip, port)
+                try:
+                    tx_sock.sendto(pkt, (ip, 0))
+                except Exception:
+                    pass
+                next_send += interval
+                delta = next_send - time.monotonic()
+                if delta > 0:
+                    time.sleep(delta)
+        finally:
+            tx_done.set()  # always signal RX — even if TX crashes mid-run
 
     def _rx() -> None:
         deadline: Optional[float] = None
@@ -2333,6 +2367,8 @@ def _tcp_probe_sweep(targets: List[str], timeout_secs: float,
         found = threading.Event()
 
         def _try_port(port: int) -> None:
+            if found.is_set():  # host already confirmed alive — skip pending probes
+                return
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(probe_timeout)
@@ -2999,7 +3035,7 @@ def build_payload(
     return {
         "gravwell_agent": True,
         "agent_version": VERSION,
-        "collected_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "self": self_info,
         "neighbors": neighbors,
         "port_scan": scan_results,

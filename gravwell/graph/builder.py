@@ -934,6 +934,7 @@ def get_cytoscape_elements(
     G: nx.Graph,
     hidden_edge_ids: set[str] | None = None,
     custom_edges: list[dict] | None = None,
+    physical_links: list[dict] | None = None,
     subnet_labels: dict[str, str] | None = None,
     subnet_overrides: dict[str, str] | None = None,
     saved_positions: dict[str, tuple[float, float]] | None = None,
@@ -1389,6 +1390,37 @@ def get_cytoscape_elements(
                     "label": ce.get("label", ""),
                 },
                 "classes": "custom-edge",
+            })
+
+    # 11. LLDP/CDP-confirmed physical links — solid blue, labelled with port
+    if physical_links:
+        if not custom_edges:  # host_ips may not have been built yet
+            host_ips = set()
+            for node_id, attrs in G.nodes(data=True):
+                if attrs.get("node_type") == "host":
+                    host_ips.add(attrs.get("ip", node_id))
+                    host_ips.update(attrs.get("additional_ips", []))
+        for pl in physical_links:
+            src = pl.get("host_ip", "")
+            tgt = pl.get("peer_ip", "")
+            if not src or not tgt or src == tgt:
+                continue
+            if src not in host_ips or tgt not in host_ips:
+                continue
+            edge_id = f"lldp_{src}_{tgt}"
+            if hidden_edge_ids and edge_id in hidden_edge_ids:
+                continue
+            port_id = pl.get("port_id", "")
+            elements.append({
+                "data": {
+                    "id": edge_id,
+                    "source": src,
+                    "target": tgt,
+                    "edge_type": "lldp",
+                    "label": port_id,
+                    "port_id": port_id,
+                },
+                "classes": "lldp-edge",
             })
 
     return elements

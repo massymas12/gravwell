@@ -122,6 +122,7 @@ def register(app: dash.Dash) -> None:
             "custom": "Custom edge",
             "intra_subnet": "Intra-subnet link",
             "inter_subnet": "Inter-subnet link",
+            "lldp": "LLDP physical link",
         }.get(etype, "Connection")
 
         info = html.Div([

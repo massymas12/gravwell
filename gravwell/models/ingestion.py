@@ -6,7 +6,8 @@ from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 from gravwell.models.dataclasses import ParseResult, Host, Service, Vulnerability
 from gravwell.models.orm import (
-    HostORM, ServiceORM, VulnerabilityORM, CVERefORM, ScanFileORM, SubnetLabelORM
+    HostORM, ServiceORM, VulnerabilityORM, CVERefORM, ScanFileORM, SubnetLabelORM,
+    PhysicalLinkORM,
 )
 from gravwell.models.os_inference import infer_os
 
@@ -40,6 +41,8 @@ def ingest_parse_result(
     session.flush()
     if result.subnet_labels:
         _upsert_subnet_labels(session, result.subnet_labels)
+    if result.physical_links:
+        _upsert_physical_links(session, result.physical_links)
     _record_scan_file(session, result, checksum)
     # hn: → spotlight merges (not new hosts), nip: → device-inventory assets
     # that were imported without a local IP (these ARE real hosts, count them).
@@ -430,6 +433,26 @@ def _upsert_subnet_labels(session: Session, labels: dict[str, str]) -> None:
                 existing.label = label
         else:
             session.add(SubnetLabelORM(subnet_cidr=cidr, label=label))
+    session.flush()
+
+
+def _upsert_physical_links(session: Session, links: list[dict]) -> None:
+    """Upsert LLDP/CDP-confirmed physical connections."""
+    for link in links:
+        host_ip = link.get("host_ip", "")
+        peer_ip = link.get("peer_ip", "")
+        port_id = link.get("port_id", "")
+        link_type = link.get("link_type", "lldp")
+        if not host_ip or not peer_ip:
+            continue
+        existing = session.query(PhysicalLinkORM).filter_by(
+            host_ip=host_ip, peer_ip=peer_ip, port_id=port_id,
+        ).first()
+        if not existing:
+            session.add(PhysicalLinkORM(
+                host_ip=host_ip, peer_ip=peer_ip,
+                port_id=port_id, link_type=link_type,
+            ))
     session.flush()
 
 

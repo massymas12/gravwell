@@ -167,6 +167,19 @@ class CustomEdgeORM(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PhysicalLinkORM(Base):
+    """L2-confirmed physical connections discovered via LLDP or CDP."""
+    __tablename__ = "physical_links"
+    __table_args__ = (UniqueConstraint("host_ip", "peer_ip", "port_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    host_ip = Column(String(45), nullable=False)   # agent / end-host IP
+    peer_ip = Column(String(45), nullable=False)   # switch / peer IP
+    port_id = Column(String(64), default="")       # switch port (e.g. GigabitEthernet0/1)
+    link_type = Column(String(16), default="lldp") # "lldp" | "cdp"
+    discovered_at = Column(DateTime, default=datetime.utcnow)
+
+
 class HiddenEdgeORM(Base):
     """Auto-generated edges that the user has hidden/deleted."""
     __tablename__ = "hidden_edges"

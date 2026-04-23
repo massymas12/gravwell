@@ -1621,6 +1621,132 @@ def enrich_snmp(neighbors: List[dict], community: str = "public",
         list(ex.map(_do, neighbors))
 
 
+# ── LLDP / CDP passive sniff ─────────────────────────────────────────────────
+
+def _lldp_listen(timeout_secs: float = 15.0) -> List[dict]:
+    """Sniff LLDP frames to discover directly-connected switches (Linux + root only).
+
+    LLDP (IEEE 802.1AB) frames are sent by switches every 30 seconds to
+    multicast 01:80:C2:00:00:0E.  Each frame describes the sending switch:
+    system name, management IP, and — crucially — the port number the frame
+    arrived on, which is the switch port *our* machine is plugged into.
+
+    Returns one neighbor dict per switch:
+      source          "lldp"
+      ip              switch management IP (from Management Address TLV)
+      mac             switch source MAC (Ethernet header)
+      hostname        switch system name
+      lldp_port_id    switch port our host is on (e.g. GigabitEthernet0/1)
+      lldp_system_desc system description (OS / firmware string)
+      lldp_capabilities list of enabled capability strings
+
+    Silently returns [] on non-Linux, non-elevated, or socket failure.
+    """
+    if platform.system() != "Linux" or not _is_elevated():
+        return []
+
+    ETH_P_LLDP = 0x88CC
+
+    def _fmt_mac(b: bytes) -> str:
+        return ":".join(f"{x:02X}" for x in b)
+
+    def _parse_pdu(pdu: bytes) -> dict:
+        info: dict = {}
+        i = 0
+        while i + 2 <= len(pdu):
+            hdr = int.from_bytes(pdu[i:i + 2], "big")
+            tlv_type = (hdr >> 9) & 0x7F
+            tlv_len  = hdr & 0x1FF
+            i += 2
+            if tlv_type == 0:
+                break
+            if i + tlv_len > len(pdu):
+                break
+            val = pdu[i:i + tlv_len]
+            i += tlv_len
+
+            if tlv_type == 1 and tlv_len > 1:          # Chassis ID
+                subtype = val[0]
+                if subtype == 4 and tlv_len >= 7:       # MAC address
+                    info["chassis_mac"] = _fmt_mac(val[1:7])
+                elif subtype in (5, 7):                 # network addr / locally assigned
+                    info["chassis_id"] = val[1:].decode("ascii", errors="replace").strip()
+
+            elif tlv_type == 2 and tlv_len > 1:         # Port ID
+                subtype = val[0]
+                pid = val[1:]
+                if subtype in (1, 5, 7):                # interface alias/name/local
+                    info["port_id"] = pid.decode("ascii", errors="replace").strip()
+                elif subtype == 3 and len(pid) >= 6:    # MAC address
+                    info["port_id"] = _fmt_mac(pid[:6])
+
+            elif tlv_type == 5:                         # System Name
+                info["system_name"] = val.decode("utf-8", errors="replace").strip()
+
+            elif tlv_type == 6:                         # System Description
+                info["system_desc"] = val.decode("utf-8", errors="replace").strip()[:300]
+
+            elif tlv_type == 7 and tlv_len >= 4:        # System Capabilities
+                enabled = int.from_bytes(val[2:4], "big")
+                cap_names = ["Other", "Repeater", "Bridge", "WAP",
+                             "Router", "Phone", "DOCSIS", "Station"]
+                info["capabilities"] = [n for bit, n in enumerate(cap_names)
+                                        if enabled & (1 << bit)]
+
+            elif tlv_type == 8 and tlv_len > 2:         # Management Address
+                addr_len = val[0]
+                if addr_len >= 2 and len(val) > addr_len:
+                    addr_subtype = val[1]
+                    addr_bytes = val[2:1 + addr_len]
+                    if addr_subtype == 1 and len(addr_bytes) == 4:  # IPv4
+                        try:
+                            mgmt = str(ipaddress.IPv4Address(addr_bytes))
+                            if not mgmt.startswith("127."):
+                                info["mgmt_ip"] = mgmt
+                        except Exception:
+                            pass
+        return info
+
+    neighbors: List[dict] = []
+    seen: set = set()
+    try:
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,  # type: ignore[attr-defined]
+                             socket.htons(ETH_P_LLDP))
+        sock.settimeout(0.5)
+        deadline = time.monotonic() + timeout_secs
+        while time.monotonic() < deadline:
+            try:
+                frame, _ = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if len(frame) < 14 or frame[12:14] != b"\x88\xcc":
+                continue
+            src_mac = _fmt_mac(frame[6:12])
+            info = _parse_pdu(frame[14:])
+            ip = info.get("mgmt_ip", "")
+            if not ip or ip in seen:
+                continue
+            seen.add(ip)
+            entry: dict = {"ip": ip, "source": "lldp", "mac": src_mac}
+            if info.get("system_name"):
+                entry["hostname"] = info["system_name"]
+            if info.get("port_id"):
+                entry["lldp_port_id"] = info["port_id"]
+            if info.get("system_desc"):
+                entry["lldp_system_desc"] = info["system_desc"]
+            if info.get("capabilities"):
+                entry["lldp_capabilities"] = info["capabilities"]
+            neighbors.append(entry)
+        sock.close()
+    except Exception as exc:
+        _warn(f"LLDP sniff error: {exc}")
+    if neighbors:
+        _info(f"  LLDP: {len(neighbors)} switch(es) found")
+    return neighbors
+
+
 # ── Raw SYN scanner ──────────────────────────────────────────────────────────
 #
 # Linux/macOS + root only.  Crafts IP+TCP SYN packets via SOCK_RAW, fires them
@@ -2971,6 +3097,15 @@ Examples:
             neighbors.append(n)
             existing_ips.add(n["ip"])
 
+    # LLDP passive sniff — Linux + root only; reveals directly-connected switches
+    # and the specific switch port our machine is plugged into.
+    # Run early in passive discovery so the switch IP is known before the sweep.
+    _lldp_neighbors = _lldp_listen(timeout_secs=15.0) if not args.ot_mode else []
+    for n in _lldp_neighbors:
+        if n["ip"] not in existing_ips:
+            neighbors.append(n)
+            existing_ips.add(n["ip"])
+
     for n in collect_ssh_known_hosts():
         if n["ip"] not in existing_ips:
             neighbors.append(n)
@@ -3174,10 +3309,25 @@ Examples:
             n["hostname"] = rdns[n["ip"]]
 
     # 8. Build payload
+    # Build physical link records from LLDP neighbors — one record per
+    # (agent_ip, switch_ip) pair, labelled with the switch port we're on.
+    physical_links: List[dict] = []
+    for n in _lldp_neighbors:
+        if not n.get("lldp_port_id"):
+            continue
+        for agent_ip in (self_info.get("ips") or []):
+            physical_links.append({
+                "host_ip": agent_ip,
+                "peer_ip": n["ip"],
+                "port_id": n["lldp_port_id"],
+                "link_type": "lldp",
+            })
+
     meta = {
         "direct_networks": direct_nets,
         "routed_networks": routed_nets,
         "elevated": _is_elevated(),
+        "physical_links": physical_links,
     }
     payload = build_payload(self_info, neighbors, scan_results, meta=meta)
 

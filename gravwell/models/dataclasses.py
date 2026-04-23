@@ -50,3 +50,4 @@ class ParseResult:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     subnet_labels: dict[str, str] = field(default_factory=dict)  # cidr → label
+    physical_links: list[dict] = field(default_factory=list)     # LLDP/CDP confirmed links

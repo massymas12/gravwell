@@ -399,6 +399,25 @@ CYTOSCAPE_STYLESHEET = [
             "curve-style": "bezier",
         },
     },
+    # LLDP/CDP-confirmed physical links: solid blue, labelled with switch port
+    {
+        "selector": ".lldp-edge",
+        "style": {
+            "line-color": "#2E86C1",
+            "line-style": "solid",
+            "width": "3px",
+            "opacity": 0.95,
+            "target-arrow-shape": "none",
+            "source-arrow-shape": "none",
+            "curve-style": "bezier",
+            "label": "data(label)",
+            "font-size": "9px",
+            "color": "#85C1E9",
+            "text-background-color": "#0a1520",
+            "text-background-opacity": 0.85,
+            "text-background-padding": "2px",
+        },
+    },
 
     # -------------------------------------------------------------------------
     # Dense-subnet node scaling

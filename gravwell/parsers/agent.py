@@ -96,21 +96,45 @@ class AgentParser(BaseParser):
             if scan.get("mac"):
                 scan_macs[ip] = scan["mac"]
 
-        # ── 2. Neighbours (ARP / ping sweep) ─────────────────────────────────
+        # ── 2. Neighbours (ARP / ping sweep / LLDP / …) ──────────────────────
         for neighbor in (data.get("neighbors") or []):
             ip = neighbor.get("ip")
             if not ip or ip in host_map:
                 continue
             mac = neighbor.get("mac") or scan_macs.get(ip) or None
             hn = neighbor.get("hostname") or scan_hostnames.get(ip) or ""
+            source = neighbor.get("source", "")
+            tags = ["arp-discovered"]
+            if source == "lldp":
+                tags = ["lldp-switch"]
+            elif source == "cdp":
+                tags = ["cdp-switch"]
             h = Host(
                 ip=ip,
                 hostnames=[hn] if hn else [],
                 mac=mac,
-                tags=["arp-discovered"],
+                tags=tags,
             )
+            # Store LLDP enrichment fields as a banner on a virtual service so
+            # they survive into the DB without requiring schema changes.
+            if neighbor.get("lldp_system_desc") and not h.os_name:
+                h.os_name = neighbor["lldp_system_desc"][:120]
+            if neighbor.get("snmp_descr") and not h.os_name:
+                h.os_name = neighbor["snmp_descr"][:120]
             host_map[ip] = h
             result.hosts.append(h)
+
+        # ── 2b. Physical links from LLDP (stored under meta in the payload) ────
+        for link in (data.get("physical_links") or []):
+            host_ip = link.get("host_ip", "")
+            peer_ip = link.get("peer_ip", "")
+            if host_ip and peer_ip:
+                result.physical_links.append({
+                    "host_ip": host_ip,
+                    "peer_ip": peer_ip,
+                    "port_id": link.get("port_id", ""),
+                    "link_type": link.get("link_type", "lldp"),
+                })
 
         # ── 3. Merge port-scan → services (create host if scan-only) ─────────
         for scan in (data.get("port_scan") or []):

@@ -1850,37 +1850,101 @@ _OT_PORT_ROLES: Dict[int, str] = {
 }
 
 
-def _local_broadcast_addrs() -> List[str]:
-    """Return broadcast addresses to probe for OT discovery.
+def _local_iface_pairs() -> List[Tuple[str, str]]:
+    """Return (local_ip, broadcast_addr) for every non-loopback interface.
 
-    Always includes 255.255.255.255 (global limited broadcast, works on all
-    platforms with SO_BROADCAST).  Also derives per-subnet .255 addresses
-    from every non-loopback local IP so the packet reaches the correct
-    interface on multi-homed hosts and on Windows where the OS does not
-    route to "<broadcast>" reliably.
+    Binding a send socket to local_ip before sending forces the OS to route
+    the packet out the correct NIC.  On Windows an unbound socket may pick
+    a VPN adapter, loopback, or virtual interface and the packet never
+    reaches the physical LAN.
     """
-    addrs: List[str] = ["255.255.255.255"]
+    pairs: List[Tuple[str, str]] = []
+    seen: set = set()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ip = info[4][0]
-            if ip.startswith("127."):
+            if ip.startswith("127.") or ip == "0.0.0.0":
                 continue
-            # Derive the /24 subnet broadcast — sufficient for OT LANs
-            prefix = ip.rsplit(".", 1)[0]
-            bcast = prefix + ".255"
-            if bcast not in addrs:
-                addrs.append(bcast)
+            bcast = ip.rsplit(".", 1)[0] + ".255"
+            if ip not in seen:
+                seen.add(ip)
+                pairs.append((ip, bcast))
     except Exception:
         pass
-    return addrs
+    # Fallback: let the OS choose the interface (still better than nothing)
+    if not pairs:
+        pairs.append(("", "255.255.255.255"))
+    return pairs
+
+
+def _udp_broadcast(packet: bytes, port: int, recv_port: int,
+                   timeout: float, max_resp: int = 512) -> List[Tuple[str, bytes]]:
+    """Send *packet* as a UDP broadcast on every local interface and collect responses.
+
+    Uses a dedicated send socket per interface (bound to that interface's IP)
+    so Windows routes each packet out the correct NIC.  Responses are collected
+    on a shared receive socket bound to *recv_port* (SO_REUSEADDR).
+
+    Returns a list of (src_ip, data) tuples, one per responding host.
+    """
+    responses: List[Tuple[str, bytes]] = []
+    seen: set = set()
+
+    recv_sock: Optional[socket.socket] = None
+    try:
+        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            recv_sock.bind(("", recv_port))
+        except OSError:
+            recv_sock.bind(("", 0))   # port already in use — fall back to ephemeral
+
+        for local_ip, bcast in _local_iface_pairs():
+            s: Optional[socket.socket] = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                if local_ip:
+                    s.bind((local_ip, 0))
+                s.sendto(packet, (bcast, port))
+                _info(f"  → {bcast}:{port} (via {local_ip or 'any'})")
+            except Exception as exc:
+                _warn(f"  broadcast to {bcast}:{port} failed: {exc}")
+            finally:
+                if s:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+        recv_sock.settimeout(0.25)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, (src_ip, _) = recv_sock.recvfrom(max_resp)
+            except socket.timeout:
+                continue
+            if src_ip not in seen:
+                seen.add(src_ip)
+                responses.append((src_ip, data))
+    except Exception as exc:
+        _warn(f"UDP broadcast on port {port} failed: {exc}")
+    finally:
+        if recv_sock:
+            try:
+                recv_sock.close()
+            except Exception:
+                pass
+
+    return responses
 
 
 def _bacnet_whois(timeout: float = 3.0) -> List[dict]:
     """Send a BACnet Who-Is broadcast; collect I-Am responses.
 
-    Uses UDP broadcast — the standard mechanism for BACnet device discovery.
-    Sends to every local interface's subnet broadcast as well as 255.255.255.255
-    so the packet reaches BACnet devices on multi-homed hosts and Windows.
+    BACnet/IP uses UDP port 47808.  Sends from every local interface so the
+    packet is visible on the physical LAN regardless of Windows routing.
     Safe for all BACnet/IP devices (Honeywell, Siemens, Johnson Controls, etc.).
     """
     BACNET_PORT = 47808
@@ -1891,47 +1955,17 @@ def _bacnet_whois(timeout: float = 3.0) -> List[dict]:
         0x10, 0x08,               # APDU: Unconfirmed-REQ + Who-Is service
     ])
     found: List[dict] = []
-    seen: set = set()
-    sock: Optional[socket.socket] = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(timeout)
-        for bcast in _local_broadcast_addrs():
-            try:
-                sock.sendto(WHO_IS, (bcast, BACNET_PORT))
-            except Exception as exc:
-                _warn(f"BACnet Who-Is send to {bcast} failed: {exc}")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                data, (src_ip, _) = sock.recvfrom(512)
-            except socket.timeout:
-                break
-            if src_ip in seen:
-                continue
-            seen.add(src_ip)
-            entry: dict = {"ip": src_ip, "source": "bacnet-whois"}
-            # Parse device instance from I-Am APDU if present
-            # I-Am: BVLC(4) + NPDU(var) + APDU 0x10 0x00 + encoded object-id
-            try:
-                apdu_start = 6   # skip BVLC + minimal NPDU
-                if len(data) > apdu_start + 4 and data[apdu_start] == 0x10 and data[apdu_start + 1] == 0x00:
-                    # Object-id is a BACnet encoded 4-byte tag
-                    obj_bytes = data[apdu_start + 2: apdu_start + 6]
-                    instance = int.from_bytes(obj_bytes, "big") & 0x3FFFFF
-                    entry["bacnet_device_id"] = instance
-            except Exception:
-                pass
-            found.append(entry)
-    except Exception as exc:
-        _warn(f"BACnet Who-Is failed: {exc}")
-    finally:
-        if sock:
-            try:
-                sock.close()
-            except Exception:
-                pass
+    for src_ip, data in _udp_broadcast(WHO_IS, BACNET_PORT, BACNET_PORT, timeout, 512):
+        entry: dict = {"ip": src_ip, "source": "bacnet-whois"}
+        try:
+            apdu_start = 6   # skip BVLC + minimal NPDU
+            if len(data) > apdu_start + 4 and data[apdu_start] == 0x10 and data[apdu_start + 1] == 0x00:
+                obj_bytes = data[apdu_start + 2: apdu_start + 6]
+                instance = int.from_bytes(obj_bytes, "big") & 0x3FFFFF
+                entry["bacnet_device_id"] = instance
+        except Exception:
+            pass
+        found.append(entry)
     return found
 
 
@@ -1953,54 +1987,22 @@ def _enip_list_identity(timeout: float = 3.0) -> List[dict]:
         0x00, 0x00, 0x00, 0x00,              # Options
     ])
     found: List[dict] = []
-    seen: set = set()
-    sock: Optional[socket.socket] = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(timeout)
-        for bcast in _local_broadcast_addrs():
-            try:
-                sock.sendto(LIST_IDENTITY, (bcast, ENIP_PORT))
-            except Exception as exc:
-                _warn(f"EtherNet/IP List Identity send to {bcast} failed: {exc}")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                data, (src_ip, _) = sock.recvfrom(1024)
-            except socket.timeout:
-                break
-            if src_ip in seen:
-                continue
-            seen.add(src_ip)
-            entry: dict = {"ip": src_ip, "source": "enip-list-identity"}
-            # Parse List Identity response (command 0x0063, item type 0x000C)
-            try:
-                if len(data) >= 26 and data[0] == 0x63 and data[1] == 0x00:
-                    # Item count at offset 24, item type at 26
-                    if len(data) >= 28:
-                        # Product name: offset varies; vendor/device type at fixed offsets
-                        # Vendor ID at byte 36 (2 bytes LE), device type at 38, product name at 42+
-                        if len(data) > 42:
-                            vendor_id   = int.from_bytes(data[36:38], "little")
-                            device_type = int.from_bytes(data[38:40], "little")
-                            name_len = data[42] if len(data) > 43 else 0
-                            if name_len and len(data) >= 43 + name_len:
-                                product = data[43: 43 + name_len].decode("ascii", errors="replace").strip()
-                                entry["enip_product"] = product
-                            entry["enip_vendor_id"]   = vendor_id
-                            entry["enip_device_type"] = device_type
-            except Exception:
-                pass
-            found.append(entry)
-    except Exception as exc:
-        _warn(f"EtherNet/IP List Identity failed: {exc}")
-    finally:
-        if sock:
-            try:
-                sock.close()
-            except Exception:
-                pass
+    for src_ip, data in _udp_broadcast(LIST_IDENTITY, ENIP_PORT, ENIP_PORT, timeout, 1024):
+        entry: dict = {"ip": src_ip, "source": "enip-list-identity"}
+        try:
+            if len(data) >= 26 and data[0] == 0x63 and data[1] == 0x00:
+                if len(data) > 42:
+                    vendor_id   = int.from_bytes(data[36:38], "little")
+                    device_type = int.from_bytes(data[38:40], "little")
+                    name_len = data[42] if len(data) > 43 else 0
+                    if name_len and len(data) >= 43 + name_len:
+                        product = data[43: 43 + name_len].decode("ascii", errors="replace").strip()
+                        entry["enip_product"] = product
+                    entry["enip_vendor_id"]   = vendor_id
+                    entry["enip_device_type"] = device_type
+        except Exception:
+            pass
+        found.append(entry)
     return found
 
 

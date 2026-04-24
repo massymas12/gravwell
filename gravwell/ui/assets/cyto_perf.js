@@ -8,21 +8,20 @@
  * pixelRatio clamp   — 1.5× cap on HiDPI screens (~44 % less GPU fill).
  *
  * LOD collapsing     — below LOD_THRESHOLD zoom, non-hub host nodes and
- *                      intra-subnet edges are hidden; subnet/domain compound
- *                      boxes are also hidden so only hub nodes remain,
- *                      connected by inter-hub edges.
+ *                      intra-subnet edges are removed from the render pass
+ *                      (display:none) and subnet/domain compound boxes are
+ *                      hidden, leaving only hub nodes + inter-hub edges.
  */
 (function () {
     'use strict';
 
     var CONTAINER_ID    = 'network-graph';
     var MAX_PIXEL_RATIO = 1.5;
-    var LOD_THRESHOLD   = 0.6;   // zoom level below which subnets collapse
-    var LOD_DEBOUNCE_MS = 150;
+    var LOD_THRESHOLD   = 0.6;
+    var POLL_MS         = 300;  // zoom-poll interval (fallback + primary driver)
 
     var _cy        = null;
     var _lodActive = false;
-    var _lodTimer  = null;
 
     function gpuPromote(el) {
         el.style.willChange = 'transform';
@@ -30,16 +29,19 @@
     }
 
     // ── LOD ───────────────────────────────────────────────────────────────────
+    // Use display:'none' / display:'element' rather than hide()/show().
+    // display:none removes elements from the Cytoscape render pass entirely;
+    // hide() only sets visibility:hidden which still draws to the canvas.
 
     function enterLOD(cy) {
         if (_lodActive) return;
         _lodActive = true;
         cy.batch(function () {
-            cy.nodes('.host:not(.subnet-hub):not(.bridge-node)').hide();
-            cy.edges('.intra-subnet').hide();
-            // Hiding compound parents does NOT cascade to children in Cytoscape,
-            // so hub nodes stay visible while the box outlines disappear.
-            cy.nodes('.subnet-group, .domain-group').hide();
+            cy.nodes('.host:not(.subnet-hub):not(.bridge-node)').style('display', 'none');
+            cy.edges('.intra-subnet').style('display', 'none');
+            // Hiding the compound shells does not cascade to children in Cytoscape,
+            // so hub nodes stay visible while the box outlines vanish.
+            cy.nodes('.subnet-group, .domain-group').style('display', 'none');
         });
     }
 
@@ -47,24 +49,21 @@
         if (!_lodActive) return;
         _lodActive = false;
         cy.batch(function () {
-            cy.elements().show();
+            cy.elements().style('display', 'element');
         });
     }
 
-    function _onZoom() {
+    function _checkLOD() {
         if (!_cy) return;
-        clearTimeout(_lodTimer);
         var zoom = _cy.zoom();
-        _lodTimer = setTimeout(function () {
-            if (zoom < LOD_THRESHOLD) {
-                enterLOD(_cy);
-            } else {
-                exitLOD(_cy);
-            }
-        }, LOD_DEBOUNCE_MS);
+        if (zoom < LOD_THRESHOLD && !_lodActive) {
+            enterLOD(_cy);
+        } else if (zoom >= LOD_THRESHOLD && _lodActive) {
+            exitLOD(_cy);
+        }
     }
 
-    // ── Renderer perf options (best-effort — missing renderer is non-fatal) ──
+    // ── Renderer perf options (best-effort) ──────────────────────────────────
 
     function _applyRendererOptions(cy) {
         var r = cy.renderer && cy.renderer();
@@ -94,35 +93,36 @@
 
         var cy = cyreg.cy;
 
-        // Renderer options are best-effort; failure must not block LOD setup.
         _applyRendererOptions(cy);
-
         container.querySelectorAll('canvas').forEach(gpuPromote);
 
-        // Register zoom listener once per cy instance.
         if (_cy !== cy) {
             if (_cy) {
-                _cy.off('zoom', _onZoom);
+                _cy.off('zoom', _checkLOD);
                 _lodActive = false;
-                clearTimeout(_lodTimer);
             }
             _cy = cy;
-            cy.on('zoom', _onZoom);
+            // Event listener for responsiveness + polling interval as fallback
+            cy.on('zoom', _checkLOD);
         }
 
         return true;
     }
 
+    // Startup poll — waits for Cytoscape to mount
     var attempts = 0;
-    var timer = setInterval(function () {
-        if (patch() || attempts++ > 80) clearInterval(timer);
+    var initTimer = setInterval(function () {
+        if (patch() || attempts++ > 80) clearInterval(initTimer);
     }, 75);
 
+    // Ongoing poll — catches zoom changes even if the event doesn't fire
+    setInterval(_checkLOD, POLL_MS);
+
+    // Re-patch on Dash remounts
     var observer = new MutationObserver(function (mutations) {
         for (var i = 0; i < mutations.length; i++) {
             if (mutations[i].addedNodes.length) {
                 _lodActive = false;
-                clearTimeout(_lodTimer);
                 patch();
                 break;
             }

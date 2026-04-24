@@ -1290,7 +1290,25 @@ def get_cytoscape_elements(
             # by the compound subnet boxes they sit between.
             classes.append("bridge-node")
 
-        element_data: dict = {**attrs, "id": node_id, "label": label}
+        # Send only the fields Cytoscape needs for rendering and tap callbacks.
+        # The detail panel re-queries the DB on click — it does not use element data.
+        # Omitting services, open_ports, hostnames, tags, additional_ips, source_files,
+        # and vuln counts cuts the serialized payload by ~10x at large node counts.
+        element_data: dict = {
+            "id":         node_id,
+            "label":      label,
+            "node_type":  "host",
+            "ip":         attrs.get("ip", node_id),
+            "os_family":  attrs.get("os_family", "Unknown"),
+            "max_cvss":   attrs.get("max_cvss") or 0.0,
+            "vlan_id":    attrs.get("vlan_id"),
+            "is_dc":      attrs.get("is_dc"),
+            "is_legacy":  attrs.get("is_legacy"),
+            "host_roles": attrs.get("host_roles") or [],
+            "kev_count":  attrs.get("kev_count", 0),
+            "manual_role": attrs.get("manual_role"),
+            "status":     attrs.get("status"),
+        }
         if node_id not in multi_subnet_nodes:
             element_data["parent"] = f"sub_{host_subnets.get(node_id, 'unknown')}"
         elements.append({"data": element_data, "classes": " ".join(classes)})

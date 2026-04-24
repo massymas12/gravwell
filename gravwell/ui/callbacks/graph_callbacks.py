@@ -2,6 +2,7 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import json
+import os
 import re
 import time
 import dash
@@ -14,6 +15,27 @@ from gravwell.models.orm import HostORM, ServiceORM, VulnerabilityORM, \
     CustomEdgeORM, HiddenEdgeORM, SubnetLabelORM, HostRoleOverrideORM, \
     CVEEnrichmentORM, NodePositionORM, PhysicalLinkORM, VlanORM
 from gravwell.models.enrichment import exploit_label, resolve_vuln_name
+
+
+# Module-level graph cache: avoids rebuilding the full graph on every interval
+# tick when the DB hasn't changed.  Keyed on (db_path, mtime) so any import
+# or edit invalidates it automatically.  G is a copy so filter operations in
+# update_graph don't corrupt the cached instance.
+_graph_cache: dict = {}   # {db_path: {"mtime": float, "G": nx.Graph}}
+
+
+def _get_or_build_graph(db_path: str, session) -> "nx.Graph":
+    import copy
+    try:
+        mtime = os.path.getmtime(db_path)
+    except OSError:
+        mtime = 0.0
+    cached = _graph_cache.get(db_path)
+    if cached and cached["mtime"] == mtime:
+        return copy.deepcopy(cached["G"])
+    G = build_graph(session)
+    _graph_cache[db_path] = {"mtime": mtime, "G": G}
+    return copy.deepcopy(G)
 
 
 def register(app: dash.Dash) -> None:
@@ -42,7 +64,7 @@ def register(app: dash.Dash) -> None:
         db_path = current_app.config["GRAVWELL_DB_PATH"]
         try:
             with get_session(db_path) as session:
-                G = build_graph(session)
+                G = _get_or_build_graph(db_path, session)
                 hidden_edge_ids = {
                     r.edge_id for r in session.query(HiddenEdgeORM).all()
                 }
@@ -242,8 +264,17 @@ def register(app: dash.Dash) -> None:
             if prev_ids == new_ids:
                 return no_update, str(host_count), str(edge_count), no_update
 
-        return elements, str(host_count), str(edge_count), \
-               {"elements": elements}
+        # Store only id + position — the interval diff check needs ids, the
+        # focus-from-table fallback needs positions.  Full element data is not
+        # needed here and doubles browser memory at large node counts.
+        slim_store = {
+            "elements": [
+                {"data": {"id": el["data"]["id"]}, "position": el["position"]}
+                for el in elements
+                if "position" in el
+            ]
+        }
+        return elements, str(host_count), str(edge_count), slim_store
 
     @app.callback(
         Output("network-graph", "layout"),

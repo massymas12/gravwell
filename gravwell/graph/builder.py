@@ -821,23 +821,20 @@ def _compute_preset_positions(
         algo_cx, algo_cy = subnet_center.get(subnet, (0.0, 0.0))
 
         # Derive the effective hub centre:
-        # 1. Use saved hub position if present.
+        # 1. Use saved hub position if present — always trusted.  No drift
+        #    check on hubs: the user may have intentionally dragged a subnet
+        #    far from its algorithmic position to fix a bad initial layout,
+        #    and rejecting that drag causes the "snap-back" repel behaviour.
+        #    If a force-layout produces bad positions the user can Reset Layout.
         # 2. Otherwise use centroid of saved spoke positions if most are saved.
         # 3. Fall back to algorithmic centre.
-        # Natural radius of this subnet: half the estimated compound box size.
-        # Saved hub positions that drift further than 3× this are from a
-        # diverged force-layout run and get replaced with the algorithmic centre.
-        _nat_r = subnet_box.get(subnet, 200.0) / 2
-        _max_hub_drift = max(300.0, _nat_r * 3.0)
 
         cx, cy = algo_cx, algo_cy
         hub_from_saved = False
 
         if saved_positions and hub_id and hub_id in saved_positions:
-            sx, sy = saved_positions[hub_id]
-            if abs(sx - algo_cx) < _max_hub_drift and abs(sy - algo_cy) < _max_hub_drift:
-                cx, cy = sx, sy
-                hub_from_saved = True
+            cx, cy = saved_positions[hub_id]
+            hub_from_saved = True
         elif saved_positions:
             saved_spokes = [
                 saved_positions[ip]

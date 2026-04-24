@@ -8,9 +8,11 @@
  * pixelRatio clamp   — 1.5× cap on HiDPI screens (~44 % less GPU fill).
  *
  * LOD collapsing     — below LOD_THRESHOLD zoom, non-hub host nodes and
- *                      intra-subnet edges are removed from the render pass
- *                      (display:none) and subnet/domain compound boxes are
- *                      hidden, leaving only hub nodes + inter-hub edges.
+ *                      intra-subnet edges are hidden by adding the
+ *                      .lod-hidden class (which maps to display:none in the
+ *                      Python stylesheet).  Using addClass/removeClass rather
+ *                      than direct style() calls means the state survives
+ *                      Dash element prop updates.
  */
 (function () {
     'use strict';
@@ -18,7 +20,7 @@
     var CONTAINER_ID    = 'network-graph';
     var MAX_PIXEL_RATIO = 1.5;
     var LOD_THRESHOLD   = 0.6;
-    var POLL_MS         = 300;  // zoom-poll interval (fallback + primary driver)
+    var POLL_MS         = 300;
 
     var _cy        = null;
     var _lodActive = false;
@@ -29,19 +31,20 @@
     }
 
     // ── LOD ───────────────────────────────────────────────────────────────────
-    // Use display:'none' / display:'element' rather than hide()/show().
-    // display:none removes elements from the Cytoscape render pass entirely;
-    // hide() only sets visibility:hidden which still draws to the canvas.
+    // .lod-hidden { display: none } is declared in the Python stylesheet so
+    // Cytoscape owns the rule.  We only add/remove the class here.
 
     function enterLOD(cy) {
         if (_lodActive) return;
         _lodActive = true;
         cy.batch(function () {
-            cy.nodes('.host:not(.subnet-hub):not(.bridge-node)').style('display', 'none');
-            cy.edges('.intra-subnet').style('display', 'none');
-            // Hiding the compound shells does not cascade to children in Cytoscape,
-            // so hub nodes stay visible while the box outlines vanish.
-            cy.nodes('.subnet-group, .domain-group').style('display', 'none');
+            // Regular hosts that are not hubs or bridge nodes
+            cy.nodes('.host:not(.subnet-hub):not(.bridge-node)').addClass('lod-hidden');
+            // Intra-subnet spoke edges
+            cy.edges('.intra-subnet').addClass('lod-hidden');
+            // Compound box outlines (hiding parent does NOT cascade to children
+            // in Cytoscape, so hub nodes stay visible)
+            cy.nodes('.subnet-group, .domain-group').addClass('lod-hidden');
         });
     }
 
@@ -49,7 +52,7 @@
         if (!_lodActive) return;
         _lodActive = false;
         cy.batch(function () {
-            cy.elements().style('display', 'element');
+            cy.elements().removeClass('lod-hidden');
         });
     }
 
@@ -63,7 +66,7 @@
         }
     }
 
-    // ── Renderer perf options (best-effort) ──────────────────────────────────
+    // ── Renderer perf options ─────────────────────────────────────────────────
 
     function _applyRendererOptions(cy) {
         var r = cy.renderer && cy.renderer();
@@ -97,13 +100,12 @@
         container.querySelectorAll('canvas').forEach(gpuPromote);
 
         if (_cy !== cy) {
-            if (_cy) {
-                _cy.off('zoom', _checkLOD);
-                _lodActive = false;
-            }
-            _cy = cy;
-            // Event listener for responsiveness + polling interval as fallback
+            if (_cy) _cy.off('zoom', _checkLOD);
+            _cy        = cy;
+            _lodActive = false;
             cy.on('zoom', _checkLOD);
+            // Run an immediate check in case we're already zoomed out
+            _checkLOD();
         }
 
         return true;
@@ -115,16 +117,24 @@
         if (patch() || attempts++ > 80) clearInterval(initTimer);
     }, 75);
 
-    // Ongoing poll — catches zoom changes even if the event doesn't fire
+    // Ongoing zoom poll — fallback in case the zoom event misses a change
     setInterval(_checkLOD, POLL_MS);
 
-    // Re-patch on Dash remounts
+    // Only re-patch when the graph container itself is (re)mounted, not on
+    // every Dash DOM update.  This prevents _lodActive being reset on each
+    // callback response.
     var observer = new MutationObserver(function (mutations) {
         for (var i = 0; i < mutations.length; i++) {
-            if (mutations[i].addedNodes.length) {
-                _lodActive = false;
-                patch();
-                break;
+            var added = mutations[i].addedNodes;
+            for (var j = 0; j < added.length; j++) {
+                var n = added[j];
+                if (n.nodeType !== 1) continue;
+                if (n.id === CONTAINER_ID ||
+                    (n.querySelector && n.querySelector('#' + CONTAINER_ID))) {
+                    _lodActive = false;
+                    patch();
+                    return;
+                }
             }
         }
     });

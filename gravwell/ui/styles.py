@@ -527,6 +527,14 @@ CYTOSCAPE_STYLESHEET = [
     },
 
     # -------------------------------------------------------------------------
+    # LOD (Level of Detail) — hidden at low zoom via JS addClass
+    # -------------------------------------------------------------------------
+    {
+        "selector": ".lod-hidden",
+        "style": {"display": "none"},
+    },
+
+    # -------------------------------------------------------------------------
     # Bridge / multi-subnet nodes — placed last so severity/dense classes
     # cannot shrink them back down (later rules win in Cytoscape).
     # -------------------------------------------------------------------------

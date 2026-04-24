@@ -123,6 +123,9 @@ class VulnerabilityORM(Base):
     port = Column(Integer)
     description = Column(Text, default="")
     solution = Column(Text, default="")
+    source = Column(String(64), nullable=True)          # parser that produced this finding
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True, index=True)
 
     host = relationship("HostORM", back_populates="vulnerabilities")
     service = relationship("ServiceORM", back_populates="vulnerabilities")

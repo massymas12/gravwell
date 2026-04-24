@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import os
+from datetime import datetime
 from pathlib import Path
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
@@ -34,7 +35,7 @@ def ingest_parse_result(
     _BATCH = 100
     total_vulns = 0
     for i, host in enumerate(result.hosts):
-        _upsert_host(session, host)
+        _upsert_host(session, host, result.parser_name)
         total_vulns += len(host.vulnerabilities)
         if (i + 1) % _BATCH == 0:
             session.expunge_all()
@@ -69,7 +70,7 @@ def _infer_domain_tags(hostnames: list[str]) -> list[str]:
     return sorted(domains)
 
 
-def _upsert_host(session: Session, host: Host) -> HostORM | None:
+def _upsert_host(session: Session, host: Host, parser_name: str = "") -> HostORM | None:
     # ── Hostname-only synthetic-key records ───────────────────────────────────
     # "hn:<hostname>" — CrowdStrike Spotlight console exports (no IP).
     #   Merge vulns into existing host by hostname; skip if no match (device
@@ -91,7 +92,10 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
             }
             for vuln in host.vulnerabilities:
                 svc_id = _find_service_id(session, existing.id, vuln.port)
-                _upsert_vulnerability(session, existing.id, svc_id, vuln, existing_vuln_map)
+                _upsert_vulnerability(session, existing.id, svc_id, vuln,
+                                      existing_vuln_map, source=parser_name)
+            _delete_stale_source_vulns(session, parser_name, host.vulnerabilities,
+                                       existing_vuln_map)
             _update_host_aggregates(session, existing)
             return existing
 
@@ -226,7 +230,10 @@ def _upsert_host(session: Session, host: Host) -> HostORM | None:
     }
     for vuln in host.vulnerabilities:
         svc_id = svc_id_map.get(vuln.port)
-        _upsert_vulnerability(session, orm.id, svc_id, vuln, existing_vuln_map)
+        _upsert_vulnerability(session, orm.id, svc_id, vuln, existing_vuln_map,
+                              source=parser_name)
+    _delete_stale_source_vulns(session, parser_name, host.vulnerabilities,
+                               existing_vuln_map)
 
     _update_host_aggregates(session, orm)
     return orm
@@ -337,16 +344,44 @@ def _upsert_service(
     return orm
 
 
+def _delete_stale_source_vulns(
+    session: Session,
+    source: str,
+    incoming_vulns: list[Vulnerability],
+    existing_map: dict[tuple, "VulnerabilityORM"],
+) -> None:
+    """Delete vulns attributed to *source* that are absent from the new import.
+
+    When a scanner re-scans a host and a previously reported vulnerability is
+    no longer present (patched, service removed, etc.) that finding should be
+    removed rather than left stale.  Only vulns whose ``source`` matches the
+    current parser are touched — findings from other scanners are untouched.
+    Vulns with source=NULL (imported before this feature existed) are ignored.
+    """
+    if not source:
+        return
+    incoming_keys = {
+        (v.plugin_id or f"name:{v.name[:64]}", v.port)
+        for v in incoming_vulns
+    }
+    for (plugin_id, port), orm_v in list(existing_map.items()):
+        if orm_v.source == source and (plugin_id, port) not in incoming_keys:
+            session.delete(orm_v)
+            del existing_map[(plugin_id, port)]
+
+
 def _upsert_vulnerability(
     session: Session,
     host_id: int,
     service_id: int | None,
     vuln: Vulnerability,
     existing_map: dict[tuple, "VulnerabilityORM"] | None = None,
+    source: str = "",
 ) -> VulnerabilityORM:
     # Key: host + plugin_id + port (or name as fallback)
     plugin_key = vuln.plugin_id or f"name:{vuln.name[:64]}"
     key = (plugin_key, vuln.port)
+    now = datetime.utcnow()
 
     # Use pre-loaded map when available (avoids per-vuln SELECT query).
     if existing_map is not None:
@@ -363,6 +398,9 @@ def _upsert_vulnerability(
         # found by enum4linux) keeps the finding accurate
         if vuln.description and vuln.description != existing.description:
             existing.description = vuln.description
+        existing.last_seen = now
+        if source and not existing.source:
+            existing.source = source
         return existing
 
     orm = VulnerabilityORM(
@@ -375,6 +413,9 @@ def _upsert_vulnerability(
         port=vuln.port,
         description=vuln.description,
         solution=vuln.solution,
+        source=source or None,
+        first_seen=now,
+        last_seen=now,
     )
     session.add(orm)
     session.flush()

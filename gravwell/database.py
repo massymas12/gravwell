@@ -14,6 +14,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_cvss     ON vulnerabilities (cvss_score DESC)",
     "CREATE INDEX IF NOT EXISTS ix_services_host_id         ON services (host_id)",
     "CREATE INDEX IF NOT EXISTS ix_cve_refs_vuln_id         ON cve_refs (vuln_id)",
+    "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_last_seen ON vulnerabilities (last_seen)",
+    "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_source    ON vulnerabilities (source)",
 ]
 
 # Column migrations — safe to run on existing DBs (SQLite ignores duplicate columns)
@@ -25,6 +27,9 @@ _COLUMN_MIGRATIONS = [
     "ALTER TABLE cve_enrichment ADD COLUMN nvd_cvss REAL DEFAULT NULL",
     "ALTER TABLE cve_enrichment ADD COLUMN nvd_description TEXT DEFAULT NULL",
     "ALTER TABLE hosts ADD COLUMN os_confidence INTEGER DEFAULT 0",
+    "ALTER TABLE vulnerabilities ADD COLUMN source TEXT DEFAULT NULL",
+    "ALTER TABLE vulnerabilities ADD COLUMN first_seen TEXT DEFAULT NULL",
+    "ALTER TABLE vulnerabilities ADD COLUMN last_seen  TEXT DEFAULT NULL",
 ]
 
 # MEK for CLI context (set via set_cli_mek; web context uses current_app.config)

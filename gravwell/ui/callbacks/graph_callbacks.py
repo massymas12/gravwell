@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 import dash
 from dash import Input, Output, State, no_update, html
 from flask import current_app
@@ -473,6 +474,14 @@ def register(app: dash.Dash) -> None:
                 ).all():
                     enrich_map[rec.cve_id.upper()] = rec
 
+            _now = datetime.utcnow()
+
+            def _age(dt) -> str:
+                if dt is None:
+                    return ""
+                days = (_now - dt).days
+                return "today" if days == 0 else f"{days}d"
+
             vuln_rows = [
                 {
                     "severity": v.severity.upper(),
@@ -482,6 +491,8 @@ def register(app: dash.Dash) -> None:
                     "name": resolve_vuln_name(v.name, [r.cve_id for r in v.cve_refs], enrich_map, 70),
                     "port": str(v.port or ""),
                     "cves": ", ".join(r.cve_id for r in v.cve_refs)[:40],
+                    "source": (v.source or "").replace("_", " "),
+                    "age": _age(v.last_seen),
                 }
                 for v in vulns
             ]
@@ -533,6 +544,8 @@ def register(app: dash.Dash) -> None:
                     {"name": "Name",    "id": "name"},
                     {"name": "Port",    "id": "port"},
                     {"name": "CVEs",    "id": "cves"},
+                    {"name": "Source",  "id": "source"},
+                    {"name": "Age",     "id": "age"},
                 ],
                 style_table={"maxHeight": "200px", "overflowY": "auto"},
                 style_cell={"fontSize": "11px", "padding": "2px 5px",

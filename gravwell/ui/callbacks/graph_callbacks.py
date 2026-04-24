@@ -18,24 +18,26 @@ from gravwell.models.enrichment import exploit_label, resolve_vuln_name
 
 
 # Module-level graph cache: avoids rebuilding the full graph on every interval
-# tick when the DB hasn't changed.  Keyed on (db_path, mtime) so any import
-# or edit invalidates it automatically.  G is a copy so filter operations in
-# update_graph don't corrupt the cached instance.
+# tick when the DB hasn't changed.  Keyed on db_path→{mtime, G}; any import
+# or edit changes the file mtime and invalidates the cache automatically.
+# G is returned directly (no copy) — filter operations use a non-destructive
+# subgraph view so the cached instance is never mutated by filtering.
+# Role override mutations are idempotent and safe to apply to the cached G
+# because any override change triggers a DB write → mtime change → cache miss.
 _graph_cache: dict = {}   # {db_path: {"mtime": float, "G": nx.Graph}}
 
 
 def _get_or_build_graph(db_path: str, session) -> "nx.Graph":
-    import copy
     try:
         mtime = os.path.getmtime(db_path)
     except OSError:
         mtime = 0.0
     cached = _graph_cache.get(db_path)
     if cached and cached["mtime"] == mtime:
-        return copy.deepcopy(cached["G"])
+        return cached["G"]
     G = build_graph(session)
     _graph_cache[db_path] = {"mtime": mtime, "G": G}
-    return copy.deepcopy(G)
+    return G
 
 
 def register(app: dash.Dash) -> None:
@@ -222,7 +224,9 @@ def register(app: dash.Dash) -> None:
                         nodes_to_remove.append(node_id)
                         continue
 
-        G.remove_nodes_from(nodes_to_remove)
+        if nodes_to_remove:
+            keep = [n for n in G.nodes() if n not in set(nodes_to_remove)]
+            G = G.subgraph(keep)
 
         elements = get_cytoscape_elements(G,
                                           hidden_edge_ids=hidden_edge_ids,
@@ -246,20 +250,19 @@ def register(app: dash.Dash) -> None:
         edge_count = G.number_of_edges()
 
         # On interval ticks only: skip the element update if graph structure
-        # is unchanged (same node + edge IDs).  This prevents a blank-flash
-        # each minute and stops positions resetting mid-drag.
+        # is unchanged.  Compare only positioned element IDs — the slim store
+        # only holds elements that have positions, so compare new_ids the same way.
         from dash import ctx
         if ctx.triggered_id == "refresh-interval" and current_graph_data:
-            prev_els = current_graph_data.get("elements", [])
             prev_ids = {
                 el["data"]["id"]
-                for el in prev_els
+                for el in current_graph_data.get("elements", [])
                 if "data" in el and "id" in el.get("data", {})
             }
             new_ids = {
                 el["data"]["id"]
                 for el in elements
-                if "data" in el and "id" in el.get("data", {})
+                if "position" in el and "data" in el and "id" in el.get("data", {})
             }
             if prev_ids == new_ids:
                 return no_update, str(host_count), str(edge_count), no_update

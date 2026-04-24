@@ -5,6 +5,12 @@ Supports the standard FortiOS text config format produced by:
   ``sys.conf`` backup files.
 
 Extracts one Host per interface that has an IP address configured.
+
+Also extracts VLAN membership:
+  - Sub-interfaces with ``set vlanid X`` produce VlanORM entries (the alias
+    or interface name is used as the VLAN name)
+  - The sub-interface IP is recorded as a direct HostVlanORM entry (no MAC
+    needed — the FortiGate is the L3 gateway for that VLAN)
 """
 from __future__ import annotations
 import re
@@ -23,24 +29,13 @@ _RE_VERSION = re.compile(
     re.IGNORECASE,
 )
 
-# FortiOS config block structure
-#   config system interface
-#       edit "port1"
-#           set ip 192.168.1.1 255.255.255.0
-#           set allowaccess ping https ssh snmp http telnet
-#       next
-#   end
-_RE_IFACE_EDIT = re.compile(r'^\s*edit\s+"?([^"\n]+)"?', re.IGNORECASE)
-_RE_IFACE_IP   = re.compile(
-    r'^\s*set\s+ip\s+([\d.]+)\s+([\d.]+)', re.IGNORECASE
-)
-_RE_ALLOWACCESS = re.compile(r'^\s*set\s+allowaccess\s+(.+)$', re.IGNORECASE)
-_RE_STATUS_DOWN = re.compile(r'^\s*set\s+status\s+down\b', re.IGNORECASE)
-
-# Management interface section uses different keys
-_RE_MGMT_IP = re.compile(
-    r'^\s*set\s+ip\s+([\d.]+)(?:\s+([\d.]+))?', re.IGNORECASE
-)
+_RE_IFACE_EDIT   = re.compile(r'^\s*edit\s+"?([^"\n]+)"?', re.IGNORECASE)
+_RE_IFACE_IP     = re.compile(r'^\s*set\s+ip\s+([\d.]+)\s+([\d.]+)', re.IGNORECASE)
+_RE_ALLOWACCESS  = re.compile(r'^\s*set\s+allowaccess\s+(.+)$', re.IGNORECASE)
+_RE_STATUS_DOWN  = re.compile(r'^\s*set\s+status\s+down\b', re.IGNORECASE)
+_RE_VLANID       = re.compile(r'^\s*set\s+vlanid\s+(\d+)', re.IGNORECASE)
+_RE_ALIAS        = re.compile(r'^\s*set\s+alias\s+"?([^"\n]+)"?', re.IGNORECASE)
+_RE_MGMT_IP      = re.compile(r'^\s*set\s+ip\s+([\d.]+)(?:\s+([\d.]+))?', re.IGNORECASE)
 
 
 class FortinetParser(BaseParser):
@@ -49,10 +44,8 @@ class FortinetParser(BaseParser):
     @classmethod
     def can_parse(cls, filepath: Path) -> bool:
         head = cls._read_head(filepath, 1024)
-        # FortiOS config files always have "config system global" or header comment
         if re.search(r'config\s+system\s+global', head, re.IGNORECASE):
             return True
-        # Common header line in backup files
         if re.search(r'#config-version=FG|#build=|FGVM|FortiGate', head, re.IGNORECASE):
             return True
         return False
@@ -67,21 +60,21 @@ class FortinetParser(BaseParser):
             result.errors.append(f"File read error: {e}")
             return result
 
-        hosts = cls._parse_config(text, filepath.name)
+        hosts, vlans, vlan_fdb = cls._parse_config(text, filepath.name)
         if not hosts:
-            result.warnings.append(
-                "No interface IP addresses found in FortiOS config"
-            )
+            result.warnings.append("No interface IP addresses found in FortiOS config")
         result.hosts = hosts
+        result.vlans = vlans
+        result.vlan_fdb = vlan_fdb
         return result
 
     @classmethod
-    def _parse_config(cls, text: str, source: str) -> list[Host]:
-        # Device hostname
+    def _parse_config(
+        cls, text: str, source: str
+    ) -> tuple[list[Host], list[dict], list[dict]]:
         hm = _RE_HOSTNAME.search(text)
         device_name = hm.group(1).strip() if hm else None
 
-        # FortiOS version from header comment
         vm = re.search(r'#config-version=FG[^-]*-(\d+\.\d+)', text)
         if not vm:
             vm = re.search(r'version\s*=\s*(\d+\.\d+)', text)
@@ -89,20 +82,23 @@ class FortinetParser(BaseParser):
         os_name = f"Fortinet FortiOS {version}".strip()
 
         hosts: list[Host] = []
+        # vlan_id → (vlan_name, svi_ip) from sub-interfaces
+        vlan_svi: dict[int, tuple[str, str]] = {}
 
-        # ── Parse interface blocks ─────────────────────────────────────────
-        # Find the "config system interface" block
         in_interface_section = False
-        depth = 0                    # config nesting level
+        depth = 0
         in_edit = False
         iface_name: str = ''
         iface_ip: str | None = None
         iface_mask: str | None = None
         allowaccess: list[str] = []
         iface_down = False
+        iface_vlanid: int | None = None
+        iface_alias: str = ''
 
         def _flush():
-            nonlocal iface_ip, iface_mask, iface_name, allowaccess, iface_down
+            nonlocal iface_ip, iface_mask, iface_name, allowaccess
+            nonlocal iface_down, iface_vlanid, iface_alias
             if iface_ip and not iface_down:
                 svcs = _allowaccess_to_services(allowaccess)
                 hosts.append(_make_host(
@@ -110,14 +106,18 @@ class FortinetParser(BaseParser):
                     device_name=device_name, os_name=os_name,
                     services=svcs, source=source,
                 ))
+                if iface_vlanid is not None:
+                    vlan_name = iface_alias or iface_name
+                    vlan_svi[iface_vlanid] = (vlan_name, iface_ip)
             iface_ip = iface_mask = None
             allowaccess = []
             iface_down = False
+            iface_vlanid = None
+            iface_alias = ''
 
         for line in text.splitlines():
             stripped = line.strip()
 
-            # Track entry into "config system interface"
             if re.match(r'^config\s+system\s+interface\b', stripped, re.IGNORECASE):
                 in_interface_section = True
                 depth = 1
@@ -161,8 +161,16 @@ class FortinetParser(BaseParser):
                         continue
                     if _RE_STATUS_DOWN.match(line):
                         iface_down = True
+                        continue
+                    vid_m = _RE_VLANID.match(line)
+                    if vid_m:
+                        iface_vlanid = int(vid_m.group(1))
+                        continue
+                    alias_m = _RE_ALIAS.match(line)
+                    if alias_m:
+                        iface_alias = alias_m.group(1).strip().strip('"')
 
-        # ── Parse management interface (config system management / ha mgmt) ──
+        # Management interface
         mgmt_block_m = re.search(
             r'^config\s+system\s+(?:management|admin)\b.*?^end',
             text, re.IGNORECASE | re.MULTILINE | re.DOTALL,
@@ -183,11 +191,21 @@ class FortinetParser(BaseParser):
                         services=svcs, source=source,
                     ))
 
-        return hosts
+        # Build VLAN output
+        switch_ip = hosts[0].ip if hosts else None
+        vlans: list[dict] = []
+        vlan_fdb: list[dict] = []
+        if switch_ip and vlan_svi:
+            for vid, (vlan_name, svi_ip) in vlan_svi.items():
+                vlans.append({"switch_ip": switch_ip, "vlan_id": vid,
+                              "vlan_name": vlan_name})
+                vlan_fdb.append({"switch_ip": switch_ip, "vlan_id": vid,
+                                 "host_ip": svi_ip})
+
+        return hosts, vlans, vlan_fdb
 
 
 def _allowaccess_to_services(allowaccess: list[str]) -> list[Service]:
-    """Convert FortiOS allowaccess tokens to Service objects."""
     _MAP = {
         'ssh':    Service(port=22,  protocol='tcp', state='open',
                           service_name='ssh',   product='FortiOS SSH'),
@@ -205,7 +223,6 @@ def _allowaccess_to_services(allowaccess: list[str]) -> list[Service]:
         svc = _MAP.get(token)
         if svc:
             svcs.append(svc)
-    # Default: always include HTTPS if nothing specified
     if not svcs:
         svcs.append(_MAP['https'])
     return svcs

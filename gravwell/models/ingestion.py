@@ -529,29 +529,51 @@ def _upsert_vlans(session: Session, vlans: list[dict], vlan_fdb: list[dict]) -> 
         if h.mac
     }
 
-    # Upsert FDB entries, resolving MAC → IP where possible
+    # Upsert FDB entries, resolving MAC → IP where possible.
+    # Entries from config parsers (SVI / IRB / VLANIF) supply host_ip directly
+    # with no MAC; a synthetic host_mac is used to satisfy the uniqueness constraint.
     for entry in vlan_fdb:
         switch_ip = entry.get("switch_ip", "")
         vlan_id = entry.get("vlan_id")
         mac = (entry.get("mac") or "").lower()
-        if not switch_ip or vlan_id is None or not mac:
+        host_ip_direct = entry.get("host_ip")   # direct IP from config parsing
+        if not switch_ip or vlan_id is None:
             continue
-        host_ip = mac_to_ip.get(mac)
+        if not mac and not host_ip_direct:
+            continue
         vlan_name = vlan_name_map.get(vlan_id, f"VLAN {vlan_id}")
-        existing = session.query(HostVlanORM).filter_by(
-            host_mac=mac, vlan_id=vlan_id
-        ).first()
-        if existing:
-            if host_ip:
-                existing.host_ip = host_ip
-            existing.vlan_name = vlan_name
-            existing.switch_ip = switch_ip
+        if not mac and host_ip_direct:
+            # SVI / IRB / VLANIF entry — no MAC available, IP is known directly
+            synthetic_mac = f"svi:{host_ip_direct}"
+            existing = session.query(HostVlanORM).filter_by(
+                host_mac=synthetic_mac, vlan_id=vlan_id
+            ).first()
+            if existing:
+                existing.vlan_name = vlan_name
+                existing.switch_ip = switch_ip
+            else:
+                session.add(HostVlanORM(
+                    host_mac=synthetic_mac,
+                    host_ip=host_ip_direct,
+                    vlan_id=vlan_id, vlan_name=vlan_name,
+                    switch_ip=switch_ip,
+                ))
         else:
-            session.add(HostVlanORM(
-                host_mac=mac, host_ip=host_ip,
-                vlan_id=vlan_id, vlan_name=vlan_name,
-                switch_ip=switch_ip,
-            ))
+            host_ip = mac_to_ip.get(mac)
+            existing = session.query(HostVlanORM).filter_by(
+                host_mac=mac, vlan_id=vlan_id
+            ).first()
+            if existing:
+                if host_ip:
+                    existing.host_ip = host_ip
+                existing.vlan_name = vlan_name
+                existing.switch_ip = switch_ip
+            else:
+                session.add(HostVlanORM(
+                    host_mac=mac, host_ip=host_ip,
+                    vlan_id=vlan_id, vlan_name=vlan_name,
+                    switch_ip=switch_ip,
+                ))
     session.flush()
 
 

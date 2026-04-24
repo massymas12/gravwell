@@ -308,16 +308,22 @@ CYTOSCAPE_STYLESHEET = [
         "style": {
             "width": "1px",
             "line-color": "#444",
-            "curve-style": "bezier",
+            # straight is much cheaper than bezier — no control-point math per frame.
+            # Edges that need curves (inter-subnet, bridge, lldp, etc.) override below.
+            "curve-style": "straight",
             "opacity": 0.5,
         },
     },
-    # Intra-subnet spoke: thin grey
+    # Intra-subnet spoke: thin grey, haystack style.
+    # haystack is Cytoscape's fastest edge renderer — straight lines with no
+    # per-frame bezier math, no arrows, no labels (all fine for spoke edges).
+    # With 9k+ spokes this is the single biggest pan/drag performance win.
     {
         "selector": ".intra-subnet",
         "style": {
             "line-color": "#566573",
             "line-style": "solid",
+            "curve-style": "haystack",
             "width": "1px",
             "opacity": 0.6,
         },
@@ -510,10 +516,11 @@ CYTOSCAPE_STYLESHEET = [
         "selector": "node.host.dense-subnet.severity-high",
         "style": {"width": "21px", "height": "21px"},
     },
-    # Spoke edges inside dense subnets: very faint so they don't dominate visually
+    # Spoke edges inside dense subnets: very faint, haystack for max performance
     {
         "selector": ".intra-subnet.dense-intra",
         "style": {
+            "curve-style": "haystack",
             "opacity": 0.25,
             "width": "0.5px",
         },

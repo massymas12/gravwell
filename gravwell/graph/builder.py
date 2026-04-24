@@ -1124,6 +1124,8 @@ def get_cytoscape_elements(
         else:
             subnet_hub[subnet] = ips[0]
 
+    hub_ids = set(subnet_hub.values())
+
     # 4. Determine domain grouping: assign each subnet to the majority domain
     #    of its member hosts (>= 50% must share the same domain tag).
     _DOMAIN_PALETTE = [
@@ -1212,7 +1214,7 @@ def get_cytoscape_elements(
                 "parent": f"sub_{subnet}",
                 "border_color": border,
             },
-            "classes": "virtual-switch",
+            "classes": "virtual-switch subnet-hub",
         })
 
     # 6. Host nodes
@@ -1310,6 +1312,10 @@ def get_cytoscape_elements(
             "manual_role": attrs.get("manual_role"),
             "status":     attrs.get("status"),
         }
+        if node_id in hub_ids:
+            classes.append("subnet-hub")
+            element_data["is_hub"] = True
+
         if node_id not in multi_subnet_nodes:
             element_data["parent"] = f"sub_{host_subnets.get(node_id, 'unknown')}"
         elements.append({"data": element_data, "classes": " ".join(classes)})

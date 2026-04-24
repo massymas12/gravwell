@@ -1,18 +1,6 @@
 /**
- * Runtime performance patches for the Cytoscape graph.
- *
- * textureOnViewport  — pan/zoom renders to a cached bitmap.
- * hideEdgesOnViewport — suppresses edge rendering during pan/zoom.
- * motionBlur         — subtle trail masking lower effective framerates.
- * GPU compositing    — translateZ(0) promotes canvases to GPU layers.
- * pixelRatio clamp   — 1.5× cap on HiDPI screens (~44 % less GPU fill).
- *
- * LOD collapsing     — below LOD_THRESHOLD zoom, non-hub host nodes and
- *                      intra-subnet edges are hidden by adding the
- *                      .lod-hidden class (which maps to display:none in the
- *                      Python stylesheet).  Using addClass/removeClass rather
- *                      than direct style() calls means the state survives
- *                      Dash element prop updates.
+ * Runtime performance + LOD patches — DIAGNOSTIC BUILD
+ * Open browser DevTools → Console tab and share the output.
  */
 (function () {
     'use strict';
@@ -22,37 +10,74 @@
     var LOD_THRESHOLD   = 0.6;
     var POLL_MS         = 300;
 
-    var _cy        = null;
-    var _lodActive = false;
+    var _cy           = null;
+    var _lodActive    = false;
+    var _fullSnapshot = null;
+    var _diagnosed    = false;   // only log once
 
     function gpuPromote(el) {
         el.style.willChange = 'transform';
         el.style.transform  = 'translateZ(0)';
     }
 
-    // ── LOD ───────────────────────────────────────────────────────────────────
-    // .lod-hidden { display: none } is declared in the Python stylesheet so
-    // Cytoscape owns the rule.  We only add/remove the class here.
+    function _sortForAdd(jsons) {
+        var nodes = jsons.filter(function (e) { return e.group === 'nodes'; });
+        var edges = jsons.filter(function (e) { return e.group === 'edges'; });
+        var byId  = {};
+        nodes.forEach(function (n) { byId[n.data.id] = n; });
+        var sorted = [];
+        var seen   = {};
+        function visit(n) {
+            if (seen[n.data.id]) return;
+            if (n.data.parent && byId[n.data.parent]) visit(byId[n.data.parent]);
+            sorted.push(n);
+            seen[n.data.id] = true;
+        }
+        nodes.forEach(visit);
+        return sorted.concat(edges);
+    }
 
     function enterLOD(cy) {
         if (_lodActive) return;
-        _lodActive = true;
+        console.log('[LOD] entering LOD — zoom:', cy.zoom().toFixed(3));
+        _lodActive    = true;
+        _fullSnapshot = _sortForAdd(cy.elements().jsons());
+
+        var hubIds = {};
+        cy.nodes('.subnet-hub, .bridge-node').forEach(function (n) { hubIds[n.id()] = true; });
+
+        var collapsed = [];
+        cy.nodes('.subnet-hub, .bridge-node').forEach(function (n) {
+            var j = n.json();
+            var d = Object.assign({}, j.data);
+            delete d.parent;
+            collapsed.push({ group: 'nodes', data: d, classes: j.classes, position: j.position });
+        });
+        cy.edges().forEach(function (e) {
+            if (hubIds[e.data('source')] && hubIds[e.data('target')]) {
+                collapsed.push(e.json());
+            }
+        });
+
+        console.log('[LOD] full elements:', _fullSnapshot.length,
+                    '| collapsed:', collapsed.length,
+                    '| hubs:', Object.keys(hubIds).length);
+
         cy.batch(function () {
-            // Regular hosts that are not hubs or bridge nodes
-            cy.nodes('.host:not(.subnet-hub):not(.bridge-node)').addClass('lod-hidden');
-            // Intra-subnet spoke edges
-            cy.edges('.intra-subnet').addClass('lod-hidden');
-            // Compound box outlines (hiding parent does NOT cascade to children
-            // in Cytoscape, so hub nodes stay visible)
-            cy.nodes('.subnet-group, .domain-group').addClass('lod-hidden');
+            cy.elements().remove();
+            if (collapsed.length) cy.add(collapsed);
         });
     }
 
     function exitLOD(cy) {
-        if (!_lodActive) return;
-        _lodActive = false;
+        if (!_lodActive || !_fullSnapshot) return;
+        console.log('[LOD] exiting LOD — zoom:', cy.zoom().toFixed(3));
+        _lodActive    = false;
+        var snap      = _fullSnapshot;
+        _fullSnapshot = null;
         cy.batch(function () {
-            cy.elements().removeClass('lod-hidden');
+            cy.elements().remove();
+            cy.add(snap);
         });
     }
 
@@ -66,8 +91,6 @@
         }
     }
 
-    // ── Renderer perf options ─────────────────────────────────────────────────
-
     function _applyRendererOptions(cy) {
         var r = cy.renderer && cy.renderer();
         if (!r || !r.options) return;
@@ -75,7 +98,6 @@
         r.options.hideEdgesOnViewport = true;
         r.options.motionBlur          = true;
         r.options.motionBlurOpacity   = 0.15;
-
         var deviceRatio = window.devicePixelRatio || 1;
         if (deviceRatio > MAX_PIXEL_RATIO) {
             r.options.pixelRatio = MAX_PIXEL_RATIO;
@@ -83,46 +105,64 @@
         }
     }
 
-    // ── Main patch ────────────────────────────────────────────────────────────
-
     function patch() {
         var container = document.getElementById(CONTAINER_ID);
-        if (!container) return false;
+        if (!container) {
+            if (!_diagnosed) console.log('[LOD] container #' + CONTAINER_ID + ' not found in DOM');
+            return false;
+        }
 
         gpuPromote(container);
 
         var cyreg = container._cyreg;
-        if (!cyreg || !cyreg.cy) return false;
+        if (!cyreg || !cyreg.cy) {
+            if (!_diagnosed) {
+                _diagnosed = true;
+                console.log('[LOD] container found but _cyreg missing.',
+                            'Keys on container:', Object.keys(container).filter(function(k){
+                                return k.startsWith('_') || k.startsWith('cy');
+                            }).join(', ') || '(none)');
+            }
+            return false;
+        }
 
         var cy = cyreg.cy;
+
+        if (!_diagnosed) {
+            _diagnosed = true;
+            console.log('[LOD] cy instance found. zoom:', cy.zoom().toFixed(3),
+                        '| elements:', cy.elements().length,
+                        '| subnet-hub nodes:', cy.nodes('.subnet-hub').length,
+                        '| LOD threshold:', LOD_THRESHOLD);
+        }
 
         _applyRendererOptions(cy);
         container.querySelectorAll('canvas').forEach(gpuPromote);
 
         if (_cy !== cy) {
             if (_cy) _cy.off('zoom', _checkLOD);
-            _cy        = cy;
-            _lodActive = false;
+            _cy           = cy;
+            _lodActive    = false;
+            _fullSnapshot = null;
             cy.on('zoom', _checkLOD);
-            // Run an immediate check in case we're already zoomed out
             _checkLOD();
         }
 
         return true;
     }
 
-    // Startup poll — waits for Cytoscape to mount
     var attempts = 0;
     var initTimer = setInterval(function () {
-        if (patch() || attempts++ > 80) clearInterval(initTimer);
+        if (patch() || attempts++ > 80) {
+            if (attempts > 80 && !_cy) {
+                console.log('[LOD] gave up after 80 attempts — cy never found');
+            }
+            clearInterval(initTimer);
+        }
     }, 75);
 
-    // Ongoing zoom poll — fallback in case the zoom event misses a change
     setInterval(_checkLOD, POLL_MS);
 
-    // Only re-patch when the graph container itself is (re)mounted, not on
-    // every Dash DOM update.  This prevents _lodActive being reset on each
-    // callback response.
     var observer = new MutationObserver(function (mutations) {
         for (var i = 0; i < mutations.length; i++) {
             var added = mutations[i].addedNodes;
@@ -131,7 +171,9 @@
                 if (n.nodeType !== 1) continue;
                 if (n.id === CONTAINER_ID ||
                     (n.querySelector && n.querySelector('#' + CONTAINER_ID))) {
-                    _lodActive = false;
+                    _lodActive    = false;
+                    _fullSnapshot = null;
+                    _diagnosed    = false;
                     patch();
                     return;
                 }

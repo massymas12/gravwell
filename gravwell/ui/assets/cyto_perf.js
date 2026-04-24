@@ -1,30 +1,23 @@
 /**
  * Runtime performance patches for the Cytoscape graph.
  *
- * textureOnViewport  — pan/zoom renders to a cached bitmap; only redraws from
- *                      scratch when motion stops.  Biggest single win for lag.
- *
- * hideEdgesOnViewport — suppresses edge rendering entirely during pan/zoom.
- *
- * motionBlur         — subtle trail that masks lower effective framerates.
- *
- * GPU compositing    — translateZ(0) promotes each canvas to a dedicated GPU
- *                      layer so pan/zoom is pure compositor blitting.
- *
- * pixelRatio clamp   — clamp to 1.5× on HiDPI screens (~44 % less GPU fill).
+ * textureOnViewport  — pan/zoom renders to a cached bitmap.
+ * hideEdgesOnViewport — suppresses edge rendering during pan/zoom.
+ * motionBlur         — subtle trail masking lower effective framerates.
+ * GPU compositing    — translateZ(0) promotes canvases to GPU layers.
+ * pixelRatio clamp   — 1.5× cap on HiDPI screens (~44 % less GPU fill).
  *
  * LOD collapsing     — below LOD_THRESHOLD zoom, non-hub host nodes and
  *                      intra-subnet edges are hidden; subnet/domain compound
- *                      boxes are also hidden so only hub nodes remain visible,
- *                      connected by inter-hub edges.  Above the threshold
- *                      everything is restored.
+ *                      boxes are also hidden so only hub nodes remain,
+ *                      connected by inter-hub edges.
  */
 (function () {
     'use strict';
 
     var CONTAINER_ID    = 'network-graph';
     var MAX_PIXEL_RATIO = 1.5;
-    var LOD_THRESHOLD   = 0.35;
+    var LOD_THRESHOLD   = 0.6;   // zoom level below which subnets collapse
     var LOD_DEBOUNCE_MS = 150;
 
     var _cy        = null;
@@ -42,12 +35,10 @@
         if (_lodActive) return;
         _lodActive = true;
         cy.batch(function () {
-            // Hide spoke nodes (all hosts that are not the subnet hub or bridge)
             cy.nodes('.host:not(.subnet-hub):not(.bridge-node)').hide();
-            // Hide intra-subnet spoke edges
             cy.edges('.intra-subnet').hide();
-            // Hide compound shells — in Cytoscape hiding a compound parent does
-            // NOT cascade to its children, so hub nodes stay visible.
+            // Hiding compound parents does NOT cascade to children in Cytoscape,
+            // so hub nodes stay visible while the box outlines disappear.
             cy.nodes('.subnet-group, .domain-group').hide();
         });
     }
@@ -73,6 +64,23 @@
         }, LOD_DEBOUNCE_MS);
     }
 
+    // ── Renderer perf options (best-effort — missing renderer is non-fatal) ──
+
+    function _applyRendererOptions(cy) {
+        var r = cy.renderer && cy.renderer();
+        if (!r || !r.options) return;
+        r.options.textureOnViewport   = true;
+        r.options.hideEdgesOnViewport = true;
+        r.options.motionBlur          = true;
+        r.options.motionBlurOpacity   = 0.15;
+
+        var deviceRatio = window.devicePixelRatio || 1;
+        if (deviceRatio > MAX_PIXEL_RATIO) {
+            r.options.pixelRatio = MAX_PIXEL_RATIO;
+            try { cy.resize(); } catch (_) {}
+        }
+    }
+
     // ── Main patch ────────────────────────────────────────────────────────────
 
     function patch() {
@@ -85,27 +93,18 @@
         if (!cyreg || !cyreg.cy) return false;
 
         var cy = cyreg.cy;
-        var r  = cy.renderer && cy.renderer();
-        if (!r || !r.options) return false;
 
-        r.options.textureOnViewport   = true;
-        r.options.hideEdgesOnViewport = true;
-        r.options.motionBlur          = true;
-        r.options.motionBlurOpacity   = 0.15;
-
-        var deviceRatio = window.devicePixelRatio || 1;
-        if (deviceRatio > MAX_PIXEL_RATIO) {
-            r.options.pixelRatio = MAX_PIXEL_RATIO;
-            try { cy.resize(); } catch (_) {}
-        }
+        // Renderer options are best-effort; failure must not block LOD setup.
+        _applyRendererOptions(cy);
 
         container.querySelectorAll('canvas').forEach(gpuPromote);
 
-        // Register zoom listener once per cy instance
+        // Register zoom listener once per cy instance.
         if (_cy !== cy) {
             if (_cy) {
                 _cy.off('zoom', _onZoom);
                 _lodActive = false;
+                clearTimeout(_lodTimer);
             }
             _cy = cy;
             cy.on('zoom', _onZoom);
@@ -123,6 +122,7 @@
         for (var i = 0; i < mutations.length; i++) {
             if (mutations[i].addedNodes.length) {
                 _lodActive = false;
+                clearTimeout(_lodTimer);
                 patch();
                 break;
             }

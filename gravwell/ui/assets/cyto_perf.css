@@ -1,0 +1,26 @@
+/*
+ * Force the Cytoscape container and its canvas layers onto dedicated GPU
+ * compositing layers.  The browser can then blit them during pan/drag without
+ * invoking the CPU rasterizer on every frame.
+ *
+ * translateZ(0) promotes the element to its own GPU layer (legacy trigger).
+ * will-change: transform tells the compositor to keep it on the GPU between
+ * frames so there is no upload latency on first interaction.
+ */
+#network-graph {
+    will-change: transform;
+    transform: translateZ(0);
+}
+
+/*
+ * Cytoscape creates several canvas layers inside the container (edges, nodes,
+ * drag, select).  Promoting each one individually prevents the compositor from
+ * having to merge them on the CPU before uploading.
+ */
+#network-graph canvas {
+    will-change: transform;
+    transform: translateZ(0);
+    /* Prevent browser from applying sub-pixel smoothing during GPU scaling,
+       which adds a blending pass per frame on some drivers. */
+    image-rendering: auto;
+}

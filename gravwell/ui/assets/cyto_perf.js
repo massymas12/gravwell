@@ -1,58 +1,85 @@
 /**
- * Patches the Cytoscape renderer after it mounts to enable viewport-level
- * performance options that dash-cytoscape 1.0.2 doesn't expose as props.
+ * Runtime performance patches for the Cytoscape graph.
  *
- * textureOnViewport  — during pan/zoom, render the graph to a bitmap and
- *                      just move/scale the texture.  Redraws from scratch only
- *                      after movement stops.  Eliminates the per-frame element
- *                      re-render that causes drag/pan lag on large graphs.
+ * dash-cytoscape 1.0.2 does not expose Cytoscape.js renderer options as React
+ * props, so we set them directly on the renderer object after mount.
  *
- * hideEdgesOnViewport — hide all edges during pan/zoom (only nodes move).
- *                       Cuts render work roughly in half on edge-heavy graphs.
+ * textureOnViewport  — pan/zoom renders to a cached bitmap; only redraws from
+ *                      scratch when motion stops.  Biggest single win for lag.
  *
- * motionBlur         — subtle trailing effect that makes motion feel smooth
- *                      even at lower effective framerates.
+ * hideEdgesOnViewport — suppresses edge rendering entirely during pan/zoom.
+ *                       Cuts per-frame work roughly in half on edge-heavy maps.
+ *
+ * motionBlur         — subtle trail that masks lower effective framerates.
+ *
+ * GPU compositing    — translateZ(0) on each canvas element promotes it to a
+ *                      dedicated GPU layer so the compositor can blit without
+ *                      CPU rasterisation every frame.
+ *
+ * pixelRatio clamp   — on HiDPI / Retina screens Cytoscape renders at 2× by
+ *                      default (4× the pixels).  Clamping to 1.5 cuts GPU
+ *                      fill cost by ~44 % with minimal visible quality loss.
  */
 (function () {
-    var CONTAINER_ID = 'network-graph';
+    'use strict';
+
+    var CONTAINER_ID  = 'network-graph';
+    var MAX_PIXEL_RATIO = 1.5;   // clamp; raise to 2 if you want full retina
+
+    function gpuPromote(el) {
+        el.style.willChange = 'transform';
+        el.style.transform  = 'translateZ(0)';
+    }
 
     function patch() {
-        var el = document.getElementById(CONTAINER_ID);
-        if (!el) return false;
+        var container = document.getElementById(CONTAINER_ID);
+        if (!container) return false;
 
-        // Cytoscape.js stores the cy instance in _cyreg on the container element.
-        var cyreg = el._cyreg;
+        // Promote container itself immediately — canvases may not exist yet
+        gpuPromote(container);
+
+        // Cytoscape stores the instance in _cyreg on the container element
+        var cyreg = container._cyreg;
         if (!cyreg || !cyreg.cy) return false;
 
         var cy = cyreg.cy;
         var r  = cy.renderer && cy.renderer();
         if (!r || !r.options) return false;
 
+        // ── Renderer options ─────────────────────────────────────────────
         r.options.textureOnViewport   = true;
         r.options.hideEdgesOnViewport = true;
         r.options.motionBlur          = true;
         r.options.motionBlurOpacity   = 0.15;
 
+        // ── Pixel-ratio clamp ────────────────────────────────────────────
+        // Cytoscape reads pixelRatio from r.options at canvas resize time.
+        // Calling cy.resize() after setting it re-initialises the canvases.
+        var deviceRatio = window.devicePixelRatio || 1;
+        if (deviceRatio > MAX_PIXEL_RATIO) {
+            r.options.pixelRatio = MAX_PIXEL_RATIO;
+            try { cy.resize(); } catch (_) {}
+        }
+
+        // ── GPU-promote every canvas layer ───────────────────────────────
+        // Cytoscape creates 3-4 <canvas> elements (edges, nodes, drag, select).
+        // Each gets its own compositor layer so pan/zoom is pure GPU blitting.
+        container.querySelectorAll('canvas').forEach(gpuPromote);
+
         return true;
     }
 
-    // Cytoscape is mounted asynchronously by React/Dash.
-    // Poll briefly until the instance is available, then stop.
+    // Poll until the Cytoscape instance is ready (React mounts async)
     var attempts = 0;
     var timer = setInterval(function () {
-        if (patch() || attempts++ > 60) {   // give up after ~6 s
-            clearInterval(timer);
-        }
-    }, 100);
+        if (patch() || attempts++ > 80) clearInterval(timer);
+    }, 75);
 
-    // Re-apply whenever Dash replaces the element subtree (e.g. layout switch).
-    // Using MutationObserver is cheap — no polling overhead after initial setup.
-    var observer = new MutationObserver(function () {
-        patch();
+    // Re-apply if Dash ever remounts the component (e.g. layout switch)
+    var observer = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+            if (mutations[i].addedNodes.length) { patch(); break; }
+        }
     });
-    document.addEventListener('DOMContentLoaded', function () {
-        var root = document.getElementById('network-graph') || document.body;
-        observer.observe(root.parentNode || document.body,
-                         { childList: true, subtree: false });
-    });
+    observer.observe(document.body, { childList: true, subtree: true });
 })();

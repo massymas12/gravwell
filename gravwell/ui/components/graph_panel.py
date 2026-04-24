@@ -149,17 +149,6 @@ def create_graph_panel() -> html.Div:
                 autoRefreshLayout=False,
                 minZoom=0.05,
                 maxZoom=6,
-                # Performance hints for large maps (9k+ nodes):
-                # textureOnViewport — render to a flat texture while panning/
-                #   zooming instead of re-drawing every node; makes pan smooth.
-                # hideEdgesOnViewport — skip edge drawing during pan/zoom;
-                #   edges are redrawn once the viewport stops moving.
-                # pixelRatio — force 1:1 pixel ratio; HiDPI screens otherwise
-                #   render at 2-4× the pixel count for no visible benefit at
-                #   the zoom levels used for large network maps.
-                textureOnViewport=True,
-                hideEdgesOnViewport=True,
-                pixelRatio=1,
             ),
             _create_legend(),
         ],

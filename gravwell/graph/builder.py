@@ -560,10 +560,11 @@ def _compute_preset_positions(
       - The "preset" layout uses them directly (zero overlap guaranteed).
       - Cose-bilkent with randomize:false uses them as warm-start positions.
     """
-    _GAP = 25         # gap between subnet box edges
-    _GROUP_GAP = 180  # vertical gap between depth bands
-    _PAD = 40         # internal padding allowance (stylesheet padding + label)
-    _MAX_COLS = 8     # max columns in a subnet grid
+    _GAP = 50          # gap between adjacent subnet box edges
+    _GROUP_GAP = 280   # vertical gap between depth bands
+    _PAD = 70          # internal padding: Cytoscape compound padding + label row
+    _DOMAIN_PAD = 80   # extra margin each side for domain compound node border
+    _MAX_COLS = 6      # max columns in a subnet grid (wider boxes → fewer cols)
 
     def _node_sz(n_hosts: int) -> int:
         if n_hosts > 30:
@@ -675,7 +676,7 @@ def _compute_preset_positions(
         return centers, total_w, total_h
 
     # ── Domain-depth layout ───────────────────────────────────────────────────
-    _DOMAIN_GAP = 120
+    _DOMAIN_GAP = 250
 
     domain_to_subs: dict[str, list[str]] = {}
     for sn, dom in (subnet_domain or {}).items():
@@ -708,7 +709,10 @@ def _compute_preset_positions(
                 default=120.0,
             )
             col_ws.append(cw)
-        return sum(col_ws) + _GAP * max(0, ncols - 1)
+        # Add _DOMAIN_PAD on each side to account for Cytoscape's compound node
+        # border rendering — without this, adjacent domain boxes overlap visually
+        # even though their subnet centers are correctly spaced.
+        return sum(col_ws) + _GAP * max(0, ncols - 1) + 2 * _DOMAIN_PAD
 
     dom_own_w: dict[str, float] = {d: _dom_own_width(d) for d in domain_to_subs}
 
@@ -790,7 +794,7 @@ def _compute_preset_positions(
         for dom in depth_to_doms[dep]:
             x_alloc = alloc_x.get(dom, 0.0)
             w_alloc = alloc_w.get(dom, dom_own_w[dom])
-            x_start = x_alloc + (w_alloc - dom_own_w[dom]) / 2
+            x_start = x_alloc + (w_alloc - dom_own_w[dom]) / 2 + _DOMAIN_PAD
             centers, _, _ = _place_subnet_grid(domain_to_subs[dom], x_start, y_start)
             subnet_center.update(centers)
 

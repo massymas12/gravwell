@@ -461,7 +461,9 @@ def serve(ctx, port, host_addr, debug, tls, cert, tls_key, http_port):
         import sys as _sys, traceback as _tb
         _orig_unraisable = _sys.unraisablehook
         def _quiet_unraisable(u):
-            if isinstance(u.exc_value, OSError) and "makefile" in "".join(_tb.format_tb(u.exc_tb)):
+            # exc_tb was renamed to exc_traceback in Python 3.14
+            tb = getattr(u, 'exc_traceback', getattr(u, 'exc_tb', None))
+            if isinstance(u.exc_value, OSError) and "makefile" in "".join(_tb.format_tb(tb)):
                 return
             _orig_unraisable(u)
         _sys.unraisablehook = _quiet_unraisable

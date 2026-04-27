@@ -675,8 +675,20 @@ _CY_GLOBAL_JS = """
         var _dragTimer = null;
         cy.on('dragfree', function(evt) {
           if (!evt.target.isNode || !evt.target.isNode()) return;
-          if (evt.target.data('node_type') !== 'host') return;
-          evt.target.lock();
+          var target   = evt.target;
+          var nodeType = target.data('node_type');
+          if (nodeType === 'host') {
+            /* Single host drag — lock it so the layout can't pull it back. */
+            target.lock();
+          } else if (target.isParent && target.isParent()) {
+            /* Compound box drag — lock all host descendants so their new
+               positions are preserved until the autosave round-trips to DB. */
+            target.descendants().forEach(function(child) {
+              if (child.data('node_type') === 'host') child.lock();
+            });
+          } else {
+            return;
+          }
           clearTimeout(_dragTimer);
           _dragTimer = setTimeout(function() {
             var inp = document.getElementById('_autosave-positions-trigger');

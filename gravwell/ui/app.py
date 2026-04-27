@@ -645,71 +645,105 @@ _CY_GLOBAL_JS = """
       if (cy !== _lastCy) {
         _lastCy = cy;
 
-        /* ── Make hub nodes inside compounds non-grabbable ──────────
-           When the user clicks the subnet compound box near a switch /
-           hub node, Cytoscape normally grabs the child (topmost element).
-           Ungrabifying hub nodes that have a parent lets the click fall
-           through to the compound, so dragging the box works reliably.
-           Bridge nodes (no parent) stay grabbable so they can be
-           repositioned freely.  Re-applied after every layout stop in
-           case new elements were added. */
-        function _fixHubGrab() {
-          cy.nodes('.subnet-hub, .bridge-node').forEach(function(n) {
-            if (n.data('parent')) { n.ungrabify(); }
-            else                  { n.grabify();   }
-          });
-        }
-        _fixHubGrab();
-        cy.on('layoutstop', _fixHubGrab);
-        cy.on('add', function(evt) {
+        /* ── Drag handling: save positions + redirect hub drags ─────
+           Strategy:
+           - Record every node's position on 'grab' so we know the delta.
+           - On 'dragfree' for a hub node that has a parent compound:
+               snap the hub back to where it was, then shift ALL children
+               of its compound by the same delta (batch → no visual flash).
+               This makes dragging a hub feel like dragging its subnet box.
+           - On 'dragfree' for a compound or a standalone host: lock the
+               affected host nodes for 800 ms so the still-running layout
+               animation can't overwrite their positions before the autosave
+               round-trip to the DB completes, then unlock.
+           - No ungrabify — ungrabify causes Cytoscape to fall through the
+               ungrabified node to whatever is next in z-order, which is
+               often an unrelated element, making "random" nodes move. */
+        var _grabPos   = {};
+        var _dragTimer = null;
+        var _locked    = [];
+
+        cy.on('grab', 'node', function(evt) {
           var n = evt.target;
-          if (!n.isNode || !n.isNode()) return;
-          if ((n.hasClass('subnet-hub') || n.hasClass('bridge-node')) && n.data('parent')) {
-            n.ungrabify();
-          }
+          _grabPos[n.id()] = { x: n.position().x, y: n.position().y };
         });
 
-        /* ── Auto-save positions 800 ms after a node drag ends ── */
-        /* Lock the node immediately so the force-directed layout cannot
-           pull it back while it is still animating. */
-        var _dragTimer  = null;
-        var _lockedNodes = [];
+        function _fireAutosave() {
+          var inp = document.getElementById('_autosave-positions-trigger');
+          if (!inp) return;
+          var setter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value');
+          if (setter && setter.set) {
+            setter.set.call(inp, 'drag_' + Date.now());
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }
+
+        function _unlockAll() {
+          _locked.forEach(function(n) { try { n.unlock(); } catch(_) {} });
+          _locked = [];
+        }
+
+        function _scheduleAutosave() {
+          clearTimeout(_dragTimer);
+          _dragTimer = setTimeout(function() {
+            _fireAutosave();
+            _unlockAll();
+          }, 800);
+        }
+
         cy.on('dragfree', function(evt) {
           if (!evt.target.isNode || !evt.target.isNode()) return;
+          _unlockAll(); // always clear locks from any previous drag first
+
           var target   = evt.target;
           var nodeType = target.data('node_type');
-          /* Temporarily lock moved nodes so the still-animating layout
-             can't pull them back during the 800 ms autosave window.
-             They are unlocked again once the autosave trigger fires. */
-          if (nodeType === 'host') {
-            target.lock();
-            _lockedNodes = [target];
-          } else if (target.isParent && target.isParent()) {
-            _lockedNodes = [];
+          var parentId = target.data('parent');
+
+          /* Hub-inside-compound dragged: redirect to compound movement. */
+          if (nodeType === 'host' && parentId) {
+            var orig = _grabPos[target.id()];
+            if (!orig) return;
+            var dx = target.position().x - orig.x;
+            var dy = target.position().y - orig.y;
+            if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return; // just a click, not a drag
+            var parent = target.parent();
+            if (!parent || !parent.length) return;
+            /* Batch: snap hub back then shift all children so the net
+               effect equals moving the whole subnet box by (dx, dy). */
+            cy.batch(function() {
+              target.position({ x: orig.x, y: orig.y });
+              parent.descendants().forEach(function(child) {
+                var p = child.position();
+                child.position({ x: p.x + dx, y: p.y + dy });
+                if (child.data('node_type') === 'host') {
+                  child.lock();
+                  _locked.push(child);
+                }
+              });
+            });
+            _scheduleAutosave();
+            return;
+          }
+
+          /* Compound box dragged directly. */
+          if (target.isParent && target.isParent()) {
             target.descendants().forEach(function(child) {
               if (child.data('node_type') === 'host') {
                 child.lock();
-                _lockedNodes.push(child);
+                _locked.push(child);
               }
             });
-          } else {
+            _scheduleAutosave();
             return;
           }
-          clearTimeout(_dragTimer);
-          _dragTimer = setTimeout(function() {
-            /* Fire the autosave trigger first, then unlock. */
-            var inp = document.getElementById('_autosave-positions-trigger');
-            if (inp) {
-              var setter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value');
-              if (setter && setter.set) {
-                setter.set.call(inp, 'drag_' + Date.now());
-                inp.dispatchEvent(new Event('input', {bubbles: true}));
-              }
-            }
-            _lockedNodes.forEach(function(n) { try { n.unlock(); } catch(_) {} });
-            _lockedNodes = [];
-          }, 800);
+
+          /* Standalone host (bridge node or root-level host). */
+          if (nodeType === 'host') {
+            target.lock();
+            _locked = [target];
+            _scheduleAutosave();
+          }
         });
 
         cy.on('cxttap', function(evt) {

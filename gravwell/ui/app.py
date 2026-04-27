@@ -672,25 +672,32 @@ _CY_GLOBAL_JS = """
         /* ── Auto-save positions 800 ms after a node drag ends ── */
         /* Lock the node immediately so the force-directed layout cannot
            pull it back while it is still animating. */
-        var _dragTimer = null;
+        var _dragTimer  = null;
+        var _lockedNodes = [];
         cy.on('dragfree', function(evt) {
           if (!evt.target.isNode || !evt.target.isNode()) return;
           var target   = evt.target;
           var nodeType = target.data('node_type');
+          /* Temporarily lock moved nodes so the still-animating layout
+             can't pull them back during the 800 ms autosave window.
+             They are unlocked again once the autosave trigger fires. */
           if (nodeType === 'host') {
-            /* Single host drag — lock it so the layout can't pull it back. */
             target.lock();
+            _lockedNodes = [target];
           } else if (target.isParent && target.isParent()) {
-            /* Compound box drag — lock all host descendants so their new
-               positions are preserved until the autosave round-trips to DB. */
+            _lockedNodes = [];
             target.descendants().forEach(function(child) {
-              if (child.data('node_type') === 'host') child.lock();
+              if (child.data('node_type') === 'host') {
+                child.lock();
+                _lockedNodes.push(child);
+              }
             });
           } else {
             return;
           }
           clearTimeout(_dragTimer);
           _dragTimer = setTimeout(function() {
+            /* Fire the autosave trigger first, then unlock. */
             var inp = document.getElementById('_autosave-positions-trigger');
             if (inp) {
               var setter = Object.getOwnPropertyDescriptor(
@@ -700,6 +707,8 @@ _CY_GLOBAL_JS = """
                 inp.dispatchEvent(new Event('input', {bubbles: true}));
               }
             }
+            _lockedNodes.forEach(function(n) { try { n.unlock(); } catch(_) {} });
+            _lockedNodes = [];
           }, 800);
         });
 

@@ -712,8 +712,12 @@ _CY_GLOBAL_JS = """
           var nodeType = target.data('node_type');
           var parentId = target.data('parent');
 
-          /* Hub-inside-compound dragged: redirect to compound movement. */
-          if (nodeType === 'host' && parentId) {
+          /* Hub-inside-compound dragged: redirect to compound movement.
+             Only applies to actual hub nodes (.subnet-hub / .bridge-node
+             with a parent) — regular host nodes inside a subnet should
+             still be draggable individually within the compound. */
+          if (nodeType === 'host' && parentId &&
+              (target.hasClass('subnet-hub') || target.hasClass('bridge-node'))) {
             var orig = _grabPos[target.id()];
             if (!orig) return;
             var dx = target.position().x - orig.x;

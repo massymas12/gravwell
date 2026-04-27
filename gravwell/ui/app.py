@@ -350,9 +350,9 @@ _CYTO_PERF_JS = """
   /* LOD collapses subnets to hub-only at low zoom.
      cy.remove() is used (not display:none) so Cytoscape stops
      hit-testing hidden elements on every mousemove event. */
-  var LOD_THRESHOLD   = 0.25;  // zoom below which subnets collapse
+  var LOD_THRESHOLD   = 0.4;   // zoom below which subnets collapse
   var MAX_PIXEL_RATIO = 1.5;
-  var POLL_MS         = 300;
+  var POLL_MS         = 200;
 
   var _cy              = null;
   var _lodActive       = false;
@@ -385,6 +385,10 @@ _CYTO_PERF_JS = """
     var hubIds = {};
     cy.nodes('.subnet-hub, .bridge-node').forEach(function(n){ hubIds[n.id()] = true; });
     if (Object.keys(hubIds).length === 0) return;
+
+    /* Stop any running layout before snapshotting so the snapshot
+       captures settled positions, not mid-animation ones. */
+    try { cy.stop(); } catch(_) {}
 
     _lodActive    = true;
     _fullSnapshot = _sortForAdd(cy.elements().jsons());
@@ -674,11 +678,12 @@ _CY_GLOBAL_JS = """
         cy.on('grab', 'node', function(evt) {
           var n = evt.target;
           _grabPos[n.id()] = { x: n.position().x, y: n.position().y };
-          /* Stop the layout animation the moment a drag starts so the
-             layout cannot snap the node back.  No lock() needed — once
-             the layout is stopped there is nothing left to fight the
-             user's drag. */
-          if (_layoutRunning) { try { cy.stop(); } catch(_) {} }
+          /* Stop the layout unconditionally — layoutstart fires before
+             our listener is registered on initial load, so _layoutRunning
+             can be false even while cose-bilkent is still animating.
+             cy.stop() is a no-op when nothing is running, so calling it
+             every time is safe. */
+          try { cy.stop(); } catch(_) {}
         });
 
         function _fireAutosave() {

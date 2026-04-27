@@ -354,11 +354,12 @@ _CYTO_PERF_JS = """
   var MAX_PIXEL_RATIO = 1.5;
   var POLL_MS         = 300;
 
-  var _cy           = null;
-  var _lodActive    = false;
-  var _fullSnapshot = null;   // sorted parent-first jsons for restore
-  var _preLodPan    = null;   // viewport pan before LOD (to restore on exit)
-  var _preLodZoom   = null;
+  var _cy              = null;
+  var _lodActive       = false;
+  var _fullSnapshot    = null;   // sorted parent-first jsons for restore
+  var _preLodPan       = null;   // viewport pan before LOD (to restore on exit)
+  var _preLodZoom      = null;
+  var _lodElementCount = 0;      // element count after LOD collapse, for staleness check
 
   /* Sort jsons so every compound parent appears before its children.
      Edges come last.  Required for cy.add() to rebuild compounds. */
@@ -408,12 +409,24 @@ _CYTO_PERF_JS = """
       cy.elements().remove();
       cy.add(collapsed);
     });
+    _lodElementCount = cy.elements().length;
   }
 
   function exitLOD(cy) {
     if (!_lodActive || !_fullSnapshot) return;
+    /* If Dash externally updated elements while LOD was active (e.g. Reset
+       Layout), the current element count won't match what LOD put there.
+       In that case the snapshot is stale — discard it and clear LOD state
+       without restoring, so the fresh Dash-supplied graph is kept intact. */
+    if (cy.elements().length !== _lodElementCount) {
+      _lodActive = false;
+      _fullSnapshot = null;
+      _lodElementCount = 0;
+      return;
+    }
     _lodActive = false;
     var snap = _fullSnapshot; _fullSnapshot = null;
+    _lodElementCount = 0;
     cy.batch(function() {
       cy.elements().remove();
       cy.add(snap);

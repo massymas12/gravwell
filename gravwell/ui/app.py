@@ -380,7 +380,7 @@ _CYTO_PERF_JS = """
   function enterLOD(cy) {
     if (_lodActive) return;
 
-    /* Collect hub nodes first — bail if none (no subnet-hub class yet) */
+    /* Bail if subnet-hub class not yet applied (graph not fully initialised) */
     var hubIds = {};
     cy.nodes('.subnet-hub, .bridge-node').forEach(function(n){ hubIds[n.id()] = true; });
     if (Object.keys(hubIds).length === 0) return;
@@ -390,12 +390,16 @@ _CYTO_PERF_JS = """
     _preLodPan    = Object.assign({}, cy.pan());
     _preLodZoom   = cy.zoom();
 
+    /* Collapsed view: keep domain boxes, subnet boxes, and one hub per subnet.
+       Subnet/domain compound nodes stay so the layout remains structured —
+       each box just shrinks to contain only its hub node.
+       Hub nodes keep their parent reference so they sit inside their box.
+       Bridge nodes (multi-homed, no parent) are kept as-is.
+       Only inter-hub / bridge edges are kept. */
     var collapsed = [];
-    cy.nodes('.subnet-hub, .bridge-node').forEach(function(n) {
-      var j = n.json(), d = Object.assign({}, j.data);
-      delete d.parent;   /* float freely — no compound shells in LOD */
-      collapsed.push({ group: 'nodes', data: d, classes: j.classes, position: j.position });
-    });
+    cy.nodes('.domain-group').forEach(function(n) { collapsed.push(n.json()); });
+    cy.nodes('.subnet-group').forEach(function(n) { collapsed.push(n.json()); });
+    cy.nodes('.subnet-hub, .bridge-node').forEach(function(n) { collapsed.push(n.json()); });
     cy.edges().forEach(function(e) {
       if (hubIds[e.data('source')] && hubIds[e.data('target')]) collapsed.push(e.json());
     });
@@ -404,22 +408,16 @@ _CYTO_PERF_JS = """
       cy.elements().remove();
       cy.add(collapsed);
     });
-    try { cy.fit(undefined, 60); } catch(_) {}
   }
 
   function exitLOD(cy) {
     if (!_lodActive || !_fullSnapshot) return;
     _lodActive = false;
     var snap = _fullSnapshot; _fullSnapshot = null;
-    var pan = _preLodPan, zoom = _preLodZoom;
     cy.batch(function() {
       cy.elements().remove();
       cy.add(snap);
     });
-    /* Restore the viewport position the user had before LOD */
-    try {
-      if (pan && zoom) cy.viewport({ zoom: zoom, pan: pan });
-    } catch(_) {}
   }
 
   function _checkLOD() {

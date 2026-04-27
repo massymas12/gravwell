@@ -414,18 +414,9 @@ _CYTO_PERF_JS = """
     if (!_lodActive || !_fullSnapshot) return;
     _lodActive = false;
     var snap = _fullSnapshot; _fullSnapshot = null;
-    /* Merge positions of currently visible nodes (user may have moved hubs
-       while in LOD) into the snapshot before restoring. */
-    var curPos = {};
-    cy.nodes().forEach(function(n) { curPos[n.id()] = n.position(); });
-    var merged = snap.map(function(el) {
-      if (el.group === 'nodes' && curPos[el.data.id])
-        return Object.assign({}, el, { position: curPos[el.data.id] });
-      return el;
-    });
     cy.batch(function() {
       cy.elements().remove();
-      cy.add(merged);
+      cy.add(snap);
     });
   }
 
@@ -645,8 +636,6 @@ _CY_GLOBAL_JS = """
         cy.on('dragfree', function(evt) {
           if (!evt.target.isNode || !evt.target.isNode()) return;
           if (evt.target.data('node_type') !== 'host') return;
-          /* Stop any running layout so it cannot push the node back. */
-          try { cy.stop(); } catch(_) {}
           clearTimeout(_dragTimer);
           _dragTimer = setTimeout(function() {
             var inp = document.getElementById('_autosave-positions-trigger');

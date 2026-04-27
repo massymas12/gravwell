@@ -350,9 +350,9 @@ _CYTO_PERF_JS = """
   /* LOD collapses subnets to hub-only at low zoom.
      cy.remove() is used (not display:none) so Cytoscape stops
      hit-testing hidden elements on every mousemove event. */
-  var LOD_THRESHOLD   = 0.4;   // zoom below which subnets collapse
+  var LOD_THRESHOLD   = 0.25;  // zoom below which subnets collapse
   var MAX_PIXEL_RATIO = 1.5;
-  var POLL_MS         = 200;
+  var POLL_MS         = 300;
 
   var _cy              = null;
   var _lodActive       = false;

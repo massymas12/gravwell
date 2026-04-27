@@ -1,7 +1,6 @@
-/**
- * Runtime performance + LOD patches — DIAGNOSTIC BUILD
- * Open browser DevTools → Console tab and share the output.
- */
+/* cyto_perf.js — loaded */
+console.log('[cyto_perf] script loaded');
+
 (function () {
     'use strict';
 
@@ -13,13 +12,38 @@
     var _cy           = null;
     var _lodActive    = false;
     var _fullSnapshot = null;
-    var _diagnosed    = false;   // only log once
+    var _diagnosed    = false;
 
     function gpuPromote(el) {
         el.style.willChange = 'transform';
         el.style.transform  = 'translateZ(0)';
     }
 
+    // ── Find Cytoscape instance ───────────────────────────────────────────────
+    // Method 1: internal _cyreg (Cytoscape <= 3.x standard).
+    // Method 2: walk the React fiber tree to find dash-cytoscape's stateNode.cy
+    function _findCy(container) {
+        if (container._cyreg && container._cyreg.cy) return container._cyreg.cy;
+
+        var fiberKey = Object.keys(container).find(function (k) {
+            return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance');
+        });
+        if (!fiberKey) return null;
+
+        var node = container[fiberKey];
+        while (node) {
+            if (node.stateNode &&
+                typeof node.stateNode === 'object' &&
+                node.stateNode.cy &&
+                typeof node.stateNode.cy.zoom === 'function') {
+                return node.stateNode.cy;
+            }
+            node = node.return || null;
+        }
+        return null;
+    }
+
+    // ── Snapshot helpers ──────────────────────────────────────────────────────
     function _sortForAdd(jsons) {
         var nodes = jsons.filter(function (e) { return e.group === 'nodes'; });
         var edges = jsons.filter(function (e) { return e.group === 'edges'; });
@@ -37,9 +61,9 @@
         return sorted.concat(edges);
     }
 
+    // ── LOD ───────────────────────────────────────────────────────────────────
     function enterLOD(cy) {
         if (_lodActive) return;
-        console.log('[LOD] entering LOD — zoom:', cy.zoom().toFixed(3));
         _lodActive    = true;
         _fullSnapshot = _sortForAdd(cy.elements().jsons());
 
@@ -59,7 +83,8 @@
             }
         });
 
-        console.log('[LOD] full elements:', _fullSnapshot.length,
+        console.log('[cyto_perf] LOD enter — zoom:', cy.zoom().toFixed(3),
+                    '| full:', _fullSnapshot.length,
                     '| collapsed:', collapsed.length,
                     '| hubs:', Object.keys(hubIds).length);
 
@@ -71,7 +96,7 @@
 
     function exitLOD(cy) {
         if (!_lodActive || !_fullSnapshot) return;
-        console.log('[LOD] exiting LOD — zoom:', cy.zoom().toFixed(3));
+        console.log('[cyto_perf] LOD exit — zoom:', cy.zoom().toFixed(3));
         _lodActive    = false;
         var snap      = _fullSnapshot;
         _fullSnapshot = null;
@@ -84,13 +109,11 @@
     function _checkLOD() {
         if (!_cy) return;
         var zoom = _cy.zoom();
-        if (zoom < LOD_THRESHOLD && !_lodActive) {
-            enterLOD(_cy);
-        } else if (zoom >= LOD_THRESHOLD && _lodActive) {
-            exitLOD(_cy);
-        }
+        if (zoom < LOD_THRESHOLD && !_lodActive) enterLOD(_cy);
+        else if (zoom >= LOD_THRESHOLD && _lodActive) exitLOD(_cy);
     }
 
+    // ── Renderer options ──────────────────────────────────────────────────────
     function _applyRendererOptions(cy) {
         var r = cy.renderer && cy.renderer();
         if (!r || !r.options) return;
@@ -105,35 +128,33 @@
         }
     }
 
+    // ── Main patch ────────────────────────────────────────────────────────────
     function patch() {
         var container = document.getElementById(CONTAINER_ID);
-        if (!container) {
-            if (!_diagnosed) console.log('[LOD] container #' + CONTAINER_ID + ' not found in DOM');
-            return false;
-        }
+        if (!container) return false;
 
         gpuPromote(container);
 
-        var cyreg = container._cyreg;
-        if (!cyreg || !cyreg.cy) {
+        var cy = _findCy(container);
+
+        if (!cy) {
             if (!_diagnosed) {
                 _diagnosed = true;
-                console.log('[LOD] container found but _cyreg missing.',
-                            'Keys on container:', Object.keys(container).filter(function(k){
-                                return k.startsWith('_') || k.startsWith('cy');
-                            }).join(', ') || '(none)');
+                var keys = Object.keys(container).filter(function (k) {
+                    return k.startsWith('_') || k.startsWith('__react');
+                });
+                console.log('[cyto_perf] container found but cy not resolved.',
+                            'Container keys:', keys.join(', ') || '(none)');
             }
             return false;
         }
 
-        var cy = cyreg.cy;
-
         if (!_diagnosed) {
             _diagnosed = true;
-            console.log('[LOD] cy instance found. zoom:', cy.zoom().toFixed(3),
+            console.log('[cyto_perf] cy found via', container._cyreg ? '_cyreg' : 'React fiber',
+                        '| zoom:', cy.zoom().toFixed(3),
                         '| elements:', cy.elements().length,
-                        '| subnet-hub nodes:', cy.nodes('.subnet-hub').length,
-                        '| LOD threshold:', LOD_THRESHOLD);
+                        '| .subnet-hub nodes:', cy.nodes('.subnet-hub').length);
         }
 
         _applyRendererOptions(cy);
@@ -154,9 +175,7 @@
     var attempts = 0;
     var initTimer = setInterval(function () {
         if (patch() || attempts++ > 80) {
-            if (attempts > 80 && !_cy) {
-                console.log('[LOD] gave up after 80 attempts — cy never found');
-            }
+            if (attempts > 80 && !_cy) console.log('[cyto_perf] gave up — cy never found after 80 attempts');
             clearInterval(initTimer);
         }
     }, 75);

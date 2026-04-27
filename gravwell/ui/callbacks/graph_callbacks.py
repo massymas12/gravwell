@@ -59,7 +59,7 @@ def register(app: dash.Dash) -> None:
         State("filter-port-service", "value"),
         State("graph-data-store", "data"),
         State("node-positions-store", "data"),
-        prevent_initial_call=False,
+        prevent_initial_call="initial_duplicate",
     )
     def update_graph(n_intervals, n_clicks, _trigger, hostname, subnet,
                      os_families, severity, port_service,

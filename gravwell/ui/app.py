@@ -644,6 +644,31 @@ _CY_GLOBAL_JS = """
     if (cy) {
       if (cy !== _lastCy) {
         _lastCy = cy;
+
+        /* ── Make hub nodes inside compounds non-grabbable ──────────
+           When the user clicks the subnet compound box near a switch /
+           hub node, Cytoscape normally grabs the child (topmost element).
+           Ungrabifying hub nodes that have a parent lets the click fall
+           through to the compound, so dragging the box works reliably.
+           Bridge nodes (no parent) stay grabbable so they can be
+           repositioned freely.  Re-applied after every layout stop in
+           case new elements were added. */
+        function _fixHubGrab() {
+          cy.nodes('.subnet-hub, .bridge-node').forEach(function(n) {
+            if (n.data('parent')) { n.ungrabify(); }
+            else                  { n.grabify();   }
+          });
+        }
+        _fixHubGrab();
+        cy.on('layoutstop', _fixHubGrab);
+        cy.on('add', function(evt) {
+          var n = evt.target;
+          if (!n.isNode || !n.isNode()) return;
+          if ((n.hasClass('subnet-hub') || n.hasClass('bridge-node')) && n.data('parent')) {
+            n.ungrabify();
+          }
+        });
+
         /* ── Auto-save positions 800 ms after a node drag ends ── */
         /* Lock the node immediately so the force-directed layout cannot
            pull it back while it is still animating. */

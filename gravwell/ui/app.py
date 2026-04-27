@@ -347,14 +347,21 @@ _LARGE_FILE_JS = """
 
 _CYTO_PERF_JS = """
 (function () {
-  var LOD_THRESHOLD   = 0.6;
+  /* LOD collapses subnets to hub-only at low zoom.
+     cy.remove() is used (not display:none) so Cytoscape stops
+     hit-testing hidden elements on every mousemove event. */
+  var LOD_THRESHOLD   = 0.4;   // zoom below which subnets collapse
   var MAX_PIXEL_RATIO = 1.5;
   var POLL_MS         = 300;
 
   var _cy           = null;
   var _lodActive    = false;
-  var _fullSnapshot = null;
+  var _fullSnapshot = null;   // sorted parent-first jsons for restore
+  var _preLodPan    = null;   // viewport pan before LOD (to restore on exit)
+  var _preLodZoom   = null;
 
+  /* Sort jsons so every compound parent appears before its children.
+     Edges come last.  Required for cy.add() to rebuild compounds. */
   function _sortForAdd(jsons) {
     var nodes = jsons.filter(function(e){ return e.group === 'nodes'; });
     var edges = jsons.filter(function(e){ return e.group === 'edges'; });
@@ -372,27 +379,47 @@ _CYTO_PERF_JS = """
 
   function enterLOD(cy) {
     if (_lodActive) return;
-    _lodActive    = true;
-    _fullSnapshot = _sortForAdd(cy.elements().jsons());
+
+    /* Collect hub nodes first — bail if none (no subnet-hub class yet) */
     var hubIds = {};
     cy.nodes('.subnet-hub, .bridge-node').forEach(function(n){ hubIds[n.id()] = true; });
+    if (Object.keys(hubIds).length === 0) return;
+
+    _lodActive    = true;
+    _fullSnapshot = _sortForAdd(cy.elements().jsons());
+    _preLodPan    = Object.assign({}, cy.pan());
+    _preLodZoom   = cy.zoom();
+
     var collapsed = [];
     cy.nodes('.subnet-hub, .bridge-node').forEach(function(n) {
       var j = n.json(), d = Object.assign({}, j.data);
-      delete d.parent;
+      delete d.parent;   /* float freely — no compound shells in LOD */
       collapsed.push({ group: 'nodes', data: d, classes: j.classes, position: j.position });
     });
     cy.edges().forEach(function(e) {
       if (hubIds[e.data('source')] && hubIds[e.data('target')]) collapsed.push(e.json());
     });
-    cy.batch(function(){ cy.elements().remove(); if (collapsed.length) cy.add(collapsed); });
+
+    cy.batch(function() {
+      cy.elements().remove();
+      cy.add(collapsed);
+    });
+    try { cy.fit(undefined, 60); } catch(_) {}
   }
 
   function exitLOD(cy) {
     if (!_lodActive || !_fullSnapshot) return;
     _lodActive = false;
     var snap = _fullSnapshot; _fullSnapshot = null;
-    cy.batch(function(){ cy.elements().remove(); cy.add(snap); });
+    var pan = _preLodPan, zoom = _preLodZoom;
+    cy.batch(function() {
+      cy.elements().remove();
+      cy.add(snap);
+    });
+    /* Restore the viewport position the user had before LOD */
+    try {
+      if (pan && zoom) cy.viewport({ zoom: zoom, pan: pan });
+    } catch(_) {}
   }
 
   function _checkLOD() {
@@ -415,13 +442,11 @@ _CYTO_PERF_JS = """
     }
   }
 
-  /* Wait for _gravwell_cy (set by _CY_GLOBAL_JS after mount) then activate. */
-  var _initTimer = setInterval(function() {
+  /* Poll for _gravwell_cy (set by _CY_GLOBAL_JS ~1500ms after mount). */
+  setInterval(function() {
     var cy = window._gravwell_cy;
     if (!cy || cy === _cy) return;
-    _cy        = cy;
-    _lodActive = false;
-    _fullSnapshot = null;
+    _cy = cy; _lodActive = false; _fullSnapshot = null;
     _applyRenderer(cy);
     cy.on('zoom', _checkLOD);
     _checkLOD();

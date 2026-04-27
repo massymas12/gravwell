@@ -666,7 +666,6 @@ _CY_GLOBAL_JS = """
                often an unrelated element, making "random" nodes move. */
         var _grabPos       = {};
         var _dragTimer     = null;
-        var _locked        = [];
         var _layoutRunning = false;
 
         cy.on('layoutstart', function() { _layoutRunning = true;  });
@@ -675,8 +674,10 @@ _CY_GLOBAL_JS = """
         cy.on('grab', 'node', function(evt) {
           var n = evt.target;
           _grabPos[n.id()] = { x: n.position().x, y: n.position().y };
-          /* Stop layout on first grab so positions are stable for the
-             entire drag + 800 ms autosave window. */
+          /* Stop the layout animation the moment a drag starts so the
+             layout cannot snap the node back.  No lock() needed — once
+             the layout is stopped there is nothing left to fight the
+             user's drag. */
           if (_layoutRunning) { try { cy.stop(); } catch(_) {} }
         });
 
@@ -691,87 +692,44 @@ _CY_GLOBAL_JS = """
           }
         }
 
-        function _unlockAll() {
-          _locked.forEach(function(n) { try { n.unlock(); } catch(_) {} });
-          _locked = [];
-        }
-
         function _scheduleAutosave() {
           clearTimeout(_dragTimer);
-          _dragTimer = setTimeout(function() {
-            _fireAutosave();
-            _unlockAll();
-          }, 800);
+          _dragTimer = setTimeout(_fireAutosave, 600);
         }
 
         cy.on('dragfree', function(evt) {
           if (!evt.target.isNode || !evt.target.isNode()) return;
-          _unlockAll(); // always clear locks from any previous drag first
 
           var target   = evt.target;
           var nodeType = target.data('node_type');
           var parentId = target.data('parent');
+          var orig     = _grabPos[target.id()];
+          if (!orig) return;
+          var dx = target.position().x - orig.x;
+          var dy = target.position().y - orig.y;
+          if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return; // click, not drag
 
-          /* Hub-inside-compound dragged: redirect to compound movement.
-             Only applies to actual hub nodes (.subnet-hub / .bridge-node
-             with a parent) — regular host nodes inside a subnet should
-             still be draggable individually within the compound. */
+          /* Hub-inside-compound: redirect drag to compound movement.
+             Snap hub back and shift all compound children by (dx,dy) so
+             dragging the hub feels like dragging the whole subnet box.
+             Regular host nodes inside a subnet drag individually. */
           if (nodeType === 'host' && parentId &&
               (target.hasClass('subnet-hub') || target.hasClass('bridge-node'))) {
-            var orig = _grabPos[target.id()];
-            if (!orig) return;
-            var dx = target.position().x - orig.x;
-            var dy = target.position().y - orig.y;
-            if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return; // just a click, not a drag
             var parent = target.parent();
             if (!parent || !parent.length) return;
-            /* Batch: snap hub back then shift all children so the net
-               effect equals moving the whole subnet box by (dx, dy). */
             cy.batch(function() {
               target.position({ x: orig.x, y: orig.y });
               parent.descendants().forEach(function(child) {
                 var p = child.position();
                 child.position({ x: p.x + dx, y: p.y + dy });
-                if (child.data('node_type') === 'host') {
-                  child.lock();
-                  _locked.push(child);
-                }
               });
             });
-            _scheduleAutosave();
-            return;
           }
 
-          /* Compound box dragged directly. */
-          if (target.isParent && target.isParent()) {
-            var origC = _grabPos[target.id()];
-            if (origC) {
-              var dxC = target.position().x - origC.x;
-              var dyC = target.position().y - origC.y;
-              if (Math.abs(dxC) < 1 && Math.abs(dyC) < 1) return; // just a click
-            }
-            target.descendants().forEach(function(child) {
-              if (child.data('node_type') === 'host') {
-                child.lock();
-                _locked.push(child);
-              }
-            });
-            _scheduleAutosave();
-            return;
-          }
-
-          /* Standalone host (bridge node or root-level host). */
-          if (nodeType === 'host') {
-            var origH = _grabPos[target.id()];
-            if (origH) {
-              var dxH = target.position().x - origH.x;
-              var dyH = target.position().y - origH.y;
-              if (Math.abs(dxH) < 1 && Math.abs(dyH) < 1) return; // just a click
-            }
-            target.lock();
-            _locked = [target];
-            _scheduleAutosave();
-          }
+          /* All other moves (compound drag, regular host, standalone
+             bridge) just need an autosave — no locking required since
+             the layout was already stopped on grab. */
+          _scheduleAutosave();
         });
 
         cy.on('cxttap', function(evt) {

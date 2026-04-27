@@ -647,25 +647,37 @@ _CY_GLOBAL_JS = """
 
         /* ── Drag handling: save positions + redirect hub drags ─────
            Strategy:
-           - Record every node's position on 'grab' so we know the delta.
+           - Track whether the layout animation is running (_layoutRunning).
+           - On 'grab': record position for delta calculation. If the layout
+               is still animating, stop it immediately so the freeze-frame
+               positions are stable before the drag starts. (cy.stop() here,
+               not in dragfree, avoids capturing mid-drag positions of OTHER
+               nodes that are still moving.)
            - On 'dragfree' for a hub node that has a parent compound:
                snap the hub back to where it was, then shift ALL children
                of its compound by the same delta (batch → no visual flash).
                This makes dragging a hub feel like dragging its subnet box.
            - On 'dragfree' for a compound or a standalone host: lock the
-               affected host nodes for 800 ms so the still-running layout
-               animation can't overwrite their positions before the autosave
-               round-trip to the DB completes, then unlock.
+               affected host nodes for 800 ms then autosave + unlock.
+               Because the layout was already stopped on grab, no snap-back
+               can happen during the lock window.
            - No ungrabify — ungrabify causes Cytoscape to fall through the
                ungrabified node to whatever is next in z-order, which is
                often an unrelated element, making "random" nodes move. */
-        var _grabPos   = {};
-        var _dragTimer = null;
-        var _locked    = [];
+        var _grabPos       = {};
+        var _dragTimer     = null;
+        var _locked        = [];
+        var _layoutRunning = false;
+
+        cy.on('layoutstart', function() { _layoutRunning = true;  });
+        cy.on('layoutstop',  function() { _layoutRunning = false; });
 
         cy.on('grab', 'node', function(evt) {
           var n = evt.target;
           _grabPos[n.id()] = { x: n.position().x, y: n.position().y };
+          /* Stop layout on first grab so positions are stable for the
+             entire drag + 800 ms autosave window. */
+          if (_layoutRunning) { try { cy.stop(); } catch(_) {} }
         });
 
         function _fireAutosave() {
@@ -728,6 +740,12 @@ _CY_GLOBAL_JS = """
 
           /* Compound box dragged directly. */
           if (target.isParent && target.isParent()) {
+            var origC = _grabPos[target.id()];
+            if (origC) {
+              var dxC = target.position().x - origC.x;
+              var dyC = target.position().y - origC.y;
+              if (Math.abs(dxC) < 1 && Math.abs(dyC) < 1) return; // just a click
+            }
             target.descendants().forEach(function(child) {
               if (child.data('node_type') === 'host') {
                 child.lock();
@@ -740,6 +758,12 @@ _CY_GLOBAL_JS = """
 
           /* Standalone host (bridge node or root-level host). */
           if (nodeType === 'host') {
+            var origH = _grabPos[target.id()];
+            if (origH) {
+              var dxH = target.position().x - origH.x;
+              var dyH = target.position().y - origH.y;
+              if (Math.abs(dxH) < 1 && Math.abs(dyH) < 1) return; // just a click
+            }
             target.lock();
             _locked = [target];
             _scheduleAutosave();

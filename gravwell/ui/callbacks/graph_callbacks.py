@@ -48,6 +48,7 @@ def register(app: dash.Dash) -> None:
         Output("graph-host-count", "children"),
         Output("graph-edge-count", "children"),
         Output("graph-data-store", "data"),
+        Output("network-graph", "layout", allow_duplicate=True),
         Input("refresh-interval", "n_intervals"),
         Input("apply-filters-btn", "n_clicks"),
         Input("project-switch-trigger", "data"),
@@ -119,7 +120,7 @@ def register(app: dash.Dash) -> None:
                 )
         except Exception as exc:
             _log.error("update_graph DB error: %s", exc, exc_info=True)
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
 
         # Apply role overrides to graph nodes before rendering
         for node_id, attrs in G.nodes(data=True):
@@ -266,7 +267,7 @@ def register(app: dash.Dash) -> None:
                 if "position" in el and "data" in el and "id" in el.get("data", {})
             }
             if prev_ids == new_ids:
-                return no_update, str(host_count), str(edge_count), no_update
+                return no_update, str(host_count), str(edge_count), no_update, no_update
 
         # Store only id + position — the interval diff check needs ids, the
         # focus-from-table fallback needs positions.  Full element data is not
@@ -278,10 +279,22 @@ def register(app: dash.Dash) -> None:
                 if "position" in el
             ]
         }
-        return elements, str(host_count), str(edge_count), slim_store
+
+        # When the user has saved positions, lock the layout to "preset" so
+        # Cytoscape places nodes exactly at those coordinates instead of
+        # re-running physics (cose-bilkent) and overriding user-dragged positions.
+        # When there are no saved positions (initial load or after reset), leave
+        # the layout unchanged so the last user selection (or cose-bilkent) runs.
+        if saved_positions:
+            layout_out = {"name": "preset", "animate": False,
+                          "fit": False, "padding": 60}
+        else:
+            layout_out = no_update
+
+        return elements, str(host_count), str(edge_count), slim_store, layout_out
 
     @app.callback(
-        Output("network-graph", "layout"),
+        Output("network-graph", "layout", allow_duplicate=True),
         Input("layout-selector", "value"),
         prevent_initial_call=True,
     )

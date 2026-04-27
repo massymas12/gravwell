@@ -15,9 +15,10 @@ def register(app: dash.Dash) -> None:
         Output("project-dropdown", "options"),
         Output("project-dropdown", "value"),
         Input("refresh-interval", "n_intervals"),
+        State("project-dropdown", "value"),
         prevent_initial_call=False,
     )
-    def populate_projects(_n):
+    def populate_projects(_n, current_dropdown_value):
         from flask_login import current_user
         current_path = current_app.config.get("GRAVWELL_DB_PATH")
         projects = list_projects(current_path)
@@ -27,6 +28,11 @@ def register(app: dash.Dash) -> None:
             projects = [p for p in projects if p["name"] in allowed]
         options = [{"label": p["name"], "value": p["path"]} for p in projects]
         current_value = current_path if current_path else (options[0]["value"] if options else None)
+        # Only write the dropdown value when it actually differs — writing it on
+        # every tick fires switch_project, which can race and undo a project
+        # switch that is still in-flight.
+        if current_value == current_dropdown_value:
+            return options, no_update
         return options, current_value
 
     @app.callback(

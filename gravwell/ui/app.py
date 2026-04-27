@@ -118,7 +118,8 @@ body, html { margin: 0; padding: 0; background: #121212; color: #ccc;
 .edge-visibility-checklist label { font-size: 11px; color: #ccc; display: flex;
   align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
 .edge-visibility-checklist input[type=checkbox] { margin: 0; cursor: pointer; }
-#network-graph { flex: 1; }
+#network-graph { flex: 1; will-change: transform; transform: translateZ(0); }
+#network-graph canvas { will-change: transform; transform: translateZ(0); image-rendering: auto; }
 
 /* Right panel */
 .right-panel { width: 280px; flex-shrink: 0; overflow-y: auto; background: #1a1a1a;
@@ -341,6 +342,92 @@ _LARGE_FILE_JS = """
       if (interceptBrowseInput() || ++_retries > 20) clearInterval(_iv);
     }, 300);
   }
+})();
+"""
+
+_CYTO_PERF_JS = """
+(function () {
+  var LOD_THRESHOLD   = 0.6;
+  var MAX_PIXEL_RATIO = 1.5;
+  var POLL_MS         = 300;
+
+  var _cy           = null;
+  var _lodActive    = false;
+  var _fullSnapshot = null;
+
+  function _sortForAdd(jsons) {
+    var nodes = jsons.filter(function(e){ return e.group === 'nodes'; });
+    var edges = jsons.filter(function(e){ return e.group === 'edges'; });
+    var byId  = {};
+    nodes.forEach(function(n){ byId[n.data.id] = n; });
+    var sorted = [], seen = {};
+    function visit(n) {
+      if (seen[n.data.id]) return;
+      if (n.data.parent && byId[n.data.parent]) visit(byId[n.data.parent]);
+      sorted.push(n); seen[n.data.id] = true;
+    }
+    nodes.forEach(visit);
+    return sorted.concat(edges);
+  }
+
+  function enterLOD(cy) {
+    if (_lodActive) return;
+    _lodActive    = true;
+    _fullSnapshot = _sortForAdd(cy.elements().jsons());
+    var hubIds = {};
+    cy.nodes('.subnet-hub, .bridge-node').forEach(function(n){ hubIds[n.id()] = true; });
+    var collapsed = [];
+    cy.nodes('.subnet-hub, .bridge-node').forEach(function(n) {
+      var j = n.json(), d = Object.assign({}, j.data);
+      delete d.parent;
+      collapsed.push({ group: 'nodes', data: d, classes: j.classes, position: j.position });
+    });
+    cy.edges().forEach(function(e) {
+      if (hubIds[e.data('source')] && hubIds[e.data('target')]) collapsed.push(e.json());
+    });
+    cy.batch(function(){ cy.elements().remove(); if (collapsed.length) cy.add(collapsed); });
+  }
+
+  function exitLOD(cy) {
+    if (!_lodActive || !_fullSnapshot) return;
+    _lodActive = false;
+    var snap = _fullSnapshot; _fullSnapshot = null;
+    cy.batch(function(){ cy.elements().remove(); cy.add(snap); });
+  }
+
+  function _checkLOD() {
+    if (!_cy) return;
+    var z = _cy.zoom();
+    if (z < LOD_THRESHOLD && !_lodActive) enterLOD(_cy);
+    else if (z >= LOD_THRESHOLD && _lodActive) exitLOD(_cy);
+  }
+
+  function _applyRenderer(cy) {
+    var r = cy.renderer && cy.renderer();
+    if (!r || !r.options) return;
+    r.options.textureOnViewport   = true;
+    r.options.hideEdgesOnViewport = true;
+    r.options.motionBlur          = true;
+    r.options.motionBlurOpacity   = 0.15;
+    if ((window.devicePixelRatio || 1) > MAX_PIXEL_RATIO) {
+      r.options.pixelRatio = MAX_PIXEL_RATIO;
+      try { cy.resize(); } catch(_) {}
+    }
+  }
+
+  /* Wait for _gravwell_cy (set by _CY_GLOBAL_JS after mount) then activate. */
+  var _initTimer = setInterval(function() {
+    var cy = window._gravwell_cy;
+    if (!cy || cy === _cy) return;
+    _cy        = cy;
+    _lodActive = false;
+    _fullSnapshot = null;
+    _applyRenderer(cy);
+    cy.on('zoom', _checkLOD);
+    _checkLOD();
+  }, 500);
+
+  setInterval(_checkLOD, POLL_MS);
 })();
 """
 
@@ -699,7 +786,7 @@ def create_app(db_path: str) -> dash.Dash:
         f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_URI}"><style>{_APP_CSS}</style></head>',
     ).replace(
         "</body>",
-        f"<script>{_RESIZE_JS}</script><script>{_LARGE_FILE_JS}</script><script>{_CY_GLOBAL_JS}</script></body>",
+        f"<script>{_RESIZE_JS}</script><script>{_LARGE_FILE_JS}</script><script>{_CY_GLOBAL_JS}</script><script>{_CYTO_PERF_JS}</script></body>",
     )
 
     # Register all callbacks

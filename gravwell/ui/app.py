@@ -632,10 +632,13 @@ _CY_GLOBAL_JS = """
       if (cy !== _lastCy) {
         _lastCy = cy;
         /* ── Auto-save positions 800 ms after a node drag ends ── */
+        /* Lock the node immediately so the force-directed layout cannot
+           pull it back while it is still animating. */
         var _dragTimer = null;
         cy.on('dragfree', function(evt) {
           if (!evt.target.isNode || !evt.target.isNode()) return;
           if (evt.target.data('node_type') !== 'host') return;
+          evt.target.lock();
           clearTimeout(_dragTimer);
           _dragTimer = setTimeout(function() {
             var inp = document.getElementById('_autosave-positions-trigger');

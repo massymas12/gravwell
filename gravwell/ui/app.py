@@ -699,7 +699,7 @@ _CY_GLOBAL_JS = """
 
         function _scheduleAutosave() {
           clearTimeout(_dragTimer);
-          _dragTimer = setTimeout(_fireAutosave, 600);
+          _dragTimer = setTimeout(_fireAutosave, 100);
         }
 
         cy.on('dragfree', function(evt) {

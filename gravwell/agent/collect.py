@@ -414,8 +414,13 @@ def collect_self() -> dict:
             except Exception:
                 continue
 
-    all_ips = [i["ip"] for i in interfaces if i.get("ip")]
-    all_macs = list({i["mac"] for i in interfaces if i.get("mac")})
+    # Filter loopback (127.x), link-local (169.254.x), multicast, etc. from the
+    # interface list.  All three platform parsers include the loopback adapter, so
+    # without this filter self_info["ips"][0] would be "127.0.0.1" and the parser
+    # would register this machine at the loopback address.
+    routable_ifaces = [i for i in interfaces if i.get("ip") and _is_routable_host_ip(i["ip"])]
+    all_ips = [i["ip"] for i in routable_ifaces]
+    all_macs = list({i["mac"] for i in routable_ifaces if i.get("mac")})
 
     result: dict = {
         "hostname": hostname,
@@ -423,7 +428,7 @@ def collect_self() -> dict:
         "platform_version": platform.platform(),
         "ips": all_ips,
         "macs": all_macs,
-        "interfaces": interfaces,
+        "interfaces": routable_ifaces,
         "gateway": _collect_default_gateway(system),
         "dns_servers": _collect_dns_servers(system),
     }
@@ -439,7 +444,6 @@ def _interfaces_windows() -> List[dict]:
     out = _run("ipconfig /all")
     interfaces: List[dict] = []
     current: dict = {}
-    dns_servers: List[str] = []
     for line in out.splitlines():
         m = re.match(r"^(\S.*) adapter (.+):", line)
         if m:
@@ -698,12 +702,20 @@ def _parse_routes_macos(direct: List[str], routed: List[str]) -> None:
         try:
             net = ipaddress.IPv4Network(dest, strict=False)
         except ValueError:
-            # macOS may show "192.168.1" without prefix
+            # macOS netstat -rn uses truncated notation: "192.168.1/24" or "192.168.1"
             try:
-                parts_ip = dest.split(".")
-                while len(parts_ip) < 4:
-                    parts_ip.append("0")
-                net = ipaddress.IPv4Network(".".join(parts_ip), strict=False)
+                if "/" in dest:
+                    addr_part, pfx = dest.rsplit("/", 1)
+                    octets = addr_part.split(".")
+                    while len(octets) < 4:
+                        octets.append("0")
+                    net = ipaddress.IPv4Network(f"{'.'.join(octets)}/{pfx}", strict=False)
+                else:
+                    octets = dest.split(".")
+                    pfx = {1: 8, 2: 16, 3: 24}.get(len(octets), 32)
+                    while len(octets) < 4:
+                        octets.append("0")
+                    net = ipaddress.IPv4Network(f"{'.'.join(octets)}/{pfx}", strict=False)
             except ValueError:
                 continue
         net_str = str(net)
@@ -3121,6 +3133,8 @@ def upload(data: dict, server: str, key: str, verify_tls: bool = True) -> bool:
     import urllib.error
     import urllib.request
 
+    if not server.startswith(("http://", "https://")):
+        server = "https://" + server
     url = server.rstrip("/") + "/api/agent/submit"
     body = gzip.compress(json.dumps(data).encode(), compresslevel=6)
     req = urllib.request.Request(

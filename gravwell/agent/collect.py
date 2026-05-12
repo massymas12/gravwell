@@ -858,7 +858,7 @@ def _ipv6_neighbors_macos() -> List[dict]:
             continue
         ipv6 = parts[0].split("%")[0]  # strip %ifname suffix
         mac = parts[2]
-        if not re.match(r"[0-9a-fA-F:]{17}", mac):
+        if not re.fullmatch(r"[0-9a-fA-F:]{17}", mac):
             continue
         if ipv6.lower().startswith("fe80"):
             continue
@@ -2181,12 +2181,19 @@ def _raw_syn_scan(
     if platform.system() == "Windows" or not _is_elevated():
         return None
 
+    tx_sock = None
+    rx_sock = None
     try:
         tx_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
         tx_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
         rx_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         rx_sock.settimeout(0.05)
     except OSError:
+        if tx_sock is not None:
+            try:
+                tx_sock.close()
+            except Exception:
+                pass
         return None
 
     # Determine our outbound source IP — same two-tier fallback as collect_self().

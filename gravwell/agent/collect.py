@@ -1094,9 +1094,11 @@ def _netbios_node_status(ip: str, timeout_secs: float) -> Optional[str]:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(timeout_secs)
-        s.sendto(pkt, (ip, 137))
-        data, _ = s.recvfrom(1024)
-        s.close()
+        try:
+            s.sendto(pkt, (ip, 137))
+            data, _ = s.recvfrom(1024)
+        finally:
+            s.close()
         if len(data) < 13:
             return None
         # QD count tells us how many question entries are echoed back (38 bytes each)
@@ -1219,7 +1221,7 @@ def _mdns_listen(timeout_secs: float) -> List[dict]:
                 continue
             except OSError:
                 break
-            if src_ip in seen:
+            if src_ip in seen or not _is_routable_host_ip(src_ip):
                 continue
             seen.add(src_ip)
             hostname = _parse_mdns_name(data)
@@ -1270,7 +1272,7 @@ def _ssdp_listen(timeout_secs: float) -> List[dict]:
                 continue
             except OSError:
                 break
-            if src_ip in seen:
+            if src_ip in seen or not _is_routable_host_ip(src_ip):
                 continue
             seen.add(src_ip)
             entry: dict = {"ip": src_ip, "source": "ssdp"}
@@ -1335,7 +1337,7 @@ def _wsdiscovery_listen(timeout_secs: float) -> List[dict]:
                 continue
             except OSError:
                 break
-            if src_ip in seen:
+            if src_ip in seen or not _is_routable_host_ip(src_ip):
                 continue
             seen.add(src_ip)
             entry: dict = {"ip": src_ip, "source": "wsd"}
@@ -1399,7 +1401,7 @@ def _llmnr_listen(timeout_secs: float) -> List[dict]:
                 continue
             except OSError:
                 break
-            if src_ip in seen:
+            if src_ip in seen or not _is_routable_host_ip(src_ip):
                 continue
             seen.add(src_ip)
             entry: dict = {"ip": src_ip, "source": "llmnr"}
@@ -1621,9 +1623,11 @@ def _snmp_get(ip: str, community: str = "public", timeout: float = 1.5) -> dict:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
-        sock.sendto(packet, (ip, 161))
-        data, _ = sock.recvfrom(4096)
-        sock.close()
+        try:
+            sock.sendto(packet, (ip, 161))
+            data, _ = sock.recvfrom(4096)
+        finally:
+            sock.close()
     except Exception:
         return {}
 
@@ -1806,11 +1810,17 @@ def _snmp_walk_bulk(
     current_oid = base_oid[:]
     req_id = 1
 
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
         sock.connect((ip, 161))
     except Exception:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
         return []
 
     try:
@@ -2165,13 +2175,23 @@ def _raw_syn_scan(
     except OSError:
         return None
 
-    # Determine our outbound source IP
-    try:
-        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        _s.connect(("8.8.8.8", 80))
-        src_ip = _s.getsockname()[0]
-        _s.close()
-    except Exception:
+    # Determine our outbound source IP — same two-tier fallback as collect_self().
+    # Private destinations are tried first so this works on isolated networks.
+    src_ip = None
+    for _dst in ("192.168.1.1", "10.0.0.1", "172.16.0.1", "8.8.8.8"):
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                _s.connect((_dst, 80))
+                candidate = _s.getsockname()[0]
+            finally:
+                _s.close()
+            if candidate and not candidate.startswith("127.") and candidate != "0.0.0.0":
+                src_ip = candidate
+                break
+        except Exception:
+            continue
+    if not src_ip:
         tx_sock.close()
         rx_sock.close()
         return None
@@ -3087,8 +3107,10 @@ def build_payload(
 
 
 def write_json(data: dict, path: str) -> str:
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
     return path
 
 

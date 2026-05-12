@@ -383,6 +383,13 @@ def collect_self() -> dict:
     except Exception as exc:
         _warn(f"Interface enumeration error: {exc}")
 
+    # Filter loopback, link-local, multicast, etc. right after the OS parsers run
+    # and BEFORE the fallback checks.  All three platform parsers include the loopback
+    # adapter.  If we filter after the fallbacks, a machine that reports only 127.0.0.1
+    # (e.g. a container during startup) would skip both fallbacks, then end up with
+    # all_ips = [] after filtering.
+    interfaces = [i for i in interfaces if i.get("ip") and _is_routable_host_ip(i["ip"])]
+
     # Fallback tier 1: hostname resolution — pure local, zero network traffic.
     # Works on air-gapped systems as long as the hostname is in /etc/hosts or DNS.
     if not interfaces:
@@ -414,13 +421,8 @@ def collect_self() -> dict:
             except Exception:
                 continue
 
-    # Filter loopback (127.x), link-local (169.254.x), multicast, etc. from the
-    # interface list.  All three platform parsers include the loopback adapter, so
-    # without this filter self_info["ips"][0] would be "127.0.0.1" and the parser
-    # would register this machine at the loopback address.
-    routable_ifaces = [i for i in interfaces if i.get("ip") and _is_routable_host_ip(i["ip"])]
-    all_ips = [i["ip"] for i in routable_ifaces]
-    all_macs = list({i["mac"] for i in routable_ifaces if i.get("mac")})
+    all_ips = [i["ip"] for i in interfaces]
+    all_macs = list({i["mac"] for i in interfaces if i.get("mac")})
 
     result: dict = {
         "hostname": hostname,
@@ -428,7 +430,7 @@ def collect_self() -> dict:
         "platform_version": platform.platform(),
         "ips": all_ips,
         "macs": all_macs,
-        "interfaces": routable_ifaces,
+        "interfaces": interfaces,
         "gateway": _collect_default_gateway(system),
         "dns_servers": _collect_dns_servers(system),
     }
@@ -553,7 +555,7 @@ def _collect_default_gateway(system: str) -> str:
                 if parts and parts[0] == "default":
                     # Gateway is second column; skip link# entries
                     gw = parts[1] if len(parts) > 1 else ""
-                    if re.match(r"[\d.]+", gw) and gw != "0.0.0.0":
+                    if re.fullmatch(r"[\d.]+", gw) and gw != "0.0.0.0":
                         return gw
     except Exception:
         pass
@@ -724,7 +726,7 @@ def _parse_routes_macos(direct: List[str], routed: List[str]) -> None:
         if gw.startswith("link#") or gw == "lo0":
             if net_str not in direct:
                 direct.append(net_str)
-        elif re.match(r"[\d.]+", gw):
+        elif re.fullmatch(r"[\d.]+", gw):
             if net_str not in routed:
                 routed.append(net_str)
 
@@ -2447,13 +2449,13 @@ def _tcp_probe_sweep(targets: List[str], timeout_secs: float,
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(probe_timeout)
-                if s.connect_ex((ip, port)) == 0:
+                try:
+                    if s.connect_ex((ip, port)) == 0:
+                        with lock:
+                            open_ports.append(port)
+                        found.set()
+                finally:
                     s.close()
-                    with lock:
-                        open_ports.append(port)
-                    found.set()
-                    return
-                s.close()
             except Exception:
                 pass
 
@@ -2577,11 +2579,12 @@ def port_scan(
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
-            if s.connect_ex((ip, port)) == 0:
-                banner = _grab_banner(s, ip, port, timeout)
+            try:
+                if s.connect_ex((ip, port)) == 0:
+                    banner = _grab_banner(s, ip, port, timeout)
+                    return (ip, port, svc, banner)
+            finally:
                 s.close()
-                return (ip, port, svc, banner)
-            s.close()
         except Exception:
             pass
         return None
@@ -2949,8 +2952,10 @@ def ot_safe_scan(ips: List[str], timeout: float = 3.0,
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
-            connected = s.connect_ex((ip, port)) == 0
-            s.close()   # close immediately — no banner grab
+            try:
+                connected = s.connect_ex((ip, port)) == 0
+            finally:
+                s.close()   # close immediately — no banner grab
             if connected:
                 return (ip, port, svc)
         except Exception:
@@ -3337,7 +3342,12 @@ def _wizard(args) -> object:
     args.routes        = routes
     args.timeout       = timeout_val
     args.workers       = workers_val
-    args.no_verify_tls = bool(server)   # self-signed cert assumed when server given
+    if server:
+        args.no_verify_tls = _ask_bool(
+            "Skip TLS certificate verification? (required for self-signed certs)", False
+        )
+    else:
+        args.no_verify_tls = False
     return args
 
 

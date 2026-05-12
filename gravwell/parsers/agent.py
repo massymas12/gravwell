@@ -20,6 +20,14 @@ def _tls_hostnames(port_info: dict) -> list:
     return names
 
 
+_OS_FAMILY_MAP = {
+    "Windows": "Windows",
+    "Linux":   "Linux",
+    "macOS":   "macOS",
+    "Network": "Network",
+}
+
+
 class AgentParser(BaseParser):
     name = "agent"
 
@@ -37,7 +45,16 @@ class AgentParser(BaseParser):
         except Exception as exc:
             result.errors.append(f"JSON parse error: {exc}")
             return result
+        return cls._parse_data(result, data)
 
+    @classmethod
+    def parse_dict(cls, data: dict, source_name: str = "agent-api") -> ParseResult:
+        """Parse an agent payload dict directly — no temp file needed."""
+        result = ParseResult(source_file=source_name, parser_name=cls.name)
+        return cls._parse_data(result, data)
+
+    @classmethod
+    def _parse_data(cls, result: ParseResult, data: dict) -> ParseResult:
         if not data.get("gravwell_agent"):
             result.errors.append("Not a GravWell agent output file")
             return result
@@ -73,26 +90,16 @@ class AgentParser(BaseParser):
                 host_map[extra] = h
             result.hosts.append(h)
 
-        # Pre-index port-scan results and hostnames by IP for O(1) merge
-        scan_ports: dict[str, list[dict]] = {}
+        # ── Single pass: build hostname + MAC lookup tables for neighbour merge.
+        # OS hints and open ports are consumed directly in section 3.
         scan_hostnames: dict[str, str] = {}
-        for scan in (data.get("port_scan") or []):
-            ip = scan.get("ip")
-            if not ip:
-                continue
-            scan_ports[ip] = scan.get("open_ports") or []
-            if scan.get("hostname"):
-                scan_hostnames[ip] = scan["hostname"]
-
-        # Pre-index os_hint and mac from scan results for merge
-        scan_os_hints: dict[str, str] = {}
         scan_macs: dict[str, str] = {}
         for scan in (data.get("port_scan") or []):
             ip = scan.get("ip")
             if not ip:
                 continue
-            if scan.get("os_hint"):
-                scan_os_hints[ip] = scan["os_hint"]
+            if scan.get("hostname"):
+                scan_hostnames[ip] = scan["hostname"]
             if scan.get("mac"):
                 scan_macs[ip] = scan["mac"]
 
@@ -115,8 +122,6 @@ class AgentParser(BaseParser):
                 mac=mac,
                 tags=tags,
             )
-            # Store LLDP enrichment fields as a banner on a virtual service so
-            # they survive into the DB without requiring schema changes.
             if neighbor.get("lldp_system_desc") and not h.os_name:
                 h.os_name = neighbor["lldp_system_desc"][:120]
             if neighbor.get("snmp_descr") and not h.os_name:
@@ -124,7 +129,7 @@ class AgentParser(BaseParser):
             host_map[ip] = h
             result.hosts.append(h)
 
-        # ── 2b. Physical links from LLDP (stored under meta in the payload) ────
+        # ── 2b. Physical links from LLDP ──────────────────────────────────────
         for link in (data.get("physical_links") or []):
             host_ip = link.get("host_ip", "")
             peer_ip = link.get("peer_ip", "")
@@ -152,27 +157,16 @@ class AgentParser(BaseParser):
                 host_map[ip] = h
                 result.hosts.append(h)
             host = host_map[ip]
-            # Update hostname from scan if missing
             if not host.hostnames and scan.get("hostname"):
                 host.hostnames = [scan["hostname"]]
-            # Update MAC from nmap if missing
             if not host.mac and scan.get("mac"):
                 host.mac = scan["mac"]
-            # Apply OS hint (from nmap -O or port-based inference)
             if scan.get("os_hint"):
                 hint = scan["os_hint"]
                 if not host.os_name:
                     host.os_name = hint
-                # Map hint to os_family if not already set
                 if not host.os_family:
-                    _family_map = {
-                        "Windows": "Windows",
-                        "Linux":   "Linux",
-                        "macOS":   "Linux",   # closest available family
-                        "Network": "Network",
-                    }
-                    host.os_family = _family_map.get(hint)
-            # Apply role hints as tags
+                    host.os_family = _OS_FAMILY_MAP.get(hint)
             for role in (scan.get("role_hints") or []):
                 if role not in host.tags:
                     host.tags.append(role)
@@ -181,7 +175,6 @@ class AgentParser(BaseParser):
                 if not port:
                     continue
 
-                # Synthesise a banner from http_server / http_title if no raw banner
                 banner = port_info.get("banner") or None
                 if not banner:
                     parts = []
@@ -200,7 +193,6 @@ class AgentParser(BaseParser):
                     banner=banner,
                 ))
 
-                # TLS certificate hostnames → add to host.hostnames
                 for hn in _tls_hostnames(port_info):
                     if hn not in host.hostnames:
                         host.hostnames.append(hn)

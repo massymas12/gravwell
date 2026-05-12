@@ -383,16 +383,36 @@ def collect_self() -> dict:
     except Exception as exc:
         _warn(f"Interface enumeration error: {exc}")
 
-    # Fallback: probe a remote addr so the OS picks a source IP
+    # Fallback tier 1: hostname resolution — pure local, zero network traffic.
+    # Works on air-gapped systems as long as the hostname is in /etc/hosts or DNS.
     if not interfaces:
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            interfaces = [{"name": "primary", "ip": ip, "netmask": "", "mac": ""}]
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip and not ip.startswith("127.") and ip != "0.0.0.0":
+                    interfaces = [{"name": "primary", "ip": ip, "netmask": "", "mac": ""}]
+                    break
         except Exception:
             pass
+
+    # Fallback tier 2: routing-table probe — UDP connect() sends NO packets;
+    # the OS simply consults its routing table to pick a source address.
+    # Try private addresses first so this works on isolated networks that
+    # have a local router but no internet access.
+    if not interfaces:
+        for _dst in ("192.168.1.1", "10.0.0.1", "172.16.0.1", "8.8.8.8"):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    s.connect((_dst, 80))
+                    ip = s.getsockname()[0]
+                finally:
+                    s.close()
+                if ip and not ip.startswith("127.") and ip != "0.0.0.0":
+                    interfaces = [{"name": "primary", "ip": ip, "netmask": "", "mac": ""}]
+                    break
+            except Exception:
+                continue
 
     all_ips = [i["ip"] for i in interfaces if i.get("ip")]
     all_macs = list({i["mac"] for i in interfaces if i.get("mac")})

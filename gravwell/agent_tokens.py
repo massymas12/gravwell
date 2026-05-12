@@ -16,9 +16,18 @@ import hashlib
 import json
 import pathlib
 import secrets
+import time
 from typing import Optional
 
 _TOKENS_FILE = pathlib.Path.home() / ".gravwell" / "agent_tokens.json"
+
+# ── In-memory cache ───────────────────────────────────────────────────────────
+# validate_token is called on every agent POST; avoid a file read each time.
+# The cache is invalidated (TTL reset to 0) on every write so revocations and
+# new tokens take effect on the very next validation request.
+_cache: dict[str, str] = {}   # {token_hash: db_path} for active tokens only
+_cache_expires: float = 0.0   # monotonic time after which the cache is stale
+_CACHE_TTL = 5.0              # seconds
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -38,13 +47,30 @@ def _load() -> list[dict]:
 
 
 def _save(entries: list[dict]) -> None:
+    global _cache_expires
     _TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_TOKENS_FILE, "w", encoding="utf-8") as fh:
+    # Write to a sibling temp file then rename for an atomic replacement.
+    # os.replace() is atomic on POSIX; on Windows it is best-effort
+    # (still far safer than truncating the file in-place).
+    tmp = _TOKENS_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(entries, fh, indent=2)
+    tmp.replace(_TOKENS_FILE)
     try:
         _TOKENS_FILE.chmod(0o600)
     except OSError:
         pass  # Windows doesn't support chmod; DB encryption compensates
+    _cache_expires = 0.0  # invalidate cache so the change is visible immediately
+
+
+def _rebuild_cache(entries: list[dict]) -> None:
+    global _cache, _cache_expires
+    _cache = {
+        e["hash"]: e["db_path"]
+        for e in entries
+        if e.get("active") and e.get("hash") and e.get("db_path")
+    }
+    _cache_expires = time.monotonic() + _CACHE_TTL
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -58,12 +84,12 @@ def create_token(label: str, db_path: str) -> str:
     token = secrets.token_hex(32)
     entries = _load()
     entries.append({
-        "id": secrets.token_hex(8),   # unique identifier for per-token revocation
+        "id": secrets.token_hex(8),
         "hash": _hash(token),
         "label": label,
         "db_path": str(db_path),
         "active": True,
-        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     })
     _save(entries)
     return token
@@ -71,13 +97,13 @@ def create_token(label: str, db_path: str) -> str:
 
 def validate_token(token: str) -> Optional[str]:
     """Return the db_path bound to *token*, or None if invalid / inactive."""
+    global _cache, _cache_expires
     if not token:
         return None
     h = _hash(token)
-    for entry in _load():
-        if entry.get("active") and entry.get("hash") == h:
-            return entry["db_path"]
-    return None
+    if time.monotonic() >= _cache_expires:
+        _rebuild_cache(_load())
+    return _cache.get(h)
 
 
 def list_for_project(db_path: str) -> list[dict]:

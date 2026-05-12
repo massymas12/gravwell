@@ -22,7 +22,7 @@ import gzip
 import json
 import logging
 import pathlib
-import tempfile
+import threading
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 from flask_login import current_user
@@ -31,6 +31,8 @@ from gravwell import agent_tokens
 from gravwell.database import get_session
 from gravwell.models.ingestion import ingest_parse_result
 from gravwell.parsers.agent import AgentParser
+
+_build_lock = threading.Lock()   # prevents concurrent PyInstaller runs
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +75,9 @@ def agent_submit():
     if not data or not data.get("gravwell_agent"):
         return jsonify(error="Not a GravWell agent payload"), 400
 
+    agent_host = (data.get("self") or {}).get("hostname", "unknown")
     try:
-        with tempfile.NamedTemporaryFile(
-            suffix=".agent.json", mode="w", delete=False, encoding="utf-8"
-        ) as fh:
-            json.dump(data, fh)
-            tmp_path = fh.name
-
-        parse_result = AgentParser.parse(pathlib.Path(tmp_path))
-        pathlib.Path(tmp_path).unlink(missing_ok=True)
+        parse_result = AgentParser.parse_dict(data, source_name=agent_host)
 
         if parse_result.errors:
             return jsonify(error="; ".join(parse_result.errors)), 422
@@ -89,7 +85,6 @@ def agent_submit():
         with get_session(db_path) as session:
             hosts_added, vulns_added, already = ingest_parse_result(session, parse_result)
 
-        agent_host = (data.get("self") or {}).get("hostname", "unknown")
         logger.info(
             "Agent submit from %s → project %s: +%d hosts, +%d vulns",
             agent_host, pathlib.Path(db_path).stem, hosts_added, vulns_added,
@@ -347,14 +342,18 @@ def upload_binary():
     if "file" not in request.files:
         return jsonify(error="No file field in request"), 400
 
+    _MAX_BINARY = 100 * 1024 * 1024  # 100 MB — generous for a PyInstaller binary
     f = request.files["file"]
-    data = f.read()
+    data = f.read(_MAX_BINARY + 1)
     if not data:
         return jsonify(error="Uploaded file is empty"), 400
+    if len(data) > _MAX_BINARY:
+        return jsonify(error=f"Upload exceeds {_MAX_BINARY // 1024 // 1024} MB limit"), 413
 
     _save_to_cache(platform, data)
+    actor = getattr(current_user, "username", "ci-token")
     logger.info("Agent binary uploaded: platform=%s size=%d by %s",
-                platform, len(data), current_user.username)
+                platform, len(data), actor)
     return jsonify(status="stored", platform=platform, size=len(data)), 201
 
 
@@ -371,12 +370,16 @@ def build_agent():
     if not current_user.is_authenticated or not current_user.is_admin:
         return jsonify(error="Admin access required"), 403
 
+    if not _build_lock.acquire(blocking=False):
+        return jsonify(error="A build is already in progress — try again shortly"), 409
+
     import io
     import subprocess
     import sys
     import tempfile
 
     if not _AGENT_PY.exists():
+        _build_lock.release()
         return jsonify(error="Agent script not found on server"), 404
 
     platform = _current_platform()
@@ -386,7 +389,6 @@ def build_agent():
     try:
         with tempfile.TemporaryDirectory(prefix="gravwell_build_") as tmp:
             tmp_path = pathlib.Path(tmp)
-            # Build from the unmodified collect.py — users pass --server/--key at runtime
             cmd = [
                 sys.executable, "-m", "PyInstaller",
                 "--onefile", "--clean", "--noconfirm",
@@ -419,8 +421,9 @@ def build_agent():
         _save_to_cache(platform, binary_bytes)
 
         download_name = exe_name + suffix
+        actor = getattr(current_user, "username", "ci-token")
         logger.info("Agent build complete: %s (%d bytes) by %s",
-                    download_name, len(binary_bytes), current_user.username)
+                    download_name, len(binary_bytes), actor)
         return send_file(
             io.BytesIO(binary_bytes),
             as_attachment=True,
@@ -433,3 +436,5 @@ def build_agent():
     except Exception as exc:
         logger.exception("Agent build error")
         return jsonify(error=f"Build error: {exc}"), 500
+    finally:
+        _build_lock.release()

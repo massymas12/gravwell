@@ -3572,44 +3572,46 @@ Examples:
     # 5. Active sweep — skipped in OT mode (broadcasts above replace it)
     known_open: Dict[str, List[int]] = {}
     if not args.no_sweep and not args.ot_mode:
-        # Always sweep directly-attached networks; add routed ones with --routes
-        sweep_nets = list(direct_nets)
+        if include_nets:
+            # --include is the explicit target list — scan exactly these, nothing else.
+            sweep_nets = [str(inc) for inc in include_nets]
+            _info(f"  Sweep targets: {len(sweep_nets)} explicitly included network(s)")
+        else:
+            # Derive from routing table.
+            sweep_nets = list(direct_nets)
 
-        # Fall back to deriving /24 from interface config if routing table gave nothing
-        if not sweep_nets:
-            for iface in self_info.get("interfaces", []):
-                ip = iface.get("ip")
-                nm = iface.get("netmask")
-                if not ip or not nm:
-                    continue
-                try:
-                    net = ipaddress.IPv4Network(f"{ip}/{nm}", strict=False)
-                    n24 = str(ipaddress.IPv4Network(f"{ip}/24", strict=False))
-                    if n24 not in sweep_nets:
-                        sweep_nets.append(n24)
-                except ValueError:
-                    pass
+            # Fall back to deriving /24 from interface config if routing table gave nothing
+            if not sweep_nets:
+                for iface in self_info.get("interfaces", []):
+                    ip = iface.get("ip")
+                    nm = iface.get("netmask")
+                    if not ip or not nm:
+                        continue
+                    try:
+                        net = ipaddress.IPv4Network(f"{ip}/{nm}", strict=False)
+                        n24 = str(ipaddress.IPv4Network(f"{ip}/24", strict=False))
+                        if n24 not in sweep_nets:
+                            sweep_nets.append(n24)
+                    except ValueError:
+                        pass
 
-        if args.routes and routed_nets:
-            _info(f"  Adding {len(routed_nets)} routed subnet(s) to sweep (--routes)")
-            sweep_nets += [n for n in routed_nets if n not in sweep_nets]
+            if args.routes and routed_nets:
+                _info(f"  Adding {len(routed_nets)} routed subnet(s) to sweep")
+                sweep_nets += [n for n in routed_nets if n not in sweep_nets]
 
-        if _has_filter:
-            filtered_nets = []
-            for cidr in sweep_nets:
-                try:
-                    net = ipaddress.IPv4Network(cidr, strict=False)
-                except ValueError:
-                    filtered_nets.append(cidr)
-                    continue
-                if exclude_nets and any(net.overlaps(ex) for ex in exclude_nets):
-                    _info(f"  Skipping sweep of {cidr} (excluded)")
-                    continue
-                if include_nets and not any(net.overlaps(inc) for inc in include_nets):
-                    _info(f"  Skipping sweep of {cidr} (not in --include list)")
-                    continue
-                filtered_nets.append(cidr)
-            sweep_nets = filtered_nets
+        # --exclude always removes from sweep regardless of how targets were determined
+        if exclude_nets:
+            before = len(sweep_nets)
+            sweep_nets = [
+                cidr for cidr in sweep_nets
+                if not any(
+                    ipaddress.IPv4Network(cidr, strict=False).overlaps(ex)
+                    for ex in exclude_nets
+                )
+            ]
+            removed = before - len(sweep_nets)
+            if removed:
+                _info(f"  {removed} network(s) removed from sweep by --exclude")
 
         if sweep_nets:
             has_routed = any(n in routed_nets for n in sweep_nets)

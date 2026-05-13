@@ -2555,7 +2555,7 @@ def _fping_sweep(targets: List[str], timeout_secs: float) -> Optional[List[str]]
         ms = max(100, int(timeout_secs * 1000))
         inp = "\n".join(targets).encode()
         r = subprocess.run(
-            ["fping", "-a", "-t", str(ms), "-f", "-"],
+            ["fping", "-a", "-t", str(ms), "-r", "2", "-f", "-"],
             input=inp,
             capture_output=True,
             timeout=len(targets) * timeout_secs / 10 + 60,
@@ -3612,7 +3612,12 @@ Examples:
             sweep_nets = filtered_nets
 
         if sweep_nets:
-            live, known_open = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=args.workers, rate_pps=args.rate)
+            has_routed = any(n in routed_nets for n in sweep_nets)
+            sweep_workers = args.workers
+            if has_routed:
+                sweep_workers = max(50, args.workers // 3)
+                _info(f"  Routed networks in scope: reducing workers {args.workers} → {sweep_workers} to avoid IDS triggering")
+            live, known_open = host_discovery(sweep_nets, timeout_secs=args.timeout, workers=sweep_workers, rate_pps=args.rate)
             for ip in live:
                 if ip not in existing_ips:
                     neighbors.append({"ip": ip, "source": "ping_sweep"})

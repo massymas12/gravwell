@@ -3647,16 +3647,26 @@ Examples:
         if scan_results:
             enrich_http(scan_results, timeout=min(args.timeout + 2, 4.0))
 
+    def _active_neighbors() -> List[dict]:
+        if not _has_filter:
+            return neighbors
+        return [n for n in neighbors if _ip_allowed(n["ip"], include_nets, exclude_nets)]
+
+    def _active_ips() -> List[str]:
+        if not _has_filter:
+            return list(existing_ips)
+        return [ip for ip in existing_ips if _ip_allowed(ip, include_nets, exclude_nets)]
+
     def _do_snmp() -> None:
         if not args.ot_mode:
-            enrich_snmp(neighbors, timeout=min(args.timeout + 0.5, 2.0))
+            enrich_snmp(_active_neighbors(), timeout=min(args.timeout + 0.5, 2.0))
 
     def _do_netbios() -> None:
         if not args.ot_mode:
-            enrich_netbios(neighbors, timeout_secs=min(args.timeout, 1.5))
+            enrich_netbios(_active_neighbors(), timeout_secs=min(args.timeout, 1.5))
 
     def _do_rdns() -> None:
-        rdns.update(reverse_dns_sweep(list(existing_ips)))
+        rdns.update(reverse_dns_sweep(_active_ips()))
 
     enrich_threads = [
         threading.Thread(target=_do_tls,     daemon=True),

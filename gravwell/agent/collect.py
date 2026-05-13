@@ -2305,13 +2305,13 @@ def host_discovery(
 ) -> Tuple[List[str], Dict[str, List[int]]]:
     """Discover live hosts across the given CIDR networks.
 
-    Priority:
-      1. nmap -sn         — ARP + TCP SYN + ICMP simultaneously. Best if available.
-      2. Raw SYN scan     — masscan-style; Linux/macOS + root only. Combines host
-                            discovery and port scan into one pass at up to rate_pps
-                            packets/second. Dead hosts cost zero wait time.
-      3. TCP connect()    — parallel socket connects; works everywhere without root.
-         + ICMP ping      — run concurrently with TCP to catch ICMP-only devices.
+    nmap and fping always run concurrently and results are merged — they are
+    complementary, not alternatives (nmap catches TCP-only hosts; fping catches
+    ICMP-only devices like printers, cameras, and many OT endpoints).
+
+    If neither is available, falls back to:
+      1. Raw SYN scan  — Linux/macOS + root only; combines discovery + port scan.
+      2. TCP connect() + ICMP ping — works everywhere without root.
 
     Returns (live_ips, known_open) where known_open is {ip: [open_ports]}
     — passed to port_scan to skip re-scanning already-confirmed ports.
@@ -2322,22 +2322,52 @@ def host_discovery(
 
     _info(f"Host discovery: {len(targets)} targets across {len(networks)} network(s)…")
 
-    # 1. nmap -sn
-    nmap_live = _nmap_host_discovery(targets, timeout_secs)
-    if nmap_live is not None:
-        _info(f"Host discovery done (nmap -sn): {len(nmap_live)} hosts")
-        return nmap_live, {}
+    # Run nmap -sn and fping concurrently — merge results.
+    nmap_bag:  List[List[str]] = []
+    fping_bag: List[List[str]] = []
 
-    # 2. Raw SYN scan — scans all _TOP_PORTS in one pass (discovery + port scan)
+    def _run_nmap() -> None:
+        r = _nmap_host_discovery(targets, timeout_secs)
+        if r is not None:
+            nmap_bag.append(r)
+
+    def _run_fping() -> None:
+        r = _fping_sweep(targets, timeout_secs)
+        if r is not None:
+            fping_bag.append(r)
+
+    t_nmap  = threading.Thread(target=_run_nmap,  daemon=True)
+    t_fping = threading.Thread(target=_run_fping, daemon=True)
+    t_nmap.start()
+    t_fping.start()
+    t_nmap.join()
+    t_fping.join()
+
+    nmap_live  = nmap_bag[0]  if nmap_bag  else None
+    fping_live = fping_bag[0] if fping_bag else None
+
+    if nmap_live is not None or fping_live is not None:
+        live_set: set = set(nmap_live or [])
+        extra_fping = [ip for ip in (fping_live or []) if ip not in live_set]
+        live_set.update(fping_live or [])
+        _info(
+            f"  nmap: {len(nmap_live or [])} hosts  |  "
+            f"fping: {len(fping_live or [])} hosts  |  "
+            f"{len(extra_fping)} additional via fping"
+        )
+        _info(f"Host discovery done: {len(live_set)} hosts")
+        return list(live_set), {}
+
+    # Neither nmap nor fping available — try raw SYN (Linux/macOS + root).
     raw = _raw_syn_scan(targets, _TOP_PORT_NUMS, timeout_secs, rate_pps)
     if raw is not None:
         live, known_open = raw
         _info(f"Host discovery done (raw SYN): {len(live)} hosts")
         return live, known_open
 
-    # 3. TCP connect + ICMP — run concurrently
+    # Last resort: TCP connect + ICMP ping, run concurrently.
     tcp_result: List[Tuple[List[str], Dict[str, List[int]]]] = []
-    icmp_live: List[str] = []
+    icmp_live:  List[str] = []
 
     def _run_tcp() -> None:
         tcp_result.append(_tcp_probe_sweep(targets, timeout_secs, workers))
@@ -2353,7 +2383,7 @@ def host_discovery(
     t_icmp.join()
 
     tcp_live, known_open = tcp_result[0] if tcp_result else ([], {})
-    live_set: set = set(tcp_live)
+    live_set = set(tcp_live)
     new_icmp = [ip for ip in icmp_live if ip not in live_set]
     live_set.update(icmp_live)
     _info(f"  TCP probe: {len(tcp_live)} hosts  |  ICMP: {len(new_icmp)} additional")

@@ -197,8 +197,8 @@ python gravwell-collect.py
 # Full collection + upload to GravWell (self-signed cert — skip TLS verification)
 python gravwell-collect.py --server https://gravwell.corp.local --key YOUR_TOKEN --no-verify-tls
 
-# Also sweep routed (non-directly-attached) subnets — useful on pivot hosts
-python gravwell-collect.py --routes --server https://gravwell.corp.local --key YOUR_TOKEN
+# Scan only the directly-attached subnet (skip networks behind the gateway)
+python gravwell-collect.py --no-routes --server https://gravwell.corp.local --key YOUR_TOKEN
 
 # Skip port scan (faster, discovery only)
 python gravwell-collect.py --no-scan

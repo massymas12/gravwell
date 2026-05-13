@@ -3298,7 +3298,7 @@ def _wizard(args) -> object:
         ot_scan = _ask_bool("Enable TCP port scan on discovered OT hosts? (only if devices tolerate it)", False)
     no_sweep = False if ot_mode else _ask_bool("Skip active host discovery (ping/TCP sweep)?", False)
     no_scan  = False if ot_mode else _ask_bool("Skip port scan?", False)
-    routes   = _ask_bool("Also sweep routed (non-directly-attached) subnets?", False)
+    routes   = _ask_bool("Sweep routed subnets (networks behind a gateway)?", True)
 
     print("\n── Tuning ──────────────────────────────────────────")
     timeout_str = _ask("Scan timeout in seconds", str(getattr(args, "timeout", 1.0)))
@@ -3394,8 +3394,8 @@ Examples:
     parser.add_argument("--key", "-k", default="", help="API key for server upload")
     parser.add_argument("--no-sweep", action="store_true", help="Skip active host discovery (TCP probe + ping)")
     parser.add_argument("--no-scan", action="store_true", help="Skip port scan")
-    parser.add_argument("--routes", action="store_true",
-                        help="Also sweep routed (non-directly-attached) subnets")
+    parser.add_argument("--no-routes", action="store_false", dest="routes",
+                        help="Only sweep directly-attached subnets (skip networks behind a gateway)")
     parser.add_argument("--timeout", type=float, default=1.0,
                         help="Scan/ping timeout in seconds (default: 1.0)")
     parser.add_argument("--workers", type=int, default=150,
@@ -3415,6 +3415,7 @@ Examples:
                              "(can repeat or comma-separate)")
     parser.add_argument("--exclude", action="append", default=[], metavar="CIDR",
                         help="Completely omit hosts inside this CIDR from output and all active probing")
+    parser.set_defaults(routes=True)
     args = parser.parse_args()
 
     # No flags given and running in an interactive terminal → guided setup
@@ -3432,6 +3433,13 @@ Examples:
     _info(f"GravWell Collection Agent v{VERSION}")
     if _is_elevated():
         _info("Running elevated — OS detection enabled")
+
+    import shutil as _shutil
+    _tools = [t for t in ("nmap", "fping") if _shutil.which(t)]
+    if _tools:
+        _info(f"External tools available: {', '.join(_tools)}")
+    else:
+        _info("No external tools found (nmap/fping not in PATH) — using built-in scanners")
 
     system = platform.system()
 

@@ -228,17 +228,23 @@ Binaries are built via the GitHub Actions workflow (`.github/workflows/build-age
 
 ### CIDR include / exclude filters
 
-Use `--include` and `--exclude` to scope collection to specific subnets. Both flags accept any number of CIDR prefixes and affect both active probing **and** the final output — excluded hosts will not appear in the results even if seen passively (ARP, mDNS, SSDP, etc.):
+`--include` and `--exclude` control both what gets actively scanned and what appears in the output.
+
+**`--include CIDR`** — defines the exact networks to sweep. When specified, the routing table is ignored and only the listed CIDRs are scanned. This is the right flag when you know exactly which segments you want — including remote or VPN-reachable subnets that may not appear in the local routing table:
 
 ```bash
-# Only collect hosts inside these two ranges
+# Scan exactly these two ranges — nothing else, regardless of routing table
 python gravwell-collect.py --include 10.1.0.0/16 --include 172.16.5.0/24
+```
 
-# Collect everything except the OT VLAN — excluded hosts are absent from output entirely
+**`--exclude CIDR`** — removes networks from the sweep and from the output entirely. Excluded hosts will not appear in results even if seen passively (ARP, mDNS, LLDP, etc.):
+
+```bash
+# Scan everything reachable except the OT VLAN
 python gravwell-collect.py --exclude 192.168.100.0/24
 ```
 
-Excludes take priority over includes. Both flags can be repeated or comma-separated.
+Both flags can be repeated or comma-separated. Excludes take priority and are applied after includes.
 
 ### OT / ICS Networks
 

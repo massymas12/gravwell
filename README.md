@@ -206,7 +206,7 @@ python gravwell-collect.py --no-scan
 # Restrict discovery to specific subnets (OT-safe scoping)
 python gravwell-collect.py --include 10.10.5.0/24 --include 10.10.6.0/24
 
-# Exclude a management VLAN from all active probing
+# Exclude a management VLAN completely (no probing, not in output)
 python gravwell-collect.py --exclude 192.168.1.0/24
 
 # OT / ICS mode — broadcast-only discovery, no TCP scan (safest)
@@ -228,17 +228,17 @@ Binaries are built via the GitHub Actions workflow (`.github/workflows/build-age
 
 ### CIDR include / exclude filters
 
-Use `--include` and `--exclude` to scope active discovery to specific subnets. Both flags accept any number of CIDR prefixes:
+Use `--include` and `--exclude` to scope collection to specific subnets. Both flags accept any number of CIDR prefixes and affect both active probing **and** the final output — excluded hosts will not appear in the results even if seen passively (ARP, mDNS, SSDP, etc.):
 
 ```bash
-# Only probe hosts inside these two ranges
+# Only collect hosts inside these two ranges
 python gravwell-collect.py --include 10.1.0.0/16 --include 172.16.5.0/24
 
-# Probe everything discovered except the OT VLAN
+# Collect everything except the OT VLAN — excluded hosts are absent from output entirely
 python gravwell-collect.py --exclude 192.168.100.0/24
 ```
 
-Excludes take priority over includes. Passive/local sources (ARP table, netstat, mDNS, SSDP) are always collected regardless — the filter applies only to active probe targets (sweep and port scan).
+Excludes take priority over includes. Both flags can be repeated or comma-separated.
 
 ### OT / ICS Networks
 

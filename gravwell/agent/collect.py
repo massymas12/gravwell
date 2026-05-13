@@ -3411,11 +3411,10 @@ Examples:
                         help="With --ot-mode: also run a low-concurrency TCP port scan on "
                              "discovered OT hosts (use only if you know your devices tolerate it)")
     parser.add_argument("--include", action="append", default=[], metavar="CIDR",
-                        help="Only actively probe hosts inside this CIDR "
-                             "(can repeat or comma-separate; passive data still collected for all hosts)")
+                        help="Only include hosts inside this CIDR in output and active probing "
+                             "(can repeat or comma-separate)")
     parser.add_argument("--exclude", action="append", default=[], metavar="CIDR",
-                        help="Never actively probe hosts inside this CIDR "
-                             "(OT-safe: excluded hosts still appear in output from passive sources)")
+                        help="Completely omit hosts inside this CIDR from output and all active probing")
     args = parser.parse_args()
 
     # No flags given and running in an interactive terminal → guided setup
@@ -3696,6 +3695,16 @@ Examples:
                 _info("  No VLAN data returned (switch may not support Q-BRIDGE-MIB)")
 
     # 8. Build payload
+    # Apply include/exclude filter to the final output so excluded hosts
+    # don't appear at all — even if seen passively.
+    if _has_filter:
+        before = len(neighbors)
+        neighbors = [n for n in neighbors if _ip_allowed(n["ip"], include_nets, exclude_nets)]
+        scan_results = [h for h in scan_results if _ip_allowed(h["ip"], include_nets, exclude_nets)]
+        removed = before - len(neighbors)
+        if removed:
+            _info(f"  {removed} host(s) removed from output by --include/--exclude filter")
+
     # Build physical link records from LLDP neighbors — one record per
     # (agent_ip, switch_ip) pair, labelled with the switch port we're on.
     physical_links: List[dict] = []

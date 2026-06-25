@@ -347,6 +347,19 @@ def export_drawio(db_path: str) -> str:
     cyto_centers    = {net: _subnet_cyto_center(net)         for net in subnet_ips}
     container_sizes = {net: _container_wh(len(subnet_ips[net])) for net in subnet_ips}
 
+    # ── Fallback: if no positions saved all centres collapse to (0,0) ────
+    # Detect by checking uniqueness; if every subnet maps to the same point,
+    # assign a synthetic grid so containers are spread across the canvas.
+    if len(set(cyto_centers.values())) <= 1 and len(nets) > 1:
+        _fc_cols = max(1, round(math.sqrt(len(nets))))
+        _fc_w    = max(cw for cw, _ in container_sizes.values())
+        _fc_h    = max(ch for _, ch in container_sizes.values())
+        for _fi, _fn in enumerate(nets):
+            cyto_centers[_fn] = (
+                (_fi % _fc_cols) * (_fc_w + _GAP_X),
+                (_fi // _fc_cols) * (_fc_h + _GAP_Y),
+            )
+
     # ── Compute a single scale from the 10th-percentile inter-center dist ─
     nets = list(subnet_ips.keys())
     pair_dists: list[float] = []
@@ -398,6 +411,19 @@ def export_drawio(db_path: str) -> str:
                 bx + _PAD + (k % cols) * _GRID_W,
                 by + _SWIM_TITLE + _PAD + (k // cols) * _GRID_H,
             )
+
+    # ── Clamp: shift everything right/down so no container is off-canvas ──
+    # Container centres are placed at _CANVAS_PAD but the left/top EDGE is
+    # centre − half_size, which goes negative for large containers.
+    if containers:
+        _sx = max(0.0, float(_CANVAS_PAD) - min(x for x, y, w, h in containers.values()))
+        _sy = max(0.0, float(_CANVAS_PAD) - min(y for x, y, w, h in containers.values()))
+        if _sx or _sy:
+            containers = {
+                n: (x + _sx, y + _sy, w, h)
+                for n, (x, y, w, h) in containers.items()
+            }
+            abs_pos = {ip: (ax + _sx, ay + _sy) for ip, (ax, ay) in abs_pos.items()}
 
     # ── Bridge nodes: float above centroid of connected subnets ───────────
     if bridge_subnets and containers:

@@ -1397,6 +1397,8 @@ def get_cytoscape_elements(
                 h2 = subnet_hub.get(s2)
                 if not h1 or not h2 or h1 == h2:
                     continue
+                if h1.startswith("vsw_") and h2.startswith("vsw_"):
+                    continue
                 key = tuple(sorted([h1, h2]))
                 if key in seen_inter:
                     continue

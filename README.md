@@ -15,8 +15,10 @@ GravWell ingests scan and assessment output from a wide range of tools, stores e
 - **Interactive network graph** — Dash + Cytoscape, automatic subnet grouping, drag-and-drop layout, multi-IP host support
 - **Attack path analysis** — shortest path between hosts, Kerberoastable targets, lateral movement vectors, AD domain enumeration, admin interface exposure
 - **CVE enrichment** — CISA KEV (is this CVE actively exploited in the wild?), FIRST.org EPSS (0–100% probability of exploitation in the next 30 days), and NIST NVD CVSS v3 base scores — all fetched on demand and overlaid on every vulnerability view and export
-- **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover) and per-project access control; all managed from the web UI
+- **RBAC multi-user** — granular per-user permissions (Edit, Import, Discover, Export) and per-project access control; all managed from the web UI
 - **Multi-project** — separate encrypted databases per engagement; create, rename, and delete from the sidebar
+- **Project export / import** — export an entire project (hosts, vulns, scan files, LLDP topology, VLANs, graph layout) to an AES-256-GCM encrypted `.gwexport` bundle with a one-time passphrase; import on any other GravWell instance — graph layout is preserved so the diagram looks identical on arrival
+- **draw.io map export** — export the network map as a `.drawio` file that opens in the free [diagrams.net](https://app.diagrams.net) browser app or desktop client; subnet groups, OS colour coding, severity borders, open ports, LLDP links, and a colour legend are all included; customers can re-export to Visio, PDF, SVG, or PNG and freely edit the diagram
 - **Active discovery** — ping sweep, ARP, TCP port scan, UDP probes (DNS/NTP/SNMP — no raw sockets required), SNMP enumeration with neighbour walk (ARP cache, CDP, LLDP); also available as `gravwell discover` CLI command
 - **Passive discovery** — sniff a VPN or network interface to find hosts that won't respond to active probes; tags DNS resolver sources automatically
 - **CLI + Web UI** — full-featured CLI for scripted workflows, browser-based UI for analysis
@@ -508,13 +510,85 @@ Click any node to open the detail panel, then click **Edit** to:
 
 ### Data export
 
-**☰ → Export** produces:
+**☰ → Export** (requires the **Export** permission) produces:
 
 | Format | Contents |
 |--------|----------|
 | **CSV** | Two sections in one file: Hosts (IP, hostname, OS, MAC, ports, CVSS counts, tags, notes) and Vulnerabilities (CVE IDs, CVSS, severity, KEV status, EPSS score, EPSS percentile) |
 | **XLSX** | Same data as CSV but split into two labelled sheets |
 | **PNG** | Full-resolution image of the current graph at natural scale |
+| **draw.io (.drawio)** | Editable network diagram — see [draw.io Map Export](#drawio-map-export) |
+| **Project (.gwexport)** | Encrypted full-project bundle — see [Project Export / Import](#project-export--import) |
+
+---
+
+## draw.io Map Export
+
+**☰ → Export Map (.drawio)** generates a `.drawio` file for the current project that opens in the free [diagrams.net](https://app.diagrams.net) browser app or the [draw.io desktop app](https://github.com/jgraph/drawio-desktop/releases) (Windows / macOS / Linux). No account required.
+
+### What's in the diagram
+
+| Element | Visual treatment |
+|---------|-----------------|
+| **Subnet groups** | Swimlane containers labelled with CIDR and custom subnet label (if set) |
+| **Windows hosts** | Blue fill (`#dae8fc`) |
+| **Linux hosts** | Green fill (`#d5e8d4`) |
+| **macOS hosts** | Teal fill (`#d5e8d4`, green stroke) |
+| **Network devices** | Yellow fill (`#fff2cc`), diamond / rhombus shape |
+| **Unknown OS** | Grey fill (`#f5f5f5`) |
+| **Critical vulns (CVSS ≥ 9)** | Red border, 3 px stroke |
+| **High vulns (CVSS ≥ 7)** | Orange border, 2 px stroke |
+| **Medium vulns (CVSS ≥ 4)** | Amber border, 2 px stroke |
+| **Node label** | Bold IP / hostname, italicised OS name, top 6 open ports, vuln count badge |
+| **LLDP / physical links** | Solid green connector with port-ID label |
+| **Custom edges** | Dashed blue connector with user-defined label |
+| **Legend** | Colour and severity key placed to the right of the canvas |
+
+Node positions are taken from the saved layout in the database, so the diagram matches what is on screen at the time of export.
+
+### Re-exporting from diagrams.net
+
+From diagrams.net customers can re-export to:
+- **Microsoft Visio** (`.vsdx`) — **File → Export as → VSDX**
+- **PDF** — **File → Export as → PDF**
+- **SVG** — **File → Export as → SVG**
+- **PNG** — **File → Export as → PNG** (with DPI control)
+
+The diagram is fully editable — customers can move nodes, change labels, add annotations, and apply custom styles before sharing.
+
+---
+
+## Project Export / Import
+
+**☰ → Export Project (.gwexport)** bundles the entire current project into a single encrypted file:
+
+- All hosts, services, vulnerabilities, and CVE references
+- Scan file metadata (file names, parsers, host counts, ingest timestamps)
+- Physical / LLDP links, VLANs, inter-VLAN FDB entries
+- Subnet labels
+- Custom edges
+- **Node positions** — the recipient's graph will look identical to yours after import
+- Host notes, subnet overrides, and role overrides
+
+### Encryption
+
+The bundle is encrypted with **AES-256-GCM** using a key derived from an export passphrase via **PBKDF2-HMAC-SHA256** (480,000 iterations, 16-byte random salt). The passphrase is entered at export time, never stored anywhere, and must be shared out-of-band with the recipient. The passphrase is separate from any GravWell login password.
+
+### Export workflow
+
+1. **☰ → Export Project (.gwexport)**
+2. Enter an export passphrase and confirm it
+3. Click **Export** — a `gravwell_export_<timestamp>.gwexport` file downloads
+
+### Import workflow
+
+The recipient can import via **drag-and-drop** or **path import**:
+
+**Drag-and-drop:** Drop the `.gwexport` file onto the Import area in the sidebar → the passphrase modal appears → enter the passphrase → click **Import**
+
+**Path import:** Paste the full server path to the `.gwexport` file → click **Import from Path** → enter the passphrase → click **Import**
+
+Import merges into the existing project — hosts are upserted by IP, vulnerabilities deduplicated by plugin ID and port, and node positions are always overwritten so the sender's graph layout is reproduced. Existing data that is not in the bundle is left unchanged.
 
 ---
 
@@ -577,8 +651,9 @@ Every user has a **Role** and a set of **Permissions**, configured at creation t
 | Permission | What it allows |
 |------------|----------------|
 | **Edit** | Modify host properties, tags, notes, and node layout |
-| **Import** | Upload and ingest scan files |
+| **Import** | Upload and ingest scan files; import `.gwexport` project bundles |
 | **Discover** | Run active and passive network discovery (ping, ARP, TCP, UDP, SNMP, passive listen) |
+| **Export** | Download CSV, XLSX, PNG, draw.io map, and `.gwexport` project bundles |
 
 **Project access** can be set to *All projects* (including future ones) or restricted to a named list of specific projects. Non-admin users only see projects they are allowed to access in the sidebar dropdown.
 

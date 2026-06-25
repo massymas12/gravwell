@@ -245,25 +245,27 @@ def register(app: dash.Dash) -> None:
         Output("drawio-export-download", "data"),
         Output("hamburger-menu", "style", allow_duplicate=True),
         Output("hamburger-backdrop", "style", allow_duplicate=True),
+        Output("drawio-export-status", "children"),
         Input("export-drawio-menu-item", "n_clicks"),
         prevent_initial_call=True,
     )
     def trigger_drawio_export(n_clicks):
         if not n_clicks:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         if not current_user.is_authenticated or not current_user.can("export"):
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         from gravwell.drawio import export_drawio
         db_path = current_app.config["GRAVWELL_DB_PATH"]
         try:
             xml = export_drawio(db_path)
         except Exception as e:
-            return no_update, {"display": "none"}, {"display": "none"}
+            return no_update, {"display": "none"}, {"display": "none"}, ""
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return (
             dcc.send_string(xml, f"network_map_{stamp}.drawio"),
             {"display": "none"},
             {"display": "none"},
+            "",
         )
 
     # ── Project export (.gwexport) ────────────────────────────────────────────

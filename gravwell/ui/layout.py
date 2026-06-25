@@ -574,6 +574,14 @@ def create_layout() -> html.Div:
             dcc.Download(id="project-export-download"),
             dcc.Download(id="drawio-export-download"),
             dcc.Store(id="export-png-dummy"),
+            # Fullscreen spinner while draw.io export is generating
+            dcc.Loading(
+                id="drawio-export-loading",
+                type="circle",
+                color="#5DADE2",
+                fullscreen=True,
+                children=html.Div(id="drawio-export-status"),
+            ),
             # Hidden text input: JS writes graph coords here to trigger the Add Node modal.
             # Must be type="text" (not "hidden") so React attaches its onChange handler
             # and the programmatic value-setter + dispatchEvent trick works.

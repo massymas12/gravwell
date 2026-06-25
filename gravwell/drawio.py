@@ -19,12 +19,12 @@ import xml.etree.ElementTree as ET
 # ── Layout constants (all in draw.io pixels) ─────────────────────────────────
 _NODE_W     = 140   # host node width
 _NODE_H     = 65    # host node height
-_GW_SIZE    = 80    # network-device rhombus (square bounding box)
+_GW_SIZE    = 64    # network-device icon (square)
 _SWIM_TITLE = 30    # swimlane header bar height
 _PAD        = 28    # padding inside container around child nodes
 _CANVAS_PAD = 80    # canvas border offset
 _GRID_W     = _NODE_W + 24   # column stride within a container
-_GRID_H     = _NODE_H + 20   # row stride within a container
+_GRID_H     = _NODE_H + 40   # row stride — extra height for gateway labels below icon
 _GRID_COLS  = 6              # max columns per subnet container
 _GAP_X      = 40             # horizontal gap between containers
 _GAP_Y      = 60             # vertical gap between rows of containers
@@ -47,18 +47,17 @@ def _hesc(s: str) -> str:
 
 
 def _os_fill(os_family: str | None) -> tuple[str, str]:
-    """Return (fillColor, strokeColor) keyed on OS family."""
+    """Return (fillColor, strokeColor) keyed on OS family — dark theme."""
     f = (os_family or "").lower()
-    if "windows" in f: return "#dae8fc", "#6c8ebf"
-    if "linux"   in f: return "#d5e8d4", "#82b366"
-    if "mac"     in f: return "#d5e8d4", "#009966"
-    if "network" in f: return "#fff2cc", "#d6b656"
-    return "#f5f5f5", "#666666"
+    if "windows" in f: return "#1a3050", "#4a9eda"   # dark navy / bright blue
+    if "linux"   in f: return "#1a3520", "#5cb85c"   # dark green / lime
+    if "mac"     in f: return "#1a2e25", "#00c853"   # dark teal  / bright green
+    if "network" in f: return "#2e2200", "#ffc107"   # dark amber / yellow
+    return "#1a1a2e", "#5a6a8a"                       # dark navy  / grey-blue
 
 
 def _node_style(os_family: str | None, max_cvss: float, is_gw: bool) -> str:
     fill, stroke = _os_fill(os_family)
-    shape = "rhombus;" if is_gw else "rounded=1;"
     if max_cvss >= 9.0:
         stroke, sw = "#CC0000", "strokeWidth=3;"
     elif max_cvss >= 7.0:
@@ -67,9 +66,17 @@ def _node_style(os_family: str | None, max_cvss: float, is_gw: bool) -> str:
         stroke, sw = "#B8860B", "strokeWidth=2;"
     else:
         sw = ""
+    if is_gw:
+        # Cisco router icon with label rendered below the shape
+        return (
+            f"shape=mxgraph.cisco.routers.router;sketch=0;html=1;dashed=0;"
+            f"fillColor={fill};strokeColor={stroke};fontColor=#ffffff;"
+            f"fontSize=10;fontStyle=1;align=center;"
+            f"verticalLabelPosition=bottom;verticalAlign=top;{sw}"
+        )
     return (
-        f"{shape}whiteSpace=wrap;html=1;fontSize=10;align=center;"
-        f"fillColor={fill};strokeColor={stroke};{sw}"
+        f"rounded=1;whiteSpace=wrap;html=1;fontSize=10;align=center;"
+        f"fillColor={fill};strokeColor={stroke};fontColor=#ffffff;{sw}"
     )
 
 
@@ -88,20 +95,20 @@ def _node_label(h, services: list, max_cvss: float, vuln_count: int) -> str:
         parts.append(f"<b>{_hesc(ip)}</b>")
 
     if os_name:
-        parts.append(f"<font color='#888888'><i>{_hesc(os_name)}</i></font>")
+        parts.append(f"<font color='#aaaacc'><i>{_hesc(os_name)}</i></font>")
 
     open_ports = sorted(
         {s.port for s in services if s.state == "open" and s.port}
     )[:6]
     if open_ports:
-        parts.append(f"<font color='#555555'>{', '.join(str(p) for p in open_ports)}</font>")
+        parts.append(f"<font color='#8899bb'>{', '.join(str(p) for p in open_ports)}</font>")
 
     if max_cvss >= 9.0:
-        parts.append(f"<font color='#CC0000'><b>&#9888; Critical ({vuln_count})</b></font>")
+        parts.append(f"<font color='#ff4444'><b>&#9888; Critical ({vuln_count})</b></font>")
     elif max_cvss >= 7.0:
-        parts.append(f"<font color='#E65100'>&#9888; High ({vuln_count})</font>")
+        parts.append(f"<font color='#ff8c42'>&#9888; High ({vuln_count})</font>")
     elif max_cvss >= 4.0 and vuln_count:
-        parts.append(f"<font color='#B8860B'>{vuln_count} medium vulns</font>")
+        parts.append(f"<font color='#f0c040'>{vuln_count} medium vulns</font>")
 
     return "<br>".join(parts)
 
@@ -109,11 +116,11 @@ def _node_label(h, services: list, max_cvss: float, vuln_count: int) -> str:
 def _legend_xml(root: ET.Element, x: float, y: float) -> None:
     """Append a colour/severity legend box to the XML root."""
     items = [
-        ("Windows",         "#dae8fc", "#6c8ebf"),
-        ("Linux",           "#d5e8d4", "#82b366"),
-        ("macOS",           "#d5e8d4", "#009966"),
-        ("Network Device",  "#fff2cc", "#d6b656"),
-        ("Unknown OS",      "#f5f5f5", "#666666"),
+        ("Windows",         "#1a3050", "#4a9eda"),
+        ("Linux",           "#1a3520", "#5cb85c"),
+        ("macOS",           "#1a2e25", "#00c853"),
+        ("Network Device",  "#2e2200", "#ffc107"),
+        ("Unknown OS",      "#1a1a2e", "#5a6a8a"),
     ]
     sev = [
         ("Critical vuln (CVSS ≥9)",   "#CC0000", "3"),
@@ -121,14 +128,14 @@ def _legend_xml(root: ET.Element, x: float, y: float) -> None:
         ("Medium vuln  (CVSS ≥4)",    "#B8860B", "2"),
     ]
 
-    # Legend container
+    # Legend container — dark theme
     lw, lh = 210, 30 + len(items) * 22 + 10 + len(sev) * 22 + 10
     box = ET.SubElement(root, "mxCell", {
         "id": "legend_box",
         "value": "<b>Legend</b>",
         "style": (
-            "swimlane;startSize=24;fillColor=#1a1a2e;strokeColor=#444;"
-            "fontColor=#ffffff;fontStyle=1;fontSize=11;align=center;"
+            "swimlane;startSize=24;fillColor=#0d1b2e;strokeColor=#334466;"
+            "fontColor=#7eb8e8;fontStyle=1;fontSize=11;align=center;"
         ),
         "vertex": "1", "parent": "1",
     })
@@ -144,7 +151,7 @@ def _legend_xml(root: ET.Element, x: float, y: float) -> None:
             "value": label,
             "style": (
                 f"rounded=1;whiteSpace=wrap;html=1;fontSize=10;align=left;"
-                f"fillColor={fill};strokeColor={stroke};spacingLeft=6;"
+                f"fillColor={fill};strokeColor={stroke};fontColor=#ffffff;spacingLeft=6;"
             ),
             "vertex": "1", "parent": "legend_box",
         })
@@ -161,7 +168,8 @@ def _legend_xml(root: ET.Element, x: float, y: float) -> None:
             "value": label,
             "style": (
                 f"rounded=1;whiteSpace=wrap;html=1;fontSize=10;align=left;"
-                f"fillColor=#f5f5f5;strokeColor={stroke};strokeWidth={sw};spacingLeft=6;"
+                f"fillColor=#1a1a2e;strokeColor={stroke};strokeWidth={sw};"
+                f"fontColor=#ffffff;spacingLeft=6;"
             ),
             "vertex": "1", "parent": "legend_box",
         })
@@ -344,11 +352,12 @@ def export_drawio(db_path: str) -> str:
         })
         ET.SubElement(c, "mxGeometry", {"relative": "1", "as": "geometry"})
 
-    # Subnet swimlane containers
+    # Subnet swimlane containers — dark theme to match Cytoscape UI
     swim_style = (
-        "swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#aaaaaa;"
-        "fontStyle=1;fontSize=11;fontColor=#333333;align=center;"
+        "swimlane;startSize=30;fillColor=#0d1b2e;strokeColor=#334466;"
+        "fontStyle=1;fontSize=11;fontColor=#7eb8e8;align=center;"
         "whiteSpace=wrap;html=1;swimlaneLine=1;"
+        "swimlaneHead=0;swimlaneLine=1;"
     )
     for net, (cx, cy, cw, ch) in sorted(containers.items()):
         title = f"<b>{_hesc(subnet_labels[net])}</b><br>{net}" if subnet_labels.get(net) else net
@@ -363,8 +372,18 @@ def export_drawio(db_path: str) -> str:
         max_cvss  = max((v.cvss_score or 0.0 for v in vs), default=0.0)
         vcount    = len(vs)
         is_gw     = bool(h.os_family and "network" in h.os_family.lower())
-        label     = _node_label(h, svcs, max_cvss, vcount)
         style     = _node_style(h.os_family, max_cvss, is_gw)
+        if is_gw:
+            # Short label rendered below the router icon
+            primary = h.hostnames[0] if h.hostnames else h.ip
+            gw_parts = [f"<b>{_hesc(primary)}</b>"]
+            if primary != h.ip:
+                gw_parts.append(_hesc(h.ip))
+            if max_cvss >= 7.0:
+                gw_parts.append(f"<font color='#ff4444'>&#9888; {vcount}</font>")
+            label = "<br>".join(gw_parts)
+        else:
+            label = _node_label(h, svcs, max_cvss, vcount)
         hid       = f"h_{_sid(ip)}"
         ax, ay    = abs_pos[ip]
         net       = ip_to_subnet.get(ip, "unassigned")

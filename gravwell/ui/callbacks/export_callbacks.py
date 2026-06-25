@@ -1,11 +1,12 @@
-"""Export callbacks — CSV, XLSX, and graph PNG downloads."""
+"""Export callbacks — CSV, XLSX, graph PNG, and .gwexport project bundles."""
 from __future__ import annotations
+import base64
 import csv
 import io
 from datetime import datetime
 
 import dash
-from dash import Input, Output, State, no_update, dcc
+from dash import Input, Output, State, html, no_update, dcc
 from flask import current_app
 from flask_login import current_user
 from gravwell.models.enrichment import resolve_vuln_name
@@ -236,4 +237,164 @@ def register(app: dash.Dash) -> None:
             {"_t": n_clicks},
             {"display": "none"},
             {"display": "none"},
+        )
+
+    # ── Map export (.drawio) ─────────────────────────────────────────────────
+
+    @app.callback(
+        Output("drawio-export-download", "data"),
+        Output("hamburger-menu", "style", allow_duplicate=True),
+        Output("hamburger-backdrop", "style", allow_duplicate=True),
+        Input("export-drawio-menu-item", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def trigger_drawio_export(n_clicks):
+        if not n_clicks:
+            return no_update, no_update, no_update
+        if not current_user.is_authenticated or not current_user.can("export"):
+            return no_update, no_update, no_update
+        from gravwell.drawio import export_drawio
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        try:
+            xml = export_drawio(db_path)
+        except Exception as e:
+            return no_update, {"display": "none"}, {"display": "none"}
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return (
+            dcc.send_string(xml, f"network_map_{stamp}.drawio"),
+            {"display": "none"},
+            {"display": "none"},
+        )
+
+    # ── Project export (.gwexport) ────────────────────────────────────────────
+
+    @app.callback(
+        Output("export-project-modal-overlay", "style"),
+        Output("hamburger-menu", "style", allow_duplicate=True),
+        Output("hamburger-backdrop", "style", allow_duplicate=True),
+        Input("export-project-menu-item", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_export_project_modal(n_clicks):
+        if not n_clicks:
+            return no_update, no_update, no_update
+        closed = {"display": "none"}
+        return {"display": "flex"}, closed, closed
+
+    @app.callback(
+        Output("export-project-modal-overlay", "style", allow_duplicate=True),
+        Output("export-project-passphrase", "value"),
+        Output("export-project-passphrase-confirm", "value"),
+        Output("export-project-error", "children"),
+        Input("export-project-modal-close", "n_clicks"),
+        Input("cancel-export-project-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def close_export_project_modal(_close, _cancel):
+        return {"display": "none"}, "", "", ""
+
+    @app.callback(
+        Output("project-export-download", "data"),
+        Output("export-project-modal-overlay", "style", allow_duplicate=True),
+        Output("export-project-passphrase", "value", allow_duplicate=True),
+        Output("export-project-passphrase-confirm", "value", allow_duplicate=True),
+        Output("export-project-error", "children", allow_duplicate=True),
+        Input("confirm-export-project-btn", "n_clicks"),
+        State("export-project-passphrase", "value"),
+        State("export-project-passphrase-confirm", "value"),
+        prevent_initial_call=True,
+    )
+    def do_project_export(n_clicks, passphrase, confirm):
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update, no_update
+        if not current_user.is_authenticated or not current_user.can("export"):
+            return no_update, no_update, no_update, no_update, "Not authorized."
+        passphrase = (passphrase or "").strip()
+        confirm    = (confirm    or "").strip()
+        if not passphrase:
+            return no_update, no_update, no_update, no_update, "Passphrase cannot be empty."
+        if passphrase != confirm:
+            return no_update, no_update, no_update, no_update, "Passphrases do not match."
+        from gravwell.export import export_project, encrypt_bundle
+        db_path = current_app.config["GRAVWELL_DB_PATH"]
+        try:
+            blob = encrypt_bundle(export_project(db_path), passphrase)
+        except Exception as e:
+            return no_update, no_update, no_update, no_update, f"Export failed: {e}"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return (
+            dcc.send_bytes(blob, f"gravwell_export_{stamp}.gwexport"),
+            {"display": "none"},
+            "", "",
+            "",
+        )
+
+    # ── Project import (.gwexport) ────────────────────────────────────────────
+
+    @app.callback(
+        Output("import-project-modal-overlay", "style", allow_duplicate=True),
+        Output("import-project-passphrase", "value"),
+        Output("import-project-error", "children"),
+        Input("import-project-modal-close", "n_clicks"),
+        Input("cancel-import-project-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def close_import_project_modal(_close, _cancel):
+        return {"display": "none"}, "", ""
+
+    @app.callback(
+        Output("import-project-filename-label", "children"),
+        Input("gwexport-pending-store", "data"),
+        prevent_initial_call=True,
+    )
+    def update_import_filename_label(pending):
+        if not pending:
+            return ""
+        filename = pending.get("filename", "export file")
+        return f"File: {filename}"
+
+    @app.callback(
+        Output("import-project-modal-overlay", "style", allow_duplicate=True),
+        Output("import-project-passphrase", "value", allow_duplicate=True),
+        Output("import-project-error", "children", allow_duplicate=True),
+        Output("upload-status", "children", allow_duplicate=True),
+        Output("scan-file-list", "children", allow_duplicate=True),
+        Output("data-refresh-trigger", "data", allow_duplicate=True),
+        Input("confirm-import-project-btn", "n_clicks"),
+        State("import-project-passphrase", "value"),
+        State("gwexport-pending-store", "data"),
+        State("data-refresh-trigger", "data"),
+        prevent_initial_call=True,
+    )
+    def do_project_import(n_clicks, passphrase, pending, refresh_counter):
+        if not n_clicks or not pending:
+            return no_update, no_update, no_update, no_update, no_update, no_update
+        if not current_user.is_authenticated or not current_user.can("import"):
+            return no_update, no_update, "Not authorized.", no_update, no_update, no_update
+        passphrase = (passphrase or "").strip()
+        if not passphrase:
+            return no_update, no_update, "Passphrase cannot be empty.", no_update, no_update, no_update
+        from gravwell.export import decrypt_bundle, import_project
+        from gravwell.ui.callbacks.import_callbacks import _build_scan_file_list
+        db_path  = current_app.config["GRAVWELL_DB_PATH"]
+        filename = pending.get("filename", "export")
+        try:
+            raw        = base64.b64decode(pending["contents_b64"])
+            json_bytes = decrypt_bundle(raw, passphrase)
+            h_count, v_count = import_project(json_bytes, db_path)
+        except ValueError as e:
+            return no_update, no_update, str(e), no_update, no_update, no_update
+        except Exception as e:
+            return no_update, no_update, f"Import failed: {e}", no_update, no_update, no_update
+        status = html.Div(
+            f"Imported {filename}: {h_count} hosts, {v_count} vulns",
+            style={"color": "#27AE60", "fontSize": "12px"},
+        )
+        return (
+            {"display": "none"},
+            "",
+            "",
+            status,
+            _build_scan_file_list(db_path),
+            (refresh_counter or 0) + 1,
         )

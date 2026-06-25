@@ -335,13 +335,16 @@ _LARGE_FILE_JS = """
     return true;
   }
 
-  // Try immediately, then retry after React mounts the component.
+  // Try immediately, retry until React mounts the component, then keep checking
+  // slowly so the guard survives any future React reconciliation that replaces
+  // the hidden <input type="file"> element.
   if (!interceptBrowseInput()) {
     var _retries = 0;
     var _iv = setInterval(function () {
       if (interceptBrowseInput() || ++_retries > 20) clearInterval(_iv);
     }, 300);
   }
+  setInterval(interceptBrowseInput, 10000);
 })();
 """
 
@@ -718,7 +721,7 @@ _CY_GLOBAL_JS = """
              Snap hub back and shift all compound children by (dx,dy) so
              dragging the hub feels like dragging the whole subnet box.
              Regular host nodes inside a subnet drag individually. */
-          if (nodeType === 'host' && parentId &&
+          if ((nodeType === 'host' || nodeType === 'virtual_switch') && parentId &&
               (target.hasClass('subnet-hub') || target.hasClass('bridge-node'))) {
             var parent = target.parent();
             if (!parent || !parent.length) return;

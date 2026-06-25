@@ -713,7 +713,7 @@ def register(app: dash.Dash) -> None:
             var positions = {};
             cy.nodes().forEach(function(node) {
                 var data = node.data();
-                if (data.node_type === 'host' && data.ip) {
+                if ((data.node_type === 'host' || data.node_type === 'virtual_switch') && data.ip) {
                     var pos = node.position();
                     positions[data.ip] = {
                         x: Math.round(pos.x * 10) / 10,
@@ -740,7 +740,7 @@ def register(app: dash.Dash) -> None:
             var positions = {};
             cy.nodes().forEach(function(node) {
                 var data = node.data();
-                if (data.node_type === 'host' && data.ip) {
+                if ((data.node_type === 'host' || data.node_type === 'virtual_switch') && data.ip) {
                     var pos = node.position();
                     positions[data.ip] = {
                         x: Math.round(pos.x * 10) / 10,
@@ -766,7 +766,7 @@ def register(app: dash.Dash) -> None:
             var positions = {};
             cy.nodes().forEach(function(node) {
                 var data = node.data();
-                if (data.node_type === 'host' && data.ip) {
+                if ((data.node_type === 'host' || data.node_type === 'virtual_switch') && data.ip) {
                     var pos = node.position();
                     positions[data.ip] = {
                         x: Math.round(pos.x * 10) / 10,

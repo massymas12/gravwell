@@ -458,6 +458,99 @@ def _create_agent_tokens_modal() -> html.Div:
     )
 
 
+def _create_export_project_modal() -> html.Div:
+    """Modal for setting an export passphrase before downloading a .gwexport file."""
+    return html.Div(
+        id="export-project-modal-overlay",
+        style={"display": "none"},
+        className="modal-overlay",
+        children=[
+            html.Div(
+                className="edit-modal",
+                style={"width": "380px"},
+                children=[
+                    html.Div([
+                        html.H3("Export Project",
+                                style={"margin": 0, "fontSize": "15px",
+                                       "color": "#5DADE2"}),
+                        html.Button("×", id="export-project-modal-close",
+                                    className="modal-close-btn"),
+                    ], className="modal-header"),
+                    html.Div([
+                        html.Div(
+                            "The export file will be encrypted with the passphrase "
+                            "below. Share this passphrase with the recipient — they "
+                            "will need it to import the file.",
+                            style={"fontSize": "11px", "color": "#aaa",
+                                   "marginBottom": "10px"},
+                        ),
+                        html.Label("Export Passphrase", className="edit-label"),
+                        dcc.Input(id="export-project-passphrase", type="password",
+                                  placeholder="Enter passphrase",
+                                  className="edit-input", debounce=False),
+                        html.Label("Confirm Passphrase", className="edit-label"),
+                        dcc.Input(id="export-project-passphrase-confirm",
+                                  type="password",
+                                  placeholder="Confirm passphrase",
+                                  className="edit-input", debounce=False),
+                        html.Div(id="export-project-error",
+                                 style={"color": "#E74C3C", "fontSize": "11px",
+                                        "marginTop": "6px", "minHeight": "14px"}),
+                    ], className="modal-body"),
+                    html.Div([
+                        html.Button("Export", id="confirm-export-project-btn",
+                                    className="btn btn-primary btn-sm", n_clicks=0),
+                        html.Button("Cancel", id="cancel-export-project-btn",
+                                    className="btn btn-secondary btn-sm", n_clicks=0),
+                    ], className="modal-footer"),
+                ],
+            ),
+        ],
+    )
+
+
+def _create_import_project_modal() -> html.Div:
+    """Modal for entering the passphrase to decrypt an incoming .gwexport file."""
+    return html.Div(
+        id="import-project-modal-overlay",
+        style={"display": "none"},
+        className="modal-overlay",
+        children=[
+            html.Div(
+                className="edit-modal",
+                style={"width": "380px"},
+                children=[
+                    html.Div([
+                        html.H3("Import Project",
+                                style={"margin": 0, "fontSize": "15px",
+                                       "color": "#5DADE2"}),
+                        html.Button("×", id="import-project-modal-close",
+                                    className="modal-close-btn"),
+                    ], className="modal-header"),
+                    html.Div([
+                        html.Div(id="import-project-filename-label",
+                                 style={"fontSize": "11px", "color": "#aaa",
+                                        "marginBottom": "10px"}),
+                        html.Label("Export Passphrase", className="edit-label"),
+                        dcc.Input(id="import-project-passphrase", type="password",
+                                  placeholder="Enter the passphrase from the sender",
+                                  className="edit-input", debounce=False),
+                        html.Div(id="import-project-error",
+                                 style={"color": "#E74C3C", "fontSize": "11px",
+                                        "marginTop": "6px", "minHeight": "14px"}),
+                    ], className="modal-body"),
+                    html.Div([
+                        html.Button("Import", id="confirm-import-project-btn",
+                                    className="btn btn-primary btn-sm", n_clicks=0),
+                        html.Button("Cancel", id="cancel-import-project-btn",
+                                    className="btn btn-secondary btn-sm", n_clicks=0),
+                    ], className="modal-footer"),
+                ],
+            ),
+        ],
+    )
+
+
 def create_layout() -> html.Div:
     return html.Div(
         id="app-root",
@@ -476,7 +569,10 @@ def create_layout() -> html.Div:
             dcc.Store(id="add-node-position-store"),
             dcc.Store(id="current-user-store"),
             dcc.Store(id="data-refresh-trigger", data=0),
+            dcc.Store(id="gwexport-pending-store"),
             dcc.Download(id="export-download"),
+            dcc.Download(id="project-export-download"),
+            dcc.Download(id="drawio-export-download"),
             dcc.Store(id="export-png-dummy"),
             # Hidden text input: JS writes graph coords here to trigger the Add Node modal.
             # Must be type="text" (not "hidden") so React attaches its onChange handler
@@ -503,6 +599,9 @@ def create_layout() -> html.Div:
             _create_manage_users_modal(),
             # Agent Tokens modal (settings)
             _create_agent_tokens_modal(),
+            # Project export / import modals
+            _create_export_project_modal(),
+            _create_import_project_modal(),
             # Polling interval: refresh every 5 min (300 s).
             # The graph is rebuilt from scratch on every tick, which is expensive
             # on large maps — imports fire project-switch-trigger immediately so
@@ -554,6 +653,16 @@ def create_layout() -> html.Div:
                                          style={"display": "none"}),
                                 html.Div("Export Graph (PNG)",
                                          id="export-png-menu-item",
+                                         className="hamburger-item",
+                                         n_clicks=0,
+                                         style={"display": "none"}),
+                                html.Div("Export Project (.gwexport)",
+                                         id="export-project-menu-item",
+                                         className="hamburger-item",
+                                         n_clicks=0,
+                                         style={"display": "none"}),
+                                html.Div("Export Map (.drawio)",
+                                         id="export-drawio-menu-item",
                                          className="hamburger-item",
                                          n_clicks=0,
                                          style={"display": "none"}),

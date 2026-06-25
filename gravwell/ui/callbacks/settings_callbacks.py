@@ -183,6 +183,8 @@ def register(app: dash.Dash) -> None:
         Output("export-csv-menu-item", "style"),
         Output("export-xlsx-menu-item", "style"),
         Output("export-png-menu-item", "style"),
+        Output("export-project-menu-item", "style"),
+        Output("export-drawio-menu-item", "style"),
         Input("current-user-store", "data"),
     )
     def update_hamburger_content(user_data):
@@ -193,7 +195,7 @@ def register(app: dash.Dash) -> None:
         label = f"Signed in as {username}" if username else ""
         admin_style  = {"display": "block"} if is_admin else {"display": "none"}
         export_style = {"display": "block"} if (is_admin or "export" in perms) else {"display": "none"}
-        return label, admin_style, admin_style, admin_style, export_style, export_style, export_style
+        return label, admin_style, admin_style, admin_style, export_style, export_style, export_style, export_style, export_style
 
     # ── Hamburger toggle (open / close) + backdrop ────────────────────────────
 

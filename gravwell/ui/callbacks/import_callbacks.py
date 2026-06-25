@@ -241,6 +241,8 @@ def register(app: dash.Dash) -> None:
         Output("ingest-progress-bar", "style", allow_duplicate=True),
         Output("ingest-progress-bar", "children", allow_duplicate=True),
         Output("import-path-section", "style", allow_duplicate=True),
+        Output("gwexport-pending-store", "data", allow_duplicate=True),
+        Output("import-project-modal-overlay", "style", allow_duplicate=True),
         Input("import-path-btn", "n_clicks"),
         State("import-path-input", "value"),
         prevent_initial_call=True,
@@ -248,9 +250,9 @@ def register(app: dash.Dash) -> None:
     def handle_path_import(n_clicks, filepath):
         """Import a file directly from a server-side path (no base64 overhead)."""
         if not current_user.is_authenticated or not current_user.can("import"):
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
         if not n_clicks or not filepath:
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
         filepath = filepath.strip()
         if not os.path.isfile(filepath):
@@ -259,7 +261,29 @@ def register(app: dash.Dash) -> None:
                     f"File not found: {filepath}",
                     style={"fontSize": "12px", "color": "#E74C3C"},
                 ),
-                no_update, no_update, no_update, no_update,
+                no_update, no_update, no_update, no_update, no_update, no_update,
+            )
+
+        # Route .gwexport files to the passphrase modal instead of the parser
+        if filepath.lower().endswith(".gwexport"):
+            display_name = os.path.basename(filepath)
+            try:
+                with open(filepath, "rb") as fh:
+                    raw = fh.read()
+                b64 = base64.b64encode(raw).decode("ascii")
+            except OSError as e:
+                return (
+                    html.Div(f"Cannot read file: {e}",
+                             style={"fontSize": "12px", "color": "#E74C3C"}),
+                    no_update, no_update, no_update, no_update, no_update, no_update,
+                )
+            return (
+                html.Div(f"Ready to import {display_name} — enter passphrase.",
+                         style={"fontSize": "12px", "color": "#5DADE2"}),
+                no_update, no_update, no_update,
+                no_update,
+                {"contents_b64": b64, "filename": display_name},
+                {"display": "flex"},
             )
 
         db_path = current_app.config["GRAVWELL_DB_PATH"]
@@ -284,6 +308,8 @@ def register(app: dash.Dash) -> None:
             bar_style,
             bar_children,
             {"display": "none"},  # hide path section once import starts
+            no_update,
+            no_update,
         )
 
     @app.callback(
@@ -293,19 +319,52 @@ def register(app: dash.Dash) -> None:
         Output("ingest-progress-bar", "children"),
         Output("import-path-input", "value", allow_duplicate=True),
         Output("import-path-section", "style", allow_duplicate=True),
+        Output("gwexport-pending-store", "data"),
+        Output("import-project-modal-overlay", "style"),
         Input("file-upload", "contents"),
         State("file-upload", "filename"),
         prevent_initial_call=True,
     )
     def handle_upload(contents_list, filenames):
         if not current_user.is_authenticated or not current_user.can("import"):
-            return no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
         if not contents_list:
-            return no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
-        # Split into small (browser-safe) and large files.
+        # Separate .gwexport bundles from regular scan files
+        gwexports = [
+            (c, f) for c, f in zip(contents_list, filenames)
+            if f.lower().endswith(".gwexport")
+        ]
+        regular = [
+            (c, f) for c, f in zip(contents_list, filenames)
+            if not f.lower().endswith(".gwexport")
+        ]
+
+        gwexport_store  = no_update
+        gwexport_modal  = no_update
+        if gwexports:
+            contents, filename = gwexports[0]
+            _, b64 = contents.split(",", 1)
+            gwexport_store = {"contents_b64": b64, "filename": filename}
+            gwexport_modal = {"display": "flex"}
+
+        if not regular:
+            # Only .gwexport files dropped — nothing to ingest normally
+            msg = html.Div(
+                f"Ready to import {gwexports[0][1]} — enter passphrase.",
+                style={"fontSize": "12px", "color": "#5DADE2"},
+            ) if gwexports else no_update
+            return (
+                msg,
+                no_update, no_update, no_update,
+                no_update, no_update,
+                gwexport_store, gwexport_modal,
+            )
+
+        # Split regular files into small (browser-safe) and large
         small, large = [], []
-        for contents, filename in zip(contents_list, filenames):
+        for contents, filename in regular:
             if len(contents) > _LARGE_FILE_B64_CHARS:
                 large.append(filename)
             else:
@@ -314,10 +373,10 @@ def register(app: dash.Dash) -> None:
         _show_path = {"display": "block", "marginTop": "4px"}
 
         if large:
-            # Can't safely process large files via base64 in-browser.
-            # Reveal the path-import field so the user can paste the full path.
             names = ", ".join(large)
-            size_mb = len(contents_list[filenames.index(large[0])]) // 1_400_000
+            size_mb = len(
+                next(c for c, f in regular if f == large[0])
+            ) // 1_400_000
             msg = html.Div([
                 html.Div(
                     f"'{names}' is too large for browser upload (~{size_mb} MB).",
@@ -331,9 +390,11 @@ def register(app: dash.Dash) -> None:
                 ),
             ])
             if not small:
-                return msg, no_update, no_update, no_update, large[0], _show_path
-
-            # Also process any small files that came along.
+                return (
+                    msg, no_update, no_update, no_update,
+                    large[0], _show_path,
+                    gwexport_store, gwexport_modal,
+                )
 
         db_path = current_app.config["GRAVWELL_DB_PATH"]
         n = len(small)
@@ -363,6 +424,8 @@ def register(app: dash.Dash) -> None:
             bar_children,
             no_update,
             section_style,
+            gwexport_store,
+            gwexport_modal,
         )
 
     @app.callback(
@@ -372,6 +435,7 @@ def register(app: dash.Dash) -> None:
         Output("upload-status", "children",       allow_duplicate=True),
         Output("scan-file-list", "children",      allow_duplicate=True),
         Output("data-refresh-trigger", "data",    allow_duplicate=True),
+        Output("import-path-section", "style",    allow_duplicate=True),
         Input("ingest-progress-interval", "n_intervals"),
         State("data-refresh-trigger", "data"),
         prevent_initial_call=True,
@@ -381,7 +445,7 @@ def register(app: dash.Dash) -> None:
 
         if not snap["finished"]:
             bar_style, bar_children = _render_bar(snap)
-            return bar_style, bar_children, False, no_update, no_update, no_update
+            return bar_style, bar_children, False, no_update, no_update, no_update, no_update
 
         # Ingestion complete — hide bar, stop interval, show results, refresh tables
         db_path = snap["db_path"]
@@ -392,6 +456,7 @@ def register(app: dash.Dash) -> None:
             _render_final(snap["messages"]),
             _build_scan_file_list(db_path),
             (refresh_counter or 0) + 1,   # signal bottom tabs to reload
+            {"display": "block", "marginTop": "4px"},  # restore path section
         )
 
     @app.callback(

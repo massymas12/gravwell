@@ -94,12 +94,16 @@ def create_sidebar() -> html.Div:
                     html.A("browse files"),
                 ]),
                 multiple=True,
-                max_size=52_428_800,   # 50 MB — larger files rejected at JS level
+                max_size=52_428_800,   # 50 MB — defence-in-depth alongside _LARGE_FILE_JS
                 className="upload-area",
             ),
             html.Div(
+                "Large files: use Path Import below",
+                style={"fontSize": "10px", "color": "#555", "marginTop": "2px"},
+            ),
+            html.Div(
                 id="import-path-section",
-                style={"display": "none"},
+                style={"display": "block", "marginTop": "4px"},
                 children=[
                     html.Div([
                         dcc.Input(

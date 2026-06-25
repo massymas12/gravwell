@@ -191,6 +191,9 @@ def export_drawio(db_path: str) -> str:
     )
 
     with get_session(db_path) as session:
+        from gravwell.models.orm import HostRoleOverrideORM
+        import json as _json
+
         hosts = {h.ip: h for h in session.query(HostORM).all()}
 
         svcs_by_host: dict[int, list] = {}
@@ -214,6 +217,13 @@ def export_drawio(db_path: str) -> str:
             r.subnet_cidr: r.label or ""
             for r in session.query(SubnetLabelORM).all()
         }
+
+        role_overrides: dict[str, list[str]] = {}
+        for r in session.query(HostRoleOverrideORM).all():
+            try:
+                role_overrides[r.host_ip] = _json.loads(r.roles_json or "[]")
+            except Exception:
+                pass
 
     # ── Subnet assignment ──────────────────────────────────────────────────
     ip_to_subnet: dict[str, str] = {}
@@ -431,6 +441,80 @@ def export_drawio(db_path: str) -> str:
             "edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#0050EF;"
             "strokeWidth=2;fontColor=#0050EF;fontSize=9;",
         )
+
+    # Inter-subnet edges — same chain/hub logic as the Cytoscape graph builder
+    # Replicates builder._node_role to determine each subnet's hub node.
+    _APPLIANCE_PORTS = {515, 9100, 9101, 9102, 5060, 5061, 1720}
+
+    def _host_role(ip: str) -> str:
+        overridden = role_overrides.get(ip, [])
+        if "router"  in overridden: return "router"
+        if "gateway" in overridden: return "gateway"
+        h = hosts.get(ip)
+        if not h: return "host"
+        if (h.os_family or "").strip() == "Network":
+            svc_ports = {s.port for s in svcs_by_host.get(h.id, []) if s.state == "open"}
+            if not (svc_ports & _APPLIANCE_PORTS):
+                return "router"
+        try:
+            if int(h.ip.split(".")[-1]) in (1, 254):
+                return "gateway"
+        except (ValueError, IndexError):
+            pass
+        return "host"
+
+    subnet_hub: dict[str, str] = {}
+    for net, ips in subnet_ips.items():
+        router  = next((ip for ip in ips if _host_role(ip) == "router"),  None)
+        gateway = next((ip for ip in ips if _host_role(ip) == "gateway"), None)
+        hub = router or gateway
+        if hub:
+            subnet_hub[net] = hub
+        elif len(ips) > 1:
+            subnet_hub[net] = f"vsw_{net}"
+        else:
+            subnet_hub[net] = ips[0]
+
+    def _hub_cell(net: str) -> str:
+        hub = subnet_hub.get(net, "")
+        # vsw nodes aren't drawn as host cells — use the swimlane container instead
+        return f"sub_{_sid(net)}" if hub.startswith("vsw_") else f"h_{_sid(hub)}"
+
+    def _net16(cidr: str) -> str:
+        try:
+            n = ipaddress.ip_network(cidr, strict=False)
+            return str(ipaddress.ip_network(f"{n.network_address}/16", strict=False))
+        except ValueError:
+            return "unknown"
+
+    by_16: dict[str, list[str]] = {}
+    for net in subnet_ips:
+        by_16.setdefault(_net16(net), []).append(net)
+
+    inter_seen: set[tuple] = set()
+    for _n16, nets_in_16 in by_16.items():
+        try:
+            nets_in_16.sort(
+                key=lambda s: int(ipaddress.ip_network(s, strict=False).network_address)
+            )
+        except Exception:
+            pass
+        for i in range(len(nets_in_16) - 1):
+            s1, s2 = nets_in_16[i], nets_in_16[i + 1]
+            h1, h2 = subnet_hub.get(s1), subnet_hub.get(s2)
+            if not h1 or not h2 or h1 == h2:
+                continue
+            if h1.startswith("vsw_") and h2.startswith("vsw_"):
+                continue  # no evidence of routing between these subnets
+            key = tuple(sorted([h1, h2]))
+            if key in inter_seen:
+                continue
+            inter_seen.add(key)
+            _edge(
+                _hub_cell(s1), _hub_cell(s2), "",
+                "edgeStyle=orthogonalEdgeStyle;strokeColor=#F39C12;"
+                "strokeWidth=2;opacity=80;",
+            )
 
     # Legend (right of all containers, aligned with top row)
     if containers:

@@ -1381,33 +1381,25 @@ def get_cytoscape_elements(
                 "classes": "multi-ip-link",
             })
 
-    # 8. Inter-subnet edges: chain topology within each /16
-    # Subnets are sorted by CIDR address and each connected to the next one —
-    # O(n) edges instead of O(n²) full-mesh.  Combined with the /16-grouped
-    # grid layout this keeps inter-subnet lines short and local to their band.
-    # Skip pairs where *both* hubs are virtual switches — no evidence of routing.
+    # 8. Inter-subnet edges: only between subnet hubs whose subnets are bridged
+    #    by a genuine multi-homed router / L3 switch (same _is_genuine_bridge
+    #    test used for floating bridge nodes).  This replaces the old /16 chain
+    #    which produced false edges between unrelated subnets.
     seen_inter: set[tuple] = set()
-    by_16: dict[str, list[str]] = {}
-    for subnet in subnet_ips:
-        by_16.setdefault(_subnet_net16(subnet), []).append(subnet)
-
-    for _n16, subnets_in_16 in by_16.items():
-        # Sort by network address so the chain follows numerical IP order
-        subnets_in_16.sort(
-            key=lambda s: ipaddress.ip_network(s, strict=False).network_address
-            if s != "unknown" else 0
-        )
-        for i in range(len(subnets_in_16) - 1):
-            s1 = subnets_in_16[i]
-            s2 = subnets_in_16[i + 1]
-            h1 = subnet_hub.get(s1)
-            h2 = subnet_hub.get(s2)
-            if not h1 or not h2 or h1 == h2:
-                continue
-            if h1.startswith("vsw_") and h2.startswith("vsw_"):
-                continue
-            key = tuple(sorted([h1, h2]))
-            if key not in seen_inter:
+    for node_id in multi_subnet_nodes:
+        if not _is_genuine_bridge(G.nodes[node_id]):
+            continue
+        bridged_nets = list(node_subnets[node_id])
+        for i in range(len(bridged_nets)):
+            for j in range(i + 1, len(bridged_nets)):
+                s1, s2 = bridged_nets[i], bridged_nets[j]
+                h1 = subnet_hub.get(s1)
+                h2 = subnet_hub.get(s2)
+                if not h1 or not h2 or h1 == h2:
+                    continue
+                key = tuple(sorted([h1, h2]))
+                if key in seen_inter:
+                    continue
                 seen_inter.add(key)
                 id_src, id_dst = sorted([h1, h2])
                 edge_id = f"inter_{id_src}_{id_dst}"

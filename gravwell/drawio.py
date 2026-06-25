@@ -17,15 +17,21 @@ import math
 import xml.etree.ElementTree as ET
 
 # ── Layout constants (all in draw.io pixels) ─────────────────────────────────
-_NODE_W      = 160   # host node width
-_NODE_H      = 72    # host node height
-_GW_SIZE     = 90    # network-device rhombus (square bounding box)
+_NODE_W      = 140   # host node width
+_NODE_H      = 65    # host node height
+_GW_SIZE     = 80    # network-device rhombus (square bounding box)
 _SWIM_TITLE  = 30    # swimlane header bar height
-_PAD         = 24    # padding inside container around child nodes
+_PAD         = 28    # padding inside container around child nodes
 _CANVAS_PAD  = 80    # canvas border offset
-_GRID_W      = _NODE_W + 20   # auto-grid column stride
+_GRID_W      = _NODE_W + 24   # auto-grid column stride
 _GRID_H      = _NODE_H + 20   # auto-grid row stride
 _GRID_COLS   = 4              # columns when auto-placing un-positioned nodes
+
+# Cytoscape host nodes are 32×32 px circles.  The cose-bilkent layout spaces
+# them ~45 px apart centre-to-centre.  draw.io nodes are 140 px wide, so we
+# need to scale saved Cytoscape coordinates up so nodes don't overlap.
+# 140 / 32 ≈ 4.4 — use 4.5 to leave a comfortable gap between nodes.
+_POSITION_SCALE = 4.5
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -231,7 +237,10 @@ def export_drawio(db_path: str) -> str:
         min_x, min_y = 0.0, 0.0
 
     def _canvas(cx: float, cy: float) -> tuple[float, float]:
-        return round(cx - min_x + _CANVAS_PAD), round(cy - min_y + _CANVAS_PAD)
+        return (
+            round((cx - min_x) * _POSITION_SCALE + _CANVAS_PAD),
+            round((cy - min_y) * _POSITION_SCALE + _CANVAS_PAD),
+        )
 
     # Absolute draw.io positions for positioned hosts
     abs_pos: dict[str, tuple[float, float]] = {}

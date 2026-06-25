@@ -191,7 +191,7 @@ def export_drawio(db_path: str) -> str:
     )
 
     with get_session(db_path) as session:
-        from gravwell.models.orm import HostRoleOverrideORM
+        from gravwell.models.orm import HostRoleOverrideORM, HostVlanORM
         import json as _json
 
         hosts = {h.ip: h for h in session.query(HostORM).all()}
@@ -224,6 +224,8 @@ def export_drawio(db_path: str) -> str:
                 role_overrides[r.host_ip] = _json.loads(r.roles_json or "[]")
             except Exception:
                 pass
+
+        host_vlans = list(session.query(HostVlanORM).all())
 
     # ── Subnet assignment ──────────────────────────────────────────────────
     ip_to_subnet: dict[str, str] = {}
@@ -442,79 +444,48 @@ def export_drawio(db_path: str) -> str:
             "strokeWidth=2;fontColor=#0050EF;fontSize=9;",
         )
 
-    # Inter-subnet edges — same chain/hub logic as the Cytoscape graph builder
-    # Replicates builder._node_role to determine each subnet's hub node.
-    _APPLIANCE_PORTS = {515, 9100, 9101, 9102, 5060, 5061, 1720}
+    # Inter-VLAN edges — drawn only when switch FDB data exists (HostVlanORM).
+    # For each (switch, VLAN) that spans multiple subnets, draw one edge between
+    # each pair of involved subnet containers/hubs, labelled "VLAN N".
+    # This is real discovery data, not a routing-table guess.
+    if host_vlans:
+        # switch+vlan → set of host IPs seen on that VLAN
+        vlan_hosts: dict[tuple, set[str]] = {}
+        for hv in host_vlans:
+            if hv.host_ip and hv.host_ip in hosts:
+                vlan_hosts.setdefault((hv.switch_ip, hv.vlan_id), set()).add(hv.host_ip)
 
-    def _host_role(ip: str) -> str:
-        overridden = role_overrides.get(ip, [])
-        if "router"  in overridden: return "router"
-        if "gateway" in overridden: return "gateway"
-        h = hosts.get(ip)
-        if not h: return "host"
-        if (h.os_family or "").strip() == "Network":
-            svc_ports = {s.port for s in svcs_by_host.get(h.id, []) if s.state == "open"}
-            if not (svc_ports & _APPLIANCE_PORTS):
-                return "router"
-        try:
-            if int(h.ip.split(".")[-1]) in (1, 254):
-                return "gateway"
-        except (ValueError, IndexError):
-            pass
-        return "host"
-
-    subnet_hub: dict[str, str] = {}
-    for net, ips in subnet_ips.items():
-        router  = next((ip for ip in ips if _host_role(ip) == "router"),  None)
-        gateway = next((ip for ip in ips if _host_role(ip) == "gateway"), None)
-        hub = router or gateway
-        if hub:
-            subnet_hub[net] = hub
-        elif len(ips) > 1:
-            subnet_hub[net] = f"vsw_{net}"
-        else:
-            subnet_hub[net] = ips[0]
-
-    def _hub_cell(net: str) -> str:
-        hub = subnet_hub.get(net, "")
-        # vsw nodes aren't drawn as host cells — use the swimlane container instead
-        return f"sub_{_sid(net)}" if hub.startswith("vsw_") else f"h_{_sid(hub)}"
-
-    def _net16(cidr: str) -> str:
-        try:
-            n = ipaddress.ip_network(cidr, strict=False)
-            return str(ipaddress.ip_network(f"{n.network_address}/16", strict=False))
-        except ValueError:
-            return "unknown"
-
-    by_16: dict[str, list[str]] = {}
-    for net in subnet_ips:
-        by_16.setdefault(_net16(net), []).append(net)
-
-    inter_seen: set[tuple] = set()
-    for _n16, nets_in_16 in by_16.items():
-        try:
-            nets_in_16.sort(
-                key=lambda s: int(ipaddress.ip_network(s, strict=False).network_address)
-            )
-        except Exception:
-            pass
-        for i in range(len(nets_in_16) - 1):
-            s1, s2 = nets_in_16[i], nets_in_16[i + 1]
-            h1, h2 = subnet_hub.get(s1), subnet_hub.get(s2)
-            if not h1 or not h2 or h1 == h2:
+        vlan_seen: set[frozenset] = set()
+        for (switch_ip, vlan_id), member_ips in vlan_hosts.items():
+            # Collect the distinct subnets covered by this VLAN
+            nets_in_vlan = {ip_to_subnet[ip] for ip in member_ips if ip in ip_to_subnet}
+            nets_in_vlan = [n for n in nets_in_vlan if n in containers]
+            if len(nets_in_vlan) < 2:
                 continue
-            if h1.startswith("vsw_") and h2.startswith("vsw_"):
-                continue  # no evidence of routing between these subnets
-            key = tuple(sorted([h1, h2]))
-            if key in inter_seen:
-                continue
-            inter_seen.add(key)
-            _edge(
-                _hub_cell(s1), _hub_cell(s2), "",
-                "edgeStyle=orthogonalEdgeStyle;strokeColor=#F39C12;"
-                "strokeWidth=2;opacity=80;",
+            # For VLANs spanning many subnets, fan out from the switch if it's a
+            # known host; otherwise draw pairwise edges between subnet containers.
+            switch_cell = f"h_{_sid(switch_ip)}" if switch_ip in hosts else None
+            vlan_label = _hesc(f"VLAN {vlan_id}")
+            vlan_style = (
+                "edgeStyle=orthogonalEdgeStyle;strokeColor=#9B59B6;"
+                "strokeWidth=2;dashed=1;fontColor=#9B59B6;fontSize=9;"
             )
+            for net in sorted(nets_in_vlan):
+                target = f"sub_{_sid(net)}"
+                if switch_cell:
+                    key = frozenset([switch_cell, target, str(vlan_id)])
+                    if key not in vlan_seen:
+                        vlan_seen.add(key)
+                        _edge(switch_cell, target, vlan_label, vlan_style)
+                else:
+                    # No switch node — connect the first subnet to this one
+                    first = f"sub_{_sid(sorted(nets_in_vlan)[0])}"
+                    if first == target:
+                        continue
+                    key = frozenset([first, target, str(vlan_id)])
+                    if key not in vlan_seen:
+                        vlan_seen.add(key)
+                        _edge(first, target, vlan_label, vlan_style)
 
     # Legend (right of all containers, aligned with top row)
     if containers:

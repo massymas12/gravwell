@@ -17,21 +17,17 @@ import math
 import xml.etree.ElementTree as ET
 
 # ── Layout constants (all in draw.io pixels) ─────────────────────────────────
-_NODE_W      = 140   # host node width
-_NODE_H      = 65    # host node height
-_GW_SIZE     = 80    # network-device rhombus (square bounding box)
-_SWIM_TITLE  = 30    # swimlane header bar height
-_PAD         = 28    # padding inside container around child nodes
-_CANVAS_PAD  = 80    # canvas border offset
-_GRID_W      = _NODE_W + 24   # auto-grid column stride
-_GRID_H      = _NODE_H + 20   # auto-grid row stride
-_GRID_COLS   = 4              # columns when auto-placing un-positioned nodes
-
-# Cytoscape host nodes are 32×32 px circles.  The cose-bilkent layout spaces
-# them ~45 px apart centre-to-centre.  draw.io nodes are 140 px wide, so we
-# need to scale saved Cytoscape coordinates up so nodes don't overlap.
-# 140 / 32 ≈ 4.4 — use 4.5 to leave a comfortable gap between nodes.
-_POSITION_SCALE = 4.5
+_NODE_W     = 140   # host node width
+_NODE_H     = 65    # host node height
+_GW_SIZE    = 80    # network-device rhombus (square bounding box)
+_SWIM_TITLE = 30    # swimlane header bar height
+_PAD        = 28    # padding inside container around child nodes
+_CANVAS_PAD = 80    # canvas border offset
+_GRID_W     = _NODE_W + 24   # column stride within a container
+_GRID_H     = _NODE_H + 20   # row stride within a container
+_GRID_COLS  = 6              # max columns per subnet container
+_GAP_X      = 40             # horizontal gap between containers
+_GAP_Y      = 60             # vertical gap between rows of containers
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -225,76 +221,91 @@ def export_drawio(db_path: str) -> str:
         ip_to_subnet[ip] = net
         subnet_ips.setdefault(net, []).append(ip)
 
-    # ── Coordinate transform (Cytoscape → draw.io canvas) ─────────────────
-    # Only host-IP keys matter for positioning; vsw_* are used purely as
-    # fallback hub-centre hints and are not placed as nodes.
-    host_saved = {ip: pos for ip, pos in saved_pos.items() if ip in hosts}
+    # ── Two-level grid layout ─────────────────────────────────────────────
+    # Level 1: subnets are sorted by their Cytoscape centre (Y then X) so the
+    #          relative topology is preserved, then arranged in draw.io rows.
+    # Level 2: nodes within each subnet are placed in a clean grid — Cytoscape
+    #          positions are NOT used for individual nodes (they would overlap
+    #          because Cytoscape nodes are 32 px circles, draw.io nodes are
+    #          140 px wide rectangles).
 
-    if host_saved:
-        min_x = min(p[0] for p in host_saved.values())
-        min_y = min(p[1] for p in host_saved.values())
-    else:
-        min_x, min_y = 0.0, 0.0
+    def _grid_dims(n: int) -> tuple[int, int]:
+        cols = max(1, min(_GRID_COLS, math.ceil(math.sqrt(n))))
+        return cols, math.ceil(n / cols)
 
-    def _canvas(cx: float, cy: float) -> tuple[float, float]:
+    def _container_wh(n: int) -> tuple[float, float]:
+        cols, rows = _grid_dims(n)
         return (
-            round((cx - min_x) * _POSITION_SCALE + _CANVAS_PAD),
-            round((cy - min_y) * _POSITION_SCALE + _CANVAS_PAD),
+            cols * _GRID_W + 2 * _PAD,
+            rows * _GRID_H + 2 * _PAD + _SWIM_TITLE,
         )
 
-    # Absolute draw.io positions for positioned hosts
-    abs_pos: dict[str, tuple[float, float]] = {}
-    for ip, (cx, cy) in host_saved.items():
-        abs_pos[ip] = _canvas(cx, cy)
-
-    # For subnets whose hub is a virtual switch, estimate the subnet centre
-    # from the vsw position so un-positioned spokes auto-grid around it.
-    vsw_canvas: dict[str, tuple[float, float]] = {}
-    for net in subnet_ips:
-        vsw_key = f"vsw_{net}"   # matches what NodePositionORM stores
+    def _subnet_cyto_center(net: str) -> tuple[float, float]:
+        vsw_key = f"vsw_{net}"
         if vsw_key in saved_pos:
-            vsw_canvas[net] = _canvas(*saved_pos[vsw_key])
+            return saved_pos[vsw_key]
+        pts = [saved_pos[ip] for ip in subnet_ips[net] if ip in saved_pos]
+        if pts:
+            return (
+                sum(p[0] for p in pts) / len(pts),
+                sum(p[1] for p in pts) / len(pts),
+            )
+        return 0.0, 0.0
 
-    # Auto-place hosts that have no saved position
-    right_edge = (
-        max(p[0] for p in abs_pos.values()) + _NODE_W + 100
-        if abs_pos else _CANVAS_PAD
-    )
-    unpos_groups: dict[str, list[str]] = {}
-    for ip in hosts:
-        if ip not in abs_pos:
-            unpos_groups.setdefault(ip_to_subnet[ip], []).append(ip)
+    cyto_centers = {net: _subnet_cyto_center(net) for net in subnet_ips}
 
-    fallback_y = _CANVAS_PAD
-    for net, ips in sorted(unpos_groups.items()):
-        # Centre the auto-grid on the vsw position if available
-        if net in vsw_canvas:
-            base_x, base_y = vsw_canvas[net]
-            # Offset so the grid is centred around the vsw centre
-            grid_w = _GRID_COLS * _GRID_W
-            base_x = base_x - grid_w // 2
-            base_y = base_y - _GRID_H
-        else:
-            base_x, base_y = right_edge, fallback_y
+    # Band subnets by Cytoscape Y so rows roughly match the Cytoscape layout
+    cy_vals  = [v[1] for v in cyto_centers.values()]
+    cy_min   = min(cy_vals) if cy_vals else 0.0
+    cy_range = max(1.0, (max(cy_vals) if cy_vals else 1.0) - cy_min)
+    n_bands  = max(1, round(math.sqrt(len(subnet_ips))))
+    band_h   = cy_range / n_bands
 
-        for i, ip in enumerate(sorted(ips)):
-            col, row = i % _GRID_COLS, i // _GRID_COLS
-            abs_pos[ip] = (base_x + col * _GRID_W, base_y + row * _GRID_H)
+    def _sort_key(net: str) -> tuple[int, float]:
+        scx, scy = cyto_centers[net]
+        band = int((scy - cy_min) / band_h) if cy_range > 0 else 0
+        return band, scx
 
-        rows = math.ceil(len(ips) / _GRID_COLS)
-        fallback_y += rows * _GRID_H + 60
+    sorted_nets = sorted(subnet_ips.keys(), key=_sort_key)
 
-    # ── Container bounding boxes ───────────────────────────────────────────
+    rows_of_nets: list[list[str]] = []
+    prev_band: int | None = None
+    for net in sorted_nets:
+        _, scy = cyto_centers[net]
+        band = int((scy - cy_min) / band_h) if cy_range > 0 else 0
+        if band != prev_band:
+            rows_of_nets.append([])
+            prev_band = band
+        rows_of_nets[-1].append(net)
+
+    if not rows_of_nets:
+        rows_of_nets = [sorted_nets]
+
+    # Place containers in rows; grid-lay nodes within each container
     containers: dict[str, tuple[float, float, float, float]] = {}
-    for net, ips in subnet_ips.items():
-        pts = [abs_pos[ip] for ip in ips if ip in abs_pos]
-        if not pts:
-            continue
-        bx  = min(p[0] for p in pts) - _PAD
-        by  = min(p[1] for p in pts) - _SWIM_TITLE - _PAD
-        bx2 = max(p[0] for p in pts) + _NODE_W + _PAD
-        by2 = max(p[1] for p in pts) + _NODE_H + _PAD
-        containers[net] = (bx, by, bx2 - bx, by2 - by)
+    abs_pos:    dict[str, tuple[float, float]]               = {}
+
+    cur_y = float(_CANVAS_PAD)
+    for row_nets in rows_of_nets:
+        cur_x = float(_CANVAS_PAD)
+        row_h = 0.0
+        for net in row_nets:
+            ips_sorted = sorted(subnet_ips[net])
+            cw, ch = _container_wh(len(ips_sorted))
+            containers[net] = (cur_x, cur_y, cw, ch)
+
+            cols, _ = _grid_dims(len(ips_sorted))
+            for j, ip in enumerate(ips_sorted):
+                col   = j % cols
+                row_j = j // cols
+                abs_pos[ip] = (
+                    cur_x + _PAD + col * _GRID_W,
+                    cur_y + _SWIM_TITLE + _PAD + row_j * _GRID_H,
+                )
+
+            cur_x += cw + _GAP_X
+            row_h  = max(row_h, ch)
+        cur_y += row_h + _GAP_Y
 
     # ── Build XML ──────────────────────────────────────────────────────────
     model = ET.Element("mxGraphModel", {
@@ -402,10 +413,10 @@ def export_drawio(db_path: str) -> str:
             "strokeWidth=2;fontColor=#0050EF;fontSize=9;",
         )
 
-    # Legend (bottom-right of bounding box + 40px gap)
-    if abs_pos:
-        leg_x = max(p[0] for p in abs_pos.values()) + _NODE_W + 40
-        leg_y = min(p[1] for p in abs_pos.values())
+    # Legend (right of all containers, aligned with top row)
+    if containers:
+        leg_x = max(x + w for x, y, w, h in containers.values()) + 40
+        leg_y = min(y for x, y, w, h in containers.values())
     else:
         leg_x, leg_y = _CANVAS_PAD, _CANVAS_PAD
     _legend_xml(xml_root, leg_x, leg_y)

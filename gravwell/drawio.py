@@ -312,111 +312,126 @@ def export_drawio(db_path: str) -> str:
             if not subnet_ips[primary]:
                 del subnet_ips[primary]
 
-    # ── Position-preserving layout ────────────────────────────────────────
-    # Use saved Cytoscape positions directly, scaled just enough so that
-    # draw.io nodes (140×65 px) don't overlap each other.
-    #
-    # Scale is computed from the minimum centre-to-centre distance between
-    # any two nodes in the same subnet.  Target: node_w + 20 px gap.
-    # If no positions are saved we fall back to an auto-grid.
-
-    _TARGET_SPACING = float(_NODE_W + 20)   # 160 px minimum centre-to-centre
+    # ── Topology-preserving layout ────────────────────────────────────────
+    # Cytoscape uses radial/ring layouts for individual nodes — those look
+    # terrible as rectangles.  Instead:
+    #   • SUBNET CONTAINERS are placed at positions derived from each subnet's
+    #     saved vsw/hub Cytoscape coordinate, scaled proportionally so no two
+    #     containers overlap.  This preserves the macro topology from Gravwell.
+    #   • INDIVIDUAL NODES inside each container are placed in a clean grid.
 
     host_saved = {ip: saved_pos[ip] for ip in hosts if ip in saved_pos}
 
-    # Find minimum intra-subnet spacing in Cytoscape coordinates
-    min_cyto_dist = float("inf")
-    for net, ips in subnet_ips.items():
-        pts = [host_saved[ip] for ip in ips if ip in host_saved]
-        for i in range(len(pts)):
-            for j in range(i + 1, len(pts)):
-                dx, dy = pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]
-                d = math.sqrt(dx * dx + dy * dy)
-                if 0 < d < min_cyto_dist:
-                    min_cyto_dist = d
+    def _grid_dims(n: int) -> tuple[int, int]:
+        cols = max(1, min(_GRID_COLS, math.ceil(math.sqrt(n))))
+        return cols, math.ceil(n / cols)
 
-    if math.isfinite(min_cyto_dist) and min_cyto_dist < _TARGET_SPACING:
-        _SCALE = min(5.0, _TARGET_SPACING / min_cyto_dist)
-    else:
-        _SCALE = 1.0
+    def _container_wh(n: int) -> tuple[float, float]:
+        cols, rows = _grid_dims(n)
+        return (cols * _GRID_W + 2 * _PAD,
+                rows * _GRID_H + 2 * _PAD + _SWIM_TITLE)
 
-    # Canvas origin: translate so top-left saved node is at _CANVAS_PAD
-    all_saved = list(host_saved.values())
-    # Include vsw positions so containers don't get clipped
-    for net in subnet_ips:
+    def _subnet_cyto_center(net: str) -> tuple[float, float]:
         vsw_key = f"vsw_{net}"
         if vsw_key in saved_pos:
-            all_saved.append(saved_pos[vsw_key])
+            return saved_pos[vsw_key]
+        pts = [host_saved[ip] for ip in subnet_ips[net] if ip in host_saved]
+        if pts:
+            return (sum(p[0] for p in pts) / len(pts),
+                    sum(p[1] for p in pts) / len(pts))
+        return 0.0, 0.0
 
-    if all_saved:
-        origin_x = min(p[0] for p in all_saved)
-        origin_y = min(p[1] for p in all_saved)
-    else:
-        origin_x, origin_y = 0.0, 0.0
+    cyto_centers   = {net: _subnet_cyto_center(net) for net in subnet_ips}
+    container_sizes = {net: _container_wh(len(subnet_ips[net])) for net in subnet_ips}
 
-    def _canvas(cx: float, cy: float) -> tuple[float, float]:
-        return (
-            round((cx - origin_x) * _SCALE + _CANVAS_PAD),
-            round((cy - origin_y) * _SCALE + _CANVAS_PAD),
-        )
+    # ── Y-band grouping (preserves row structure from Gravwell) ───────────
+    cy_vals  = [v[1] for v in cyto_centers.values()]
+    cy_min   = min(cy_vals) if cy_vals else 0.0
+    cy_range = max(1.0, (max(cy_vals) if cy_vals else 1.0) - cy_min)
+    n_bands  = max(1, round(math.sqrt(len(subnet_ips))))
+    band_h   = cy_range / n_bands
 
-    # Absolute draw.io positions for positioned (non-bridge) hosts
-    abs_pos: dict[str, tuple[float, float]] = {}
-    for ip, cyto in host_saved.items():
-        if ip not in bridge_subnets:
-            abs_pos[ip] = _canvas(*cyto)
+    def _band(net: str) -> int:
+        return int((cyto_centers[net][1] - cy_min) / band_h) if cy_range > 0 else 0
 
-    # Auto-place hosts with no saved position, grouped near their subnet centre
-    for net, ips in subnet_ips.items():
-        unpos = [ip for ip in ips if ip not in abs_pos]
-        if not unpos:
+    sorted_nets = sorted(subnet_ips.keys(), key=lambda n: (_band(n), cyto_centers[n][0]))
+
+    rows_of_nets: list[list[str]] = []
+    prev_band: int | None = None
+    for net in sorted_nets:
+        b = _band(net)
+        if b != prev_band:
+            rows_of_nets.append([])
+            prev_band = b
+        rows_of_nets[-1].append(net)
+    if not rows_of_nets:
+        rows_of_nets = [sorted_nets]
+
+    # ── Proportional X placement within each row ──────────────────────────
+    # Find the minimum scale that prevents any two adjacent containers from
+    # overlapping, then apply it to all Cytoscape X positions in that row.
+    row_canvas_xs: list[list[float]] = []
+    for row_nets in rows_of_nets:
+        n = len(row_nets)
+        row_cx  = [cyto_centers[net][0] for net in row_nets]
+        row_cws = [container_sizes[net][0] for net in row_nets]
+
+        if n == 1:
+            row_canvas_xs.append([float(_CANVAS_PAD)])
             continue
 
-        # Subnet centre: vsw saved position OR centroid of positioned nodes
-        vsw_key = f"vsw_{net}"
-        if vsw_key in saved_pos:
-            cx, cy = _canvas(*saved_pos[vsw_key])
-        else:
-            pos_in_net = [abs_pos[ip] for ip in ips if ip in abs_pos]
-            if pos_in_net:
-                cx = sum(p[0] for p in pos_in_net) / len(pos_in_net)
-                cy = sum(p[1] for p in pos_in_net) / len(pos_in_net)
-            else:
-                # Completely unpositioned subnet — place to the right of canvas
-                cx = (max(p[0] for p in abs_pos.values()) + _GRID_W * 3
-                      if abs_pos else float(_CANVAS_PAD))
-                cy = float(_CANVAS_PAD)
+        x_scale = 1.0
+        for i in range(n - 1):
+            gap_needed = row_cws[i] / 2 + row_cws[i + 1] / 2 + _GAP_X
+            cyto_gap   = row_cx[i + 1] - row_cx[i]
+            if cyto_gap > 0:
+                x_scale = max(x_scale, gap_needed / cyto_gap)
 
-        cols = min(_GRID_COLS, len(unpos))
-        grid_w = cols * _GRID_W
-        base_x = cx - grid_w / 2
-        base_y = cy + _GRID_H
-        for j, ip in enumerate(sorted(unpos)):
-            abs_pos[ip] = (base_x + (j % cols) * _GRID_W, base_y + (j // cols) * _GRID_H)
+        origin = row_cx[0]
+        canvas_centers = [_CANVAS_PAD + (cx - origin) * x_scale for cx in row_cx]
+        # container left-edge = center − cw/2
+        row_canvas_xs.append([
+            canvas_centers[i] - row_cws[i] / 2
+            for i in range(n)
+        ])
 
-    # Container bounding boxes derived from actual node positions
+    # ── Packed vertical placement (rows stacked top-to-bottom) ───────────
     containers: dict[str, tuple[float, float, float, float]] = {}
-    for net, ips in subnet_ips.items():
-        pts = [abs_pos[ip] for ip in ips if ip in abs_pos]
-        if not pts:
-            continue
-        bx  = min(p[0] for p in pts) - _PAD
-        by  = min(p[1] for p in pts) - _SWIM_TITLE - _PAD
-        bx2 = max(p[0] for p in pts) + _NODE_W + _PAD
-        by2 = max(p[1] for p in pts) + _NODE_H + _PAD
-        containers[net] = (bx, by, bx2 - bx, by2 - by)
+    abs_pos:    dict[str, tuple[float, float]]               = {}
 
-    # Bridge nodes: use their own saved position (scaled) when available;
-    # otherwise float above the centroid of the subnets they straddle.
-    for bip in bridge_subnets:
-        if bip in host_saved:
-            abs_pos[bip] = _canvas(*host_saved[bip])
-        elif containers:
-            valid = [containers[n] for n in bridge_subnets[bip] if n in containers]
-            if valid:
-                cx = sum(x + w / 2 for x, y, w, h in valid) / len(valid)
-                cy = min(y for x, y, w, h in valid) - _GW_SIZE - _BRIDGE_GAP
-                abs_pos[bip] = (cx - _GW_SIZE / 2, cy)
+    cur_y = float(_CANVAS_PAD)
+    for row_idx, row_nets in enumerate(rows_of_nets):
+        row_h = 0.0
+        for j, net in enumerate(row_nets):
+            cw, ch = container_sizes[net]
+            container_x = row_canvas_xs[row_idx][j]
+            containers[net] = (container_x, cur_y, cw, ch)
+
+            cols, _ = _grid_dims(len(subnet_ips[net]))
+            for k, ip in enumerate(sorted(subnet_ips[net])):
+                abs_pos[ip] = (
+                    container_x + _PAD + (k % cols) * _GRID_W,
+                    cur_y + _SWIM_TITLE + _PAD + (k // cols) * _GRID_H,
+                )
+            row_h = max(row_h, ch)
+        cur_y += row_h + _GAP_Y
+
+    # ── Bridge nodes: float above centroid of connected subnets ───────────
+    if bridge_subnets and containers:
+        top_y = min(y for x, y, w, h in containers.values())
+        bridge_y = top_y - _GW_SIZE - _BRIDGE_GAP
+
+        def _bridge_cx(bip: str) -> float:
+            xs = [containers[n][0] + containers[n][2] / 2
+                  for n in bridge_subnets[bip] if n in containers]
+            return sum(xs) / len(xs) if xs else float(_CANVAS_PAD)
+
+        sorted_bridges = sorted(bridge_subnets, key=_bridge_cx)
+        prev_right = float(_CANVAS_PAD) - _GW_SIZE - 20
+        for bip in sorted_bridges:
+            bx = max(_bridge_cx(bip) - _GW_SIZE / 2, prev_right + 20)
+            abs_pos[bip] = (bx, bridge_y)
+            prev_right = bx + _GW_SIZE
 
     # ── Build XML ──────────────────────────────────────────────────────────
     model = ET.Element("mxGraphModel", {

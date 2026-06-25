@@ -28,6 +28,10 @@ _GRID_H     = _NODE_H + 40   # row stride — extra height for gateway labels be
 _GRID_COLS  = 6              # max columns per subnet container
 _GAP_X      = 40             # horizontal gap between containers
 _GAP_Y      = 60             # vertical gap between rows of containers
+_BRIDGE_GAP = 80             # clearance above first container row for bridge nodes
+
+# Ports that mark appliance-class devices — Network OS but NOT a routing hub
+_APPLIANCE_PORTS = frozenset({515, 9100, 9101, 9102, 5060, 5061, 1720})
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -127,9 +131,15 @@ def _legend_xml(root: ET.Element, x: float, y: float) -> None:
         ("High vuln    (CVSS ≥7)",    "#E65100", "2"),
         ("Medium vuln  (CVSS ≥4)",    "#B8860B", "2"),
     ]
+    connectors = [
+        ("LLDP / physical link",  "#2E7D32"),
+        ("Bridge connection",     "#1ABC9C"),
+        ("Inter-VLAN (SNMP FDB)", "#9B59B6"),
+        ("Custom / manual edge",  "#0050EF"),
+    ]
 
     # Legend container — dark theme
-    lw, lh = 210, 30 + len(items) * 22 + 10 + len(sev) * 22 + 10
+    lw, lh = 210, 30 + len(items) * 22 + 10 + len(sev) * 22 + 10 + len(connectors) * 22 + 10
     box = ET.SubElement(root, "mxCell", {
         "id": "legend_box",
         "value": "<b>Legend</b>",
@@ -177,6 +187,26 @@ def _legend_xml(root: ET.Element, x: float, y: float) -> None:
             "x": "10", "y": str(row_y),
             "width": str(lw - 20), "height": "18", "as": "geometry",
         })
+        row_y += 22
+
+    row_y += 6
+    for label, colour in connectors:
+        c = ET.SubElement(root, "mxCell", {
+            "id": f"leg_conn_{_sid(label)}",
+            "value": label,
+            "style": (
+                f"endArrow=block;endFill=1;html=1;fontSize=10;align=left;"
+                f"strokeColor={colour};fontColor=#ffffff;spacingLeft=6;"
+            ),
+            "edge": "1", "parent": "legend_box",
+            "source": "", "target": "",
+        })
+        geo = ET.SubElement(c, "mxGeometry", {
+            "x": "10", "y": str(row_y),
+            "width": str(lw - 20), "height": "18",
+            "relative": "1", "as": "geometry",
+        })
+        ET.SubElement(geo, "Array", {"as": "points"})
         row_y += 22
 
 
@@ -240,6 +270,47 @@ def export_drawio(db_path: str) -> str:
                 net = "unassigned"
         ip_to_subnet[ip] = net
         subnet_ips.setdefault(net, []).append(ip)
+
+    # ── Bridge detection ──────────────────────────────────────────────────
+    # A genuine bridge is a Network-OS (or router-role-overridden) host with
+    # additional_ips that land in at least one *other* subnet.  These nodes
+    # float outside every container in Cytoscape; replicate that here.
+
+    def _is_genuine_bridge(h) -> bool:
+        if not h.additional_ips:
+            return False
+        of = (h.os_family or "").strip()
+        if of == "Network":
+            svc_ports = {s.port for s in svcs_by_host.get(h.id, []) if s.state == "open"}
+            return not (svc_ports & _APPLIANCE_PORTS)
+        return "router" in role_overrides.get(h.ip, [])
+
+    # bridge_ip → frozenset of subnet CIDRs the bridge straddles
+    bridge_subnets: dict[str, frozenset[str]] = {}
+    for ip, h in hosts.items():
+        if not _is_genuine_bridge(h):
+            continue
+        touched: set[str] = set()
+        for aip in [ip] + h.additional_ips:
+            try:
+                net = str(ipaddress.ip_network(f"{aip}/24", strict=False))
+            except ValueError:
+                continue
+            if net in subnet_ips:
+                touched.add(net)
+        if len(touched) >= 2:
+            bridge_subnets[ip] = frozenset(touched)
+
+    # Remove bridge nodes from subnet containers so they don't get gridded inside
+    for bip, nets in bridge_subnets.items():
+        primary = ip_to_subnet.get(bip)
+        if primary and primary in subnet_ips:
+            try:
+                subnet_ips[primary].remove(bip)
+            except ValueError:
+                pass
+            if not subnet_ips[primary]:
+                del subnet_ips[primary]
 
     # ── Two-level grid layout ─────────────────────────────────────────────
     # Level 1: subnets are sorted by their Cytoscape centre (Y then X) so the
@@ -327,6 +398,28 @@ def export_drawio(db_path: str) -> str:
             row_h  = max(row_h, ch)
         cur_y += row_h + _GAP_Y
 
+    # Place bridge nodes in a row ABOVE the first container row, centred on
+    # the x-midpoint of the subnets they straddle.
+    if bridge_subnets and containers:
+        top_y = min(y for x, y, w, h in containers.values())
+        bridge_y = top_y - _GW_SIZE - _BRIDGE_GAP
+
+        def _bridge_cx(bip: str) -> float:
+            xs = [
+                containers[n][0] + containers[n][2] / 2
+                for n in bridge_subnets[bip]
+                if n in containers
+            ]
+            return sum(xs) / len(xs) if xs else float(_CANVAS_PAD)
+
+        # Sort by centroid x so siblings don't overlap
+        sorted_bridges = sorted(bridge_subnets, key=_bridge_cx)
+        prev_right = float(_CANVAS_PAD) - _GW_SIZE - 20
+        for bip in sorted_bridges:
+            bx = max(_bridge_cx(bip) - _GW_SIZE / 2, prev_right + 20)
+            abs_pos[bip] = (bx, bridge_y)
+            prev_right = bx + _GW_SIZE
+
     # ── Build XML ──────────────────────────────────────────────────────────
     model = ET.Element("mxGraphModel", {
         "dx": "1422", "dy": "762",
@@ -402,7 +495,10 @@ def export_drawio(db_path: str) -> str:
         node_w    = _GW_SIZE if is_gw else _NODE_W
         node_h    = _GW_SIZE if is_gw else _NODE_H
 
-        if net in containers:
+        if ip in bridge_subnets:
+            # Bridge node floats at root level — not inside any subnet container
+            _cell(hid, label, style, "1", ax, ay, node_w, node_h)
+        elif net in containers:
             cx, cy, _, _ = containers[net]
             _cell(
                 hid, label, style, f"sub_{_sid(net)}",
@@ -486,6 +582,19 @@ def export_drawio(db_path: str) -> str:
                     if key not in vlan_seen:
                         vlan_seen.add(key)
                         _edge(first, target, vlan_label, vlan_style)
+
+    # Bridge edges — teal solid lines from bridge node to each subnet it straddles
+    bridge_style = (
+        "edgeStyle=orthogonalEdgeStyle;strokeColor=#1ABC9C;"
+        "strokeWidth=2;fontColor=#1ABC9C;fontSize=9;"
+    )
+    for bip, nets in bridge_subnets.items():
+        if bip not in abs_pos:
+            continue
+        src = f"h_{_sid(bip)}"
+        for net in sorted(nets):
+            if net in containers:
+                _edge(src, f"sub_{_sid(net)}", "", bridge_style)
 
     # Legend (right of all containers, aligned with top row)
     if containers:
